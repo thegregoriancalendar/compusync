@@ -183,26 +183,35 @@ test('one logical window crosses the seam, supports either drag bar, and keeps o
     await expect.poll(async () => (await getState(first)).viewport).toBeNull();
     expect((await getState(second)).viewport).toEqual({ x: 0, y: 0, width: initial.window.rect.width, height: initial.window.rect.height });
 
-    // Exercise the actual DOM drag bar and Pointer Lock gesture. A deterministic
-    // reducer move proves Escape restores the transaction's exact origin even
-    // when desktop automation cannot synthesize reliable locked raw movement.
-    await second.surface.bringToFront();
-    const handle = await second.surface.locator('#drag-handle').boundingBox();
     const escapeOrigin = (await getState(second)).window.rect;
-    await second.surface.mouse.move(handle.x + Math.min(140, handle.width / 2), handle.y + 18);
-    await second.surface.mouse.down();
-    // Hosted macOS automation does not expose Pointer Lock reliably. The DOM
-    // transaction remains covered here; physical retention is in docs/testing.md.
-    if (!hostedMac) await expect.poll(() => second.surface.evaluate(() => document.pointerLockElement?.id)).toBe('drag-handle');
-    await expect.poll(async () => (await getState(second)).drag?.owner).toBe(secondId);
-    const liveDrag = (await getState(second)).drag;
-    await input(second, { type: 'drag-move', id: liveDrag.id, seq: liveDrag.lastSeq + 1, dx: -64, dy: 0 });
-    await expect.poll(async () => (await getState(second)).window.rect.x).toBe(escapeOrigin.x - 64);
-    await second.surface.keyboard.press('Escape');
-    await expect.poll(async () => (await getState(second)).drag).toBeNull();
-    await expect.poll(async () => rectKey((await getState(second)).window.rect)).toBe(rectKey(escapeOrigin));
-    if (!hostedMac) await expect.poll(() => second.surface.evaluate(() => document.pointerLockElement)).toBeNull();
-    await second.surface.mouse.up();
+    if (hostedMac) {
+      // Hosted macOS automation rejects Pointer Lock before a DOM-owned drag
+      // can remain active. Keep cancel/restore coverage through the same
+      // authoritative transaction; physical Pointer Lock is in docs/testing.md.
+      transaction = await beginDrag(second, 'mac_cancel');
+      await moveDrag(second, transaction, -64);
+      await input(second, { type: 'drag-cancel', id: transaction.id });
+      await expect.poll(async () => (await getState(second)).drag).toBeNull();
+      await expect.poll(async () => rectKey((await getState(second)).window.rect)).toBe(rectKey(escapeOrigin));
+    } else {
+      // Exercise the actual DOM drag bar and Pointer Lock gesture. A
+      // deterministic reducer move proves Escape restores the transaction's
+      // exact origin even when raw locked movement cannot be synthesized.
+      await second.surface.bringToFront();
+      const handle = await second.surface.locator('#drag-handle').boundingBox();
+      await second.surface.mouse.move(handle.x + Math.min(140, handle.width / 2), handle.y + 18);
+      await second.surface.mouse.down();
+      await expect.poll(() => second.surface.evaluate(() => document.pointerLockElement?.id)).toBe('drag-handle');
+      await expect.poll(async () => (await getState(second)).drag?.owner).toBe(secondId);
+      const liveDrag = (await getState(second)).drag;
+      await input(second, { type: 'drag-move', id: liveDrag.id, seq: liveDrag.lastSeq + 1, dx: -64, dy: 0 });
+      await expect.poll(async () => (await getState(second)).window.rect.x).toBe(escapeOrigin.x - 64);
+      await second.surface.keyboard.press('Escape');
+      await expect.poll(async () => (await getState(second)).drag).toBeNull();
+      await expect.poll(async () => rectKey((await getState(second)).window.rect)).toBe(rectKey(escapeOrigin));
+      await expect.poll(() => second.surface.evaluate(() => document.pointerLockElement)).toBeNull();
+      await second.surface.mouse.up();
+    }
 
     // Pick up on the peer, reverse to the seam, release, then pick up the same
     // peer bar fragment again and complete the reverse crossing.
