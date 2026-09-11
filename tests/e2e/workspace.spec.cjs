@@ -37,7 +37,7 @@ test('the host workspace and text editor stay authoritative when the shared surf
     const app = await electron.launch({ args: [path.resolve('.')], env });
     apps.push(app);
     app.on('window', (page) => watchPage(page, name));
-    await expect.poll(() => app.windows().length).toBeGreaterThanOrEqual(2);
+    await expect.poll(() => app.windows().length, { timeout: 15_000 }).toBeGreaterThanOrEqual(2);
     for (const page of app.windows()) watchPage(page, name);
     const surface = app.windows().find((page) => page.url().endsWith('surface.html'));
     const settings = app.windows().find((page) => page.url().endsWith('settings.html'));

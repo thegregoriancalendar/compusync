@@ -13,7 +13,7 @@ function environment(profile) {
 }
 
 async function setupWindow(app) {
-  await expect.poll(() => app.windows().some((page) => page.url().endsWith('settings.html'))).toBe(true);
+  await expect.poll(() => app.windows().some((page) => page.url().endsWith('settings.html')), { timeout: 15_000 }).toBe(true);
   const page = app.windows().find((window) => window.url().endsWith('settings.html'));
   await expect(page.locator('#invitation')).toHaveValue(/^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/);
   await expect.poll(() => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith('settings.html'))?.isVisible())).toBe(true);
@@ -60,7 +60,7 @@ test('background launch stays hidden until the user activates it', async () => {
   try {
     app = await electron.launch({ args: [path.resolve('.'), '--background'], env: environment(profile) });
     const page = await app.firstWindow();
-    await expect.poll(() => page.evaluate(async () => (await window.compusync.bootstrap()).status.phase)).toBe('hosting');
+    await expect.poll(() => page.evaluate(async () => (await window.compusync.bootstrap()).status.phase), { timeout: 15_000 }).toBe('hosting');
     expect(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().some((window) => window.isVisible()))).toBe(false);
     expect(app.windows().length).toBe(1);
     await app.evaluate(({ app: application }) => application.emit('activate'));

@@ -13,8 +13,8 @@
     "test:e2e": "playwright test",
     "check": "node scripts/check.cjs",
     "build": "electron-builder --dir",
-    "dist:win": "electron-builder --win portable",
-    "dist:mac": "electron-builder --mac dmg zip",
+    "dist:win": "electron-builder --win portable --publish never",
+    "dist:mac": "electron-builder --mac dmg zip --publish never",
     "demo": "node scripts/demo.cjs"
   },
   "dependencies": {

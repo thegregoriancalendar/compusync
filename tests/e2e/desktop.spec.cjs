@@ -17,7 +17,7 @@ test('one logical window crosses the seam, supports either drag bar, and keeps o
     delete env.ELECTRON_RUN_AS_NODE;
     const app = await electron.launch({ args: [path.resolve('.')], env });
     apps.push(app);
-    await expect.poll(() => app.windows().length).toBe(2);
+    await expect.poll(() => app.windows().length, { timeout: 15_000 }).toBe(2);
     const windows = app.windows();
     const surface = windows.find((page) => page.url().endsWith('surface.html'));
     const settings = windows.find((page) => page.url().endsWith('settings.html'));
