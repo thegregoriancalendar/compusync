@@ -14,10 +14,6 @@ function tab(join) {
   $('join-panel').hidden = !join;
 }
 
-function invitation() {
-  $('invitation').value = details.invitations.find((item) => item.host === $('address').value)?.code || '';
-}
-
 function render(next) {
   details = next;
   const { status } = next;
@@ -29,10 +25,13 @@ function render(next) {
   $('status-description').textContent = status.message || (connected ? 'Your window and cursor are shared live.' : status.role === 'host' ? `${next.name} · Share the invitation below.` : 'Keep CompuSync open on the other laptop.');
   $('hosting').hidden = status.role !== 'host' || status.phase === 'error';
   $('create-host').hidden = !$('hosting').hidden;
-  const chosenAddress = $('address').value;
-  $('address').replaceChildren(...next.invitations.map((item) => new Option(item.host === '127.0.0.1' ? '127.0.0.1 · No network found' : item.host, item.host)));
-  if (next.invitations.some((item) => item.host === chosenAddress)) $('address').value = chosenAddress;
-  invitation();
+  const code = next.invitation?.code || '';
+  $('invitation').value = code;
+  $('copy').disabled = !code;
+  $('new-code').disabled = connected;
+  $('code-status').textContent = connected ? 'Paired. This connection is saved for next time.' : code ? '' : 'Code expired or used. Choose New code to pair again.';
+  $('host-addresses').textContent = next.addresses.map((host) => `${host}:${next.port}`).join(' · ');
+  $('discovery-error').textContent = next.invitation?.discoveryError || '';
   $('edge').value = next.edge;
   $('auto-launch').checked = next.autoLaunch;
   $('auto-launch').disabled = !next.packaged;
@@ -59,9 +58,9 @@ $('join-tab').addEventListener('click', () => tab(true));
 for (const id of ['share-tab', 'join-tab']) $(id).addEventListener('keydown', (event) => {
   if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { const join = id === 'share-tab'; tab(join); $(join ? 'join-tab' : 'share-tab').focus(); }
 });
-$('address').addEventListener('change', invitation);
+$('new-code').addEventListener('click', () => command('new-code'));
 $('copy').addEventListener('click', async () => {
-  if (await command('copy', { host: $('address').value })) {
+  if (await command('copy')) {
     $('copy-status').textContent = 'Copied';
     clearTimeout(copyTimer);
     copyTimer = setTimeout(() => { $('copy-status').textContent = ''; }, 2000);
@@ -69,9 +68,20 @@ $('copy').addEventListener('click', async () => {
 });
 $('join').addEventListener('click', async () => {
   $('join').disabled = true;
-  await command('join', { invitation: $('join-code').value });
+  $('join').textContent = 'Finding laptop…';
+  await command('join', { invitation: $('join-code').value, address: $('join-address').value, port: $('join-port').value });
   $('join').disabled = false;
+  $('join').textContent = 'Connect laptops';
 });
+$('join-code').addEventListener('input', () => {
+  const field = $('join-code');
+  const before = field.value.slice(0, field.selectionStart).replace(/[^a-z0-9]/gi, '').length;
+  const characters = field.value.replace(/[^a-z0-9]/gi, '').toUpperCase().slice(0, 8);
+  field.value = characters.slice(0, 4) + (characters.length > 4 ? '-' + characters.slice(4) : '');
+  const caret = Math.min(field.value.length, before + (before > 4 ? 1 : 0));
+  field.setSelectionRange(caret, caret);
+});
+$('join-code').addEventListener('keydown', (event) => { if (event.key === 'Enter' && !$('join').disabled) $('join').click(); });
 $('host').addEventListener('click', async () => {
   $('host').disabled = true;
   await command('host', { port: $('port').value });

@@ -4,7 +4,7 @@ Automated coverage includes an actual Windows title-bar drag between two local a
 
 ## Pair and share
 
-1. Start CompuSync on Windows and the Mac. Pair using the Windows Wi-Fi address, with Windows hosting. Verify that both settings windows show Connected.
+1. Start the updated CompuSync on Windows and the Mac. Enter Windows' eight-character code on the Mac, with Windows hosting, and verify automatic discovery pairs them without an address. Both settings windows should show Connected. Try lowercase input without a dash. On networks that block discovery, use the optional address and port under Connection help.
 2. Set right on Windows and left on Mac if the Mac sits to the right.
 3. Open both grid windows. Move a mouse into each. Verify the native cursor is hidden within each surface and one shared cursor moves on both. The grid should bend around it and the particle trail should appear on both views.
 4. Click to capture on both machines. Move both trackpads at the same time, including opposite directions. Verify the shared cursor combines movement without jumping back to the other laptop's local mouse position. Move toward every edge; it should stay inside the surface. Verify clicks strengthen the grid distortion and old particle trails fade away.

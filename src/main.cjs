@@ -6,7 +6,8 @@ const path = require('node:path');
 const os = require('node:os');
 const { randomUUID } = require('node:crypto');
 const { Session } = require('./core/session.cjs');
-const { newSecret, makeInvitation, parseInvitation } = require('./core/wire.cjs');
+const { newSecret, parseInvitation } = require('./core/wire.cjs');
+const { pairWithCode } = require('./core/pairing.cjs');
 const { edgeCrossing, arrivalBounds } = require('./core/geometry.cjs');
 const { EDGES } = require('./core/state.cjs');
 
@@ -66,7 +67,8 @@ function details() {
     id: config.id, name: config.name, edge: config.edge, autoLaunch: config.autoLaunch,
     packaged: app.isPackaged,
     status: sync?.status() || { role: config.role, phase: 'starting', peers: [] },
-    invitations: config.role === 'host' ? (ips.length ? ips : ['127.0.0.1']).map((host) => ({ host, code: makeInvitation(host, sync?.port || config.port, config.secret) })) : [],
+    invitation: config.role === 'host' ? sync?.invitation() : null,
+    addresses: ips.length ? ips : ['127.0.0.1'],
     host: config.host, port: sync?.port || config.port,
     state: sync?.state,
     clockOffsetMs: sync?.clockOffsetMs || 0,
@@ -286,15 +288,27 @@ function setupIpc() {
       else if (command === 'handoff') transfer({ edge: config.edge, ratio: 0.5 });
       else if (event.sender !== settings?.webContents) throw new Error('Open settings to change this.');
       else if (command === 'copy') {
-        const invitation = details().invitations.find((item) => item.host === data?.host);
-        if (!invitation) throw new Error('Select an address first.');
-        clipboard.writeText(invitation.code);
+        const code = details().invitation?.code;
+        if (!code) throw new Error('Generate a new code first.');
+        clipboard.writeText(code);
+      } else if (command === 'new-code') {
+        if (config.role !== 'host') throw new Error('Start sharing from here first.');
+        sync.refreshCode();
       } else if (command === 'join' || command === 'host') {
         if (changingSession) throw new Error('A connection change is already in progress.');
-        const next = command === 'join' ? { ...parseInvitation(data?.invitation), role: 'join' } : { role: 'host', host: '', port: Number(data?.port || 43187), secret: newSecret() };
-        if (!Number.isInteger(next.port) || next.port < 1 || next.port > 65535) throw new Error('Port must be between 1 and 65535.');
         changingSession = true;
-        try { Object.assign(config, next); await startSession(); } finally { changingSession = false; }
+        try {
+          const invitation = data?.invitation;
+          const next = command === 'join' ? {
+            ...(typeof invitation === 'string' && invitation.trim().startsWith('CS1.')
+              ? parseInvitation(invitation)
+              : await pairWithCode(invitation, { excludeId: config.id, address: data?.address?.trim(), port: Number(data?.port || 43187) })),
+            role: 'join',
+          } : { role: 'host', host: '', port: Number(data?.port || 43187), secret: newSecret() };
+          if (!Number.isInteger(next.port) || next.port < 1 || next.port > 65535) throw new Error('Port must be between 1 and 65535.');
+          Object.assign(config, next);
+          await startSession();
+        } finally { changingSession = false; }
       } else if (command === 'preferences') {
         if (!EDGES.includes(data?.edge)) throw new Error('Choose a valid screen edge.');
         config.edge = data.edge;

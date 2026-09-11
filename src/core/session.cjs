@@ -4,6 +4,8 @@ const { EventEmitter } = require('node:events');
 const { WebSocket, WebSocketServer } = require('ws');
 const { initialState, reduce, disconnect } = require('./state.cjs');
 const { newSecret, createChannel, handshakeSalt } = require('./wire.cjs');
+const { newCode, pairingSecret, CODE_LIFETIME } = require('./pairing.cjs');
+const { advertise } = require('./discovery.cjs');
 
 const validMember = (member) => member && /^[a-zA-Z0-9-]{1,80}$/.test(member.id) && typeof member.name === 'string' && member.name.length > 0 && member.name.length <= 80;
 
@@ -22,6 +24,9 @@ class Session extends EventEmitter {
     this.retryDelay = 500;
     this.port = config.port;
     this.clockOffsetMs = 0;
+    this.pairingAttempts = [];
+    this.pairingInFlight = 0;
+    this.pairingCode = null;
   }
 
   status() {
@@ -53,6 +58,12 @@ class Session extends EventEmitter {
     });
     this.server.on('error', (error) => this.setStatus('error', error.message));
     this.port = this.server.address().port;
+    this.refreshCode();
+    if (this.config.discovery !== false) {
+      try {
+        this.discovery = await advertise(() => this.canPair() ? { id: this.self.id, port: this.port } : null);
+      } catch { this.discoveryError = 'Automatic discovery is unavailable. Use the laptop address in Connection help.'; }
+    }
     this.setStatus('hosting');
     this.heartbeat = setInterval(() => {
       for (const socket of this.server.clients) {
@@ -65,10 +76,28 @@ class Session extends EventEmitter {
     this.emit('state', this.state);
   }
 
+  canPair() {
+    return !this.stopped && !this.connections.size && this.pairingCode && Date.now() < this.pairingExpiresAt;
+  }
+
+  refreshCode() {
+    clearTimeout(this.pairingTimer);
+    this.pairingCode = newCode();
+    this.pairingExpiresAt = Date.now() + CODE_LIFETIME;
+    this.pairingTimer = setTimeout(() => this.emit('status', this.status()), CODE_LIFETIME);
+    this.pairingTimer.unref();
+    this.emit('status', this.status());
+  }
+
+  invitation() {
+    return { code: this.canPair() ? this.pairingCode : '', expiresAt: this.pairingExpiresAt || 0, discoveryError: this.discoveryError || '' };
+  }
+
   accept(socket) {
     if (this.server.clients.size > 8) { socket.close(1013, 'Busy'); return; }
     const salt = newSecret();
     let channel;
+    let mode = 'session', codeForAttempt, deriving = false;
     socket.isAlive = true;
     socket.on('pong', () => { socket.isAlive = true; });
     let member;
@@ -76,17 +105,45 @@ class Session extends EventEmitter {
     let messages = 0;
     const timeout = setTimeout(() => socket.terminate(), 5000);
     socket.send(JSON.stringify({ type: 'challenge', version: 1, salt }));
-    socket.on('message', (raw) => {
+    socket.on('message', async (raw) => {
       try {
+        if (deriving || mode === 'done') throw new Error('Unexpected message.');
         if (Date.now() - rateStart > 1000) { rateStart = Date.now(); messages = 0; }
         if (++messages > 300) throw new Error('Too many messages.');
         if (!channel) {
           const keyMessage = JSON.parse(raw.toString());
           if (keyMessage.type !== 'key') throw new Error('Missing key handshake.');
-          channel = createChannel(this.config.secret, handshakeSalt(salt, keyMessage.salt), true);
+          const combined = handshakeSalt(salt, keyMessage.salt);
+          if (keyMessage.mode === 'pair') {
+            this.pairingAttempts = this.pairingAttempts.filter((time) => Date.now() - time < 60000);
+            if (!this.canPair() || this.pairingAttempts.length >= 6 || this.pairingInFlight >= 2) throw new Error('Pairing unavailable.');
+            this.pairingAttempts.push(Date.now());
+            mode = 'pair';
+            codeForAttempt = this.pairingCode;
+            deriving = true;
+            this.pairingInFlight++;
+            let secret;
+            try { secret = await pairingSecret(codeForAttempt, combined); }
+            finally { deriving = false; this.pairingInFlight--; }
+            if (socket.readyState !== WebSocket.OPEN || this.stopped) return;
+            channel = createChannel(secret, combined, true);
+            socket.send(channel.seal({ type: 'pair-ready' }));
+          } else {
+            channel = createChannel(this.config.secret, combined, true);
+          }
           return;
         }
         const message = channel.open(raw);
+        if (mode === 'pair') {
+          if (message.type !== 'claim' || !this.canPair() || this.pairingCode !== codeForAttempt) throw new Error('Code no longer valid.');
+          mode = 'done';
+          this.pairingCode = null;
+          clearTimeout(this.pairingTimer);
+          socket.send(channel.seal({ type: 'paired', secret: this.config.secret }));
+          this.emit('status', this.status());
+          socket.close(1000, 'Paired');
+          return;
+        }
         if (!member) {
           if (message.type !== 'hello' || !validMember(message.member) || message.member.id === this.self.id) throw new Error('Invalid identity.');
           if (this.connections.size > 0) {
@@ -226,6 +283,8 @@ class Session extends EventEmitter {
     clearTimeout(this.retryTimer);
     clearTimeout(this.broadcastTimer);
     clearInterval(this.heartbeat);
+    clearTimeout(this.pairingTimer);
+    this.discovery?.stop();
     this.socket?.terminate();
     if (this.server) {
       for (const socket of this.server.clients) socket.terminate();

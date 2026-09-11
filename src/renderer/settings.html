@@ -29,12 +29,12 @@
 
       <div id="share-panel" role="tabpanel" aria-labelledby="share-tab">
         <div id="hosting">
-          <label for="address">This laptop’s network address</label>
-          <select id="address"></select>
-          <label for="invitation">Invitation for your other laptop</label>
-          <textarea id="invitation" rows="3" readonly spellcheck="false" aria-describedby="invitation-help"></textarea>
-          <div class="row"><button id="copy" class="primary">Copy invitation</button><span id="copy-status" aria-live="polite"></span></div>
-          <p id="invitation-help" class="small">Send this invitation to yourself, then paste it into “Join other laptop” there. It is the key to your shared window.</p>
+          <label for="invitation">Code for your other laptop</label>
+          <input id="invitation" class="pairing-code" readonly spellcheck="false" aria-describedby="invitation-help" placeholder="—">
+          <div class="row"><button id="copy" class="primary">Copy code</button><button id="new-code">New code</button><span id="copy-status" aria-live="polite"></span></div>
+          <p id="invitation-help" class="small">Type this code into “Join other laptop” there. Valid for 15 minutes and one pairing.</p>
+          <p id="code-status" class="small" aria-live="polite"></p>
+          <details class="network-help"><summary>Connection help</summary><p>For networks that block automatic discovery, enter one of these addresses on the other laptop.</p><p id="host-addresses"></p><p id="discovery-error"></p></details>
         </div>
         <div id="create-host" hidden>
           <p>Start a new connection here and invite your other laptop.</p>
@@ -44,8 +44,10 @@
       </div>
 
       <div id="join-panel" role="tabpanel" aria-labelledby="join-tab" hidden>
-        <label for="join-code">Invitation from the other laptop</label>
-        <textarea id="join-code" rows="3" placeholder="CS1.…" spellcheck="false" autocomplete="off"></textarea>
+        <label for="join-code">Code from the other laptop</label>
+        <input id="join-code" class="pairing-code" maxlength="9" placeholder="AB7K-3M9Q" spellcheck="false" autocomplete="off" autocapitalize="characters" aria-describedby="join-help">
+        <p id="join-help" class="small">Eight letters or numbers. We’ll find the laptop on your network.</p>
+        <details class="network-help"><summary>Connection help</summary><p>If your network blocks automatic discovery, enter the address shown on the other laptop.</p><label for="join-address">Laptop address (optional)</label><input id="join-address" type="text" placeholder="192.168.1.20" spellcheck="false" autocomplete="off"><label for="join-port">Connection port</label><input id="join-port" type="number" min="1" max="65535" value="43187"></details>
         <button id="join" class="primary">Connect laptops</button>
       </div>
       <p id="error" role="alert" hidden></p>
@@ -71,7 +73,7 @@
       <p>Move into the grid to bend it and leave a particle trail with the shared cursor. Click to capture your trackpad; press <kbd>Esc</kbd> to release it. Both laptops can control the same cursor while their windows are visible.</p>
       <p>Drag the title bar to your chosen screen edge to hand it over. Use “Show here” to keep controlling from this laptop too.</p>
       <p><kbd id="shortcut">Ctrl</kbd> + <kbd>,</kbd> opens these settings. Closing the shared window closes it on both laptops. The tray or menu bar icon can reopen it.</p>
-      <details><summary>Connection help</summary><p>Allow CompuSync through the firewall on your private network. Guest Wi-Fi may block laptop-to-laptop connections. If pairing fails, choose the Wi-Fi address above and copy a fresh invitation. A sleeping or fully quit app cannot receive a window; the connection returns automatically when it is available again.</p></details>
+      <details><summary>Connection help</summary><p>Allow CompuSync through the firewall on your private network. Guest Wi-Fi may block laptop-to-laptop connections. If pairing fails, check the code or generate a new one. You can also enter the address in the pairing section’s Connection help. A sleeping or fully quit app cannot receive a window; the connection returns automatically when it is available again.</p></details>
     </footer>
   </main>
   <script src="settings.js"></script>

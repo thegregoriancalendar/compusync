@@ -5,14 +5,14 @@ const path = require('node:path');
 const os = require('node:os');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
-const { parseInvitation, makeInvitation } = require('../../src/core/wire.cjs');
 
 test('two desktop apps pair, share a cursor, transfer, close, and reopen', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'compusync-e2e-'));
   const apps = [];
   const errors = [];
   async function launch(name) {
-    const env = { ...process.env, COMPUSYNC_PROFILE: path.join(root, name), COMPUSYNC_PORT: '0', COMPUSYNC_BIND_HOST: '127.0.0.1' };
+    const env = { ...process.env, COMPUSYNC_PROFILE: path.join(root, name), COMPUSYNC_PORT: '0' };
+    delete env.COMPUSYNC_BIND_HOST;
     delete env.ELECTRON_RUN_AS_NODE;
     const app = await electron.launch({ args: [path.resolve('.')], env });
     apps.push(app);
@@ -29,11 +29,18 @@ test('two desktop apps pair, share a cursor, transfer, close, and reopen', async
   try {
     const first = await launch('first');
     const second = await launch('second');
-    const invitation = parseInvitation(await first.settings.locator('#invitation').inputValue());
+    const invitation = await first.settings.locator('#invitation').inputValue();
+    expect(invitation).toMatch(/^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/);
     await second.settings.locator('#join-tab').click();
-    await second.settings.locator('#join-code').fill(makeInvitation('127.0.0.1', invitation.port, invitation.secret));
+    await second.settings.locator('#join-code').fill('ABC');
     await second.settings.locator('#join').click();
-    await expect(first.settings.locator('#status')).toContainText('Connected to');
+    await expect(second.settings.locator('#error')).toContainText('8-character');
+    await expect(second.settings.locator('#status')).toHaveText('Ready to pair');
+    await second.settings.locator('#join-code').fill('');
+    await second.settings.locator('#join-code').pressSequentially(invitation.toLowerCase().replace('-', ''));
+    await expect(second.settings.locator('#join-code')).toHaveValue(invitation);
+    await second.settings.locator('#join').click();
+    await expect(first.settings.locator('#status')).toContainText('Connected to', { timeout: 15000 });
     await expect(second.settings.locator('#status')).toContainText('Connected to');
 
     await first.surface.bringToFront();

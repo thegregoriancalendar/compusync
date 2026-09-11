@@ -20,6 +20,12 @@ header p { margin: 0; }
 label { display: block; font-size: 12px; color: #566170; margin-bottom: 7px; }
 input, select, textarea, button { font: inherit; }
 select, textarea, input[type=number] { width: 100%; border: 1px solid #dce1e9; background: #fcfcfd; color: #384252; padding: 10px; border-radius: 6px; margin-bottom: 14px; }
+.pairing-code { width: 100%; border: 1px solid #dce1e9; background: #fcfcfd; color: #384252; padding: 15px 10px; border-radius: 8px; margin-bottom: 14px; font: 600 30px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .12em; text-align: center; text-transform: uppercase; }
+.pairing-code::placeholder { color: #9ca8b9; }
+.network-help { margin: 16px 0; }
+#join-address { width: 100%; padding: 10px; border: 1px solid #dce1e9; border-radius: 6px; margin-bottom: 14px; }
+#host-addresses { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+#discovery-error:empty, #code-status:empty { display: none; }
 textarea { resize: vertical; min-height: 65px; font: 11px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
 button { border: 1px solid #dce1e9; border-radius: 6px; padding: 9px 13px; background: white; color: #39465b; cursor: pointer; font-size: 12px; font-weight: 550; }
 button:hover { background: #f1f4f9; }
