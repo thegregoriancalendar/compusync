@@ -1,0 +1,20 @@
+:root { color-scheme: light; background: #f7f8fa; color: #202733; font: 13px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+* { box-sizing: border-box; }
+html, body, main { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+main { display: grid; grid-template-rows: 54px minmax(0, 1fr); background: #fff; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 7px 10px; border-bottom: 1px solid #dfe4eb; background: #f5f7fa; }
+.document-heading, .actions { display: flex; align-items: center; min-width: 0; }
+.document-heading { gap: 9px; }
+.app-mark { display: grid; place-items: center; flex: 0 0 30px; width: 30px; height: 30px; border-radius: 7px; color: #fff; background: #506b9a; font: 700 15px/1 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.document-heading div { min-width: 0; }
+.app-name { display: block; color: #778294; font-size: 10px; line-height: 1.2; text-transform: uppercase; letter-spacing: .06em; }
+#title { display: block; max-width: 470px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.actions { flex: 0 0 auto; gap: 10px; }
+#status { color: #697487; font-size: 11px; }
+#status.error { color: #ad3f49; }
+button { min-width: 64px; height: 32px; border: 1px solid #49648f; border-radius: 6px; color: #fff; background: #506b9a; font: inherit; font-weight: 600; cursor: pointer; }
+button:hover { background: #435d88; }
+button:disabled { border-color: #cbd2dd; color: #8f99a8; background: #e9edf2; cursor: default; }
+button:focus-visible, textarea:focus-visible { outline: 2px solid #668bce; outline-offset: -2px; }
+textarea { width: 100%; height: 100%; resize: none; border: 0; border-radius: 0; padding: 18px 20px; color: #232a34; background: #fff; font: 14px/1.65 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; tab-size: 2; }
+textarea:disabled { color: #7d8795; background: #fafbfc; }
