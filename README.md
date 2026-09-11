@@ -6,6 +6,10 @@ The window contains a light grid that bends and twists around the cursor, ambien
 
 ## Run on both laptops
 
+The grid works on one laptop by itself. To share it between Windows and macOS, CompuSync must be running on both machines on the same network. The Windows `.exe` only runs on Windows; use the source instructions below on the Mac, or build its macOS app there with `npm run dist:mac`.
+
+For the transferable source bundle, see the [Mac setup guide](docs/mac-setup.md).
+
 Install Node.js 22.12 or newer. Copy or clone this project onto each laptop, then run these commands in the project folder:
 
 ```sh
@@ -22,6 +26,8 @@ Node is needed to run from source, but not to run a packaged app. Both Apple Sil
 5. Click **Open on both laptops**. Move either mouse into its grid. Both inputs control the same cursor, bend the grid, and emit particles. Clicks produce a brief shared ripple and strengthen the distortion.
 
 The first laptop is the connection host. Either laptop can serve this role, but the chosen host must stay running for the pair to communicate. Pairing is remembered across restarts, including connections saved by earlier versions. Short codes expire after 15 minutes or one successful pairing; **New code** generates a replacement without changing the saved connection key. Use **Start sharing from here** to replace the connection entirely.
+
+Opening CompuSync manually shows the pairing screen whenever the other laptop is not connected, including after the first run or when the app is already in the tray. You can always reopen it with **Ctrl+,** on Windows, **Cmd+,** on Mac, or **Connection & settings…** in the tray/menu bar. Optional startup at sign-in stays in the background. When updating, use **Quit on this laptop** in the old version's tray/menu first, so the new executable can start instead of forwarding to the old background process.
 
 If discovery is blocked, expand **Connection help** in the pairing section. The host shows its addresses and port; the joining laptop has optional address and port fields. Discovery uses local UDP port 43188; the connection normally uses TCP port 43187. Both laptops need the updated app to pair using a short code.
 

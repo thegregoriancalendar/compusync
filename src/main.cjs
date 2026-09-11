@@ -27,6 +27,7 @@ let applyingBounds = false;
 let handoffAt = 0;
 let lastHandoff = null;
 let backgroundLaunch = false;
+let pendingActivation = false;
 let resizeTimer;
 const rendererPath = (file) => path.join(__dirname, 'renderer', file);
 const configPath = () => path.join(app.getPath('userData'), 'settings.json');
@@ -104,7 +105,11 @@ function createSurface() {
   surface.setMenuBarVisibility(false);
   secureWindow(surface);
   surface.loadFile(rendererPath('surface.html'));
-  surface.once('ready-to-show', () => { if (sync) applyState(sync.state); });
+  surface.once('ready-to-show', () => {
+    if (sync) applyState(sync.state);
+    // The grid can finish loading after setup; keep pairing in front.
+    if (settings && !settings.isDestroyed() && settings.isVisible()) settings.focus();
+  });
   surface.on('close', (event) => {
     if (quitting) return;
     event.preventDefault();
@@ -183,8 +188,10 @@ function transfer(crossing) {
 }
 
 function showSettings() {
-  if (settings && !settings.isDestroyed()) { settings.show(); settings.focus(); return; }
-  settings = new BrowserWindow({ width: 580, height: 780, minWidth: 500, minHeight: 600, title: 'CompuSync · Connection', backgroundColor: '#f6f7f9', autoHideMenuBar: true, webPreferences: webPreferences() });
+  if (settings && !settings.isDestroyed()) { if (settings.isMinimized()) settings.restore(); settings.show(); settings.focus(); return; }
+  settings = new BrowserWindow({ width: 580, height: 780, minWidth: 500, minHeight: 600, title: 'CompuSync · Connection', backgroundColor: '#f6f7f9', show: false, autoHideMenuBar: true, webPreferences: webPreferences() });
+  const window = settings;
+  window.once('ready-to-show', () => { if (!window.isDestroyed()) { window.show(); window.focus(); } });
   settings.setMenuBarVisibility(false);
   secureWindow(settings);
   settings.loadFile(rendererPath('settings.html'));
@@ -199,6 +206,15 @@ function openShared() {
 function showLocal() {
   if (!sync.action({ type: 'show' })) showSettings();
   else if (surface.isVisible()) { surface.restore(); surface.focus(); }
+}
+
+// A foreground launch is also the entry point to pairing, even with a saved
+// profile or an app that was left running in the tray. Login launches stay quiet.
+function activateApp() {
+  if (!sync) { pendingActivation = true; return; }
+  pendingActivation = false;
+  showLocal();
+  if (sync.phase !== 'connected') showSettings();
 }
 
 function closeShared() {
@@ -242,8 +258,8 @@ function createTray() {
   const icon = nativeImage.createFromBitmap(pixels, { width: 20, height: 20, scaleFactor: 1 });
   if (process.platform === 'darwin') icon.setTemplateImage(true);
   tray = new Tray(icon);
-  tray.on('double-click', showLocal);
-  if (process.platform !== 'darwin') tray.on('click', showLocal);
+  tray.on('double-click', activateApp);
+  if (process.platform !== 'darwin') tray.on('click', activateApp);
   updateMenu();
 }
 
@@ -325,8 +341,8 @@ function setupIpc() {
   });
 }
 
-app.on('second-instance', () => { if (sync) showLocal(); });
-app.on('activate', () => { if (sync) showLocal(); });
+app.on('second-instance', (_event, argv) => { if (!argv.includes('--background')) activateApp(); });
+app.on('activate', () => { if (sync) activateApp(); });
 app.on('window-all-closed', () => {});
 app.on('before-quit', (event) => {
   if (quitting) return;
@@ -348,5 +364,6 @@ if (hasLock) app.whenReady().then(async () => {
   createSurface();
   createTray();
   await startSession();
-  if (config.firstRun || sync.phase === 'error') showSettings();
+  if (!backgroundLaunch || pendingActivation) activateApp();
+  else if (sync.phase === 'error') showSettings();
 }).catch((error) => { console.error(error); app.quit(); });
