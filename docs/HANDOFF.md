@@ -1,0 +1,191 @@
+# CompuSync development handoff
+
+Prepared September 11, 2026. Intended recipient: a new GPT Sol session or development team, replacing the previous Astra session.
+
+## Scope and priority
+
+The requested goals:
+
+1. Replace mirrored windows and discrete handoff with **one logical window that can be dragged continuously between the Windows computer and the Mac, including being partly visible on both screens**.
+2. Later, turn its interior into **a small desktop environment containing shared files, directories, and running programs**. Programs execute on the host computer, but their interfaces appear inside this desktop wherever the shared window is displayed.
+3. Consider **a grab-and-drag top bar at the very top of the shared window**, so either computer can move the same logical window across the two screens. This is the user's proposed interaction for goal 1, not a reason to postpone dragging work until after goal 2.
+
+Fix existing application issues as needed. Do not let the much larger second goal displace the first. Preserve the user's grid, cursor distortion, and particles while developing the new window behavior unless the user changes that preference.
+
+## Repository and deliverables
+
+| Item | Current state |
+| --- | --- |
+| Workspace | `C:\Users\roude\Desktop\coding stuff\compusync` |
+| Version | `0.1.2` |
+| Branch / baseline | `main`, HEAD `7f74f01` — `launcher fixes` |
+| Earlier commits | `9a5a3cb` — short codes and LAN discovery; `cade735` — initial application |
+| Working tree | Clean before adding this handoff. The launcher fixes are already committed. |
+| Remote tracking | Local Git reports `main...origin/main` with no ahead/behind count. No remote fetch or CI-status check was performed for this handoff. |
+| Stack | Electron `44.3.0`, CommonJS/vanilla JS, HTML/CSS/Canvas, `ws` `8.21.3` |
+| Tooling | Node.js 22.12+, electron-builder `26.15.3`, Playwright `1.63.0`, Node's built-in test runner |
+
+Local artifacts exist but are ignored by Git:
+
+- `dist/CompuSync 0.1.2.exe`: current Windows portable executable, approximately 100 MB.
+- `dist/win-unpacked/CompuSync.exe`: unpacked Windows application.
+- `dist/CompuSync-0.1.2-source.zip`: transferable source bundle for the Mac; **not a native Mac application**. It predates this handoff.
+- Older Windows executables `0.1.0` and `0.1.1` remain in `dist/`; do not confuse them with the current version.
+
+No native Mac build or physical Windows-to-Mac acceptance run has been verified. The Mac currently needs the source bundle, Node, `npm ci`, and `npm start`. Windows dependencies must not be copied to the Mac. Mac packaging scripts and a Windows/macOS GitHub Actions workflow exist; their presence is not evidence that a Mac release or CI run succeeded.
+
+## What the application does today
+
+Both computers must run CompuSync and be awake for sharing. Either can host the connection; the other joins. The standalone host can display the grid without a second computer. The Windows `.exe` cannot run on macOS.
+
+The shared surface contains a light grid, cursor-centered distortion, ambient/orbiting particles, a fading movement trail, and click feedback. Setup is a separate local window. The shared cursor, button state, dimensions, open/close state, visual history, and discrete handoff synchronize over the LAN.
+
+**Current presentation is deliberately mirrored and is now contrary to the user's next goal.** Pairing adds the second laptop's view. `Open on both laptops` shows two complete copies. Dragging the native title bar to a configured edge triggers a one-step handoff: hide the source view, show the complete destination view. `Show here` adds a complete local copy again. There is no global window position, continuous cross-computer drag, or partial rendering across a seam.
+
+Current input behavior:
+
+- Entering the content area hides the OS cursor and uses the shared application cursor immediately.
+- Clicking grants pointer lock for continuous relative movement. Escape releases it; re-entry or another click resumes.
+- Deltas from both visible views add to the same normalized cursor. Each participant owns its button state independently.
+- Input is handled within the app; there is no global mouse hook or OS cursor sharing. A laptop with no visible view cannot currently contribute trackpad movement.
+- Native title-bar dragging moves the outer window. Grid interactions and native frame dragging are separate.
+
+Current lifecycle and recent fix:
+
+- Closing the shared window closes both views but keeps the tray/menu-bar processes alive. Either can reopen it.
+- `Quit on this laptop` stops that computer's connection. There is no remote wake/start of a stopped application.
+- The user reported that reopening did not show pairing. Version 0.1.2 fixes this: an explicit launch, tray activation, or second launch of the existing instance opens setup when disconnected, even with a saved profile. Setup is restored if minimized and kept in front during initial loading.
+- Sign-in/background launches stay hidden. Connected activation shows the shared view.
+- **An older version left running can intercept a newer executable's launch through Electron's single-instance lock. Quit the old version from the tray before testing an update.** Do not terminate the user's running app indiscriminately.
+
+Useful controls: Windows `Ctrl+,` / Mac `Cmd+,` opens setup; `Ctrl/Cmd+Shift+Enter` performs the current discrete handoff; `Ctrl/Cmd+W` closes the shared surface; `Ctrl/Cmd+Shift+O` currently opens both copies. These labels/semantics need revision for goal 1.
+
+## Implementation map
+
+Paths below are relative to the repository root.
+
+| File | Responsibility and relevant constraints |
+| --- | --- |
+| `src/core/state.cjs` | Host-side reducer. State includes `revision`, `open`, `views[]`, `size`, normalized cursor, per-member buttons, bounded trail, scene epoch, and last handoff. `open` sets views to all members; `show` adds an actor; `handoff` removes the source and adds the target. These are the central mirroring assumptions to replace. |
+| `src/core/session.cjs` | One authoritative host and at most one joined peer. Orders actions, publishes snapshots, authenticates peers, performs short-code pairing, heartbeat/reconnect, and membership recovery. Joining while open automatically invokes `show`; the client's initial connection also requests a local view via the main process. |
+| `src/core/geometry.cjs` | Detects cursor proximity to a physical screen edge, with an 8-DIP margin. Computes destination placement at the opposite edge and clamps the entire window into its work area. No shared desktop topology or clipping model. |
+| `src/main.cjs` | Electron windows, native drag events, tray/menu, lifecycle, config, IPC. `createSurface`, `applyState`, `transfer`, `activateApp`, and `startSession` are key. Handoff has a 1.2-second cooldown. Current minimum outer window size is 360×240. Resize synchronizes outer bounds, not an explicit cross-platform content rectangle. |
+| `src/preload.cjs` | Narrow `window.compusync` bridge: bootstrap, input, commands, and event subscriptions. |
+| `src/renderer/surface.js` | Shared cursor DOM, hover input, frame-coalesced movement, pointer lock/Escape, click ripple. Converts movement against the local client dimensions minus cursor size. |
+| `src/renderer/field.js` | Canvas grid deformation and deterministic particles from shared cursor history and approximate host time. Drawing currently depends on each local canvas's width/height. Merely shrinking a window would reflow the scene instead of cropping one continuous scene. |
+| `src/renderer/settings.*` | Pairing, direction, lifecycle controls, optional sign-in launch, discovery fallback. Update the mirrored-window copy for goal 1. |
+| `src/core/pairing.cjs`, `discovery.cjs`, `wire.cjs` | Short-code bootstrap, IPv4 LAN discovery, authenticated/encrypted messages. |
+| `scripts/demo.cjs` | Two automatically paired instances with isolated profiles under `.demo/`. Useful local simulator, not a substitute for two physical machines. |
+| `docs/testing.md`, `docs/mac-setup.md`, `README.md` | Existing device checklist, Mac source setup, and usage/build documentation. |
+
+### Network and persistence
+
+- Default host TCP/WebSocket port: `43187`. Discovery: UDP `43188`, multicast group `239.255.43.187`, plus broadcast/loopback probes. Optional hostname/IPv4 address and port fields bypass discovery. No cloud service or account.
+- Codes are eight Crockford-base32 characters displayed as `AB7K-3M9Q`; lowercase, missing separators, and common lookalikes normalize. A code lasts 15 minutes or one successful claim. Limits: six pairing attempts per minute, two concurrent key derivations.
+- Short codes bootstrap an encrypted exchange of the existing random 256-bit connection secret using scrypt. Discovery does not advertise the code or key. Normal connections use fresh contributions from both peers, HKDF directional keys, AES-GCM, and strict counters. This is custom protocol code, not an independently audited PAKE implementation.
+- `New code` renews the bootstrap code; it **does not revoke previously saved connection keys**. Starting a new hosted connection generates a new long-term secret.
+- Host snapshots are coalesced on an 8-ms timer; renderer movement is coalesced by animation frame. WebSocket payload limit is 16 KiB; buffered output above 64 KiB terminates the slow connection. Do not put video or large file blobs through this path unchanged.
+- Heartbeats run every three seconds; reconnect delay backs off from 500 ms to five seconds. Offline input is not queued. The host can continue locally; a disconnected joiner cannot mutate shared state. If the only visible peer disconnects, the host recovers a view. No automatic host migration.
+- Reconnect uses the saved host address. Discovery is used for initial short-code pairing, not automatically to recover a changed DHCP address.
+- Settings persist in Electron's user-data directory, normally `%APPDATA%/CompuSync` or `~/Library/Application Support/CompuSync`. Secrets use Electron safeStorage where available, with a local-file fallback. Shared scene/session state is transient. There is no shared filesystem or program persistence.
+- Renderers are sandboxed, context-isolated, and have Node integration disabled. Local resources, restrictive CSP, navigation blocking, and sender-checked IPC are already present. Preserve those boundaries when adding host capabilities.
+
+## Verification baseline and limits
+
+Latest recorded successful development checks, **not rerun during this documentation-only handoff**:
+
+- `npm test`: 22 state, geometry, wire, pairing, discovery, and real-socket integration tests passed.
+- `npm run check`: JavaScript syntax checks passed.
+- `npm run test:e2e`: four desktop tests passed on Windows after the 0.1.2 launcher fix: full desktop interaction, short-code pairing, saved-profile/second-launch setup recovery, and quiet background startup followed by activation.
+- Windows v0.1.2 packaging succeeded; the packaged `src/main.cjs` was compared byte-for-byte with the source.
+
+The Windows drag test actually moves the OS pointer and grabs a native title bar. `tests/e2e/drag-window.ps1` uses physical cursor coordinates and DPI-aware Win32 calls; the test raises its target window while dragging. Earlier attempts failed because the automation did not grab the title bar correctly. Use a usable interactive desktop and distinguish automation/focus failures from product failures. `setBounds()` alone does not exercise native `will-move`.
+
+Physical Mac input, Mac edge dragging, mixed Retina/Windows scaling, real network/firewall behavior, and sleep/wake across the two laptops remain unverified. The Mac model, CPU, macOS version, screen geometry, and actual network behavior have not been established. Neither new goal has been implemented or tested.
+
+Several passing tests explicitly assert mirrored views. Those expectations must change with the new requirements; passing the old suite alone cannot establish correct goal-1 behavior.
+
+## Goal 1: one window across two computers
+
+### Required experience
+
+The user's “only one place at a time” requirement means one logical surface, not two full synchronized copies. It may occupy both screens only as complementary portions of the same window during a crossing. At halfway, roughly half the content belongs on each screen. The user allows smaller local windows or another suitable presentation for these portions.
+
+The user must be able to drag that window between computers as though they were adjacent monitors, click inside to control its contents, and use the ordinary mouse/window movement interaction outside the contents. Fully moving it to the other screen must not create another desktop/session or leave a duplicate behind.
+
+Separate OS processes/native windows will likely still be needed to present the local portions. That is compatible with **one logical window** if the content is cropped correctly and the UX does not expose two independent copies. Pairing/settings are auxiliary local UI; interpret the uniqueness requirement as applying to the shared surface unless the user says otherwise.
+
+### Suggested direction — not an implemented design
+
+1. Define a shared virtual display layout and coordinate convention, including laptop/display IDs, logical bounds, scale factors, work areas, adjacency, and offsets. Track one logical window rectangle in that space. Separate logical content geometry from each native window's chrome and screen placement.
+2. Compute each visible viewport as the intersection of the logical window with that display. Render only that crop, translated into the unchanged full content space. Hide empty intersections. Handle fragments smaller than the current native minimum size and remove inappropriate full-window clamping.
+3. Replace `views[]`/open/show/handoff semantics with shared placement, visibility derived from geometry, and a well-defined drag transaction/owner. Update all callers: reducer, membership join, reconnect recovery, main-process activation, tray/settings controls, and tests. Removing only `Open on both laptops` is insufficient.
+4. Prototype continuous cross-edge dragging on both platforms early, starting with the user's proposed top bar (goal 3 below). Current `will-move` plus `getCursorScreenPoint()` only supplies physical local motion; the OS cursor stops at a screen boundary and a hidden/blurred renderer loses capture. Establish how the originating trackpad continues the drag when its viewport shrinks or disappears. Evaluate deliberate relative capture/custom drag chrome or platform input support; do not assume native `setBounds()` can move another computer's cursor. A styled bar or native CSS drag region alone does not establish cross-computer dragging.
+5. Define drag ownership, capture/release, cancellation, Escape, lost connection, and conflicting actions from both devices. Prevent duplicate windows or a surface stranded outside all displays. Preserve ordinary desktop input outside an active app interaction.
+6. Refactor cursor, grid, particles, and input transforms to use full content coordinates plus viewport offsets. Shrinking a visible fragment must not resize/reseed the world. Map clicks and movement back from each local crop to the same logical surface.
+
+The prior request wanted both trackpads to control one cursor. The new single-window request leaves a detail unresolved: should the trackpad on a laptop with **no visible portion** still control it? Preserve dual input where portions are visible; determine an explicit remote-control/capture interaction if input from the other laptop is also required. Do not retain mirrored copies to satisfy the old requirement, or silently add always-on global mouse monitoring.
+
+Likewise, “mouse outside the window” needs a concrete interaction definition: normal OS input plus dragging by the window frame/handle is the likely interpretation, not dragging from an arbitrary point outside its bounds. Confirm any materially different design with the user after making the alternatives concrete.
+
+### Acceptance criteria
+
+- A newly opened session presents one complete surface on one computer, with no full duplicate on the other.
+- Slowly drag through the seam in either direction, stop halfway, reverse, and finish. Both fragments represent the correct adjacent parts of the same content, without duplication, stretching, jumping, or scene reset.
+- The originating trackpad can finish the intended drag across the seam; there is a reliable way to pick up the window from the destination. Dragging and interior pointer capture do not trap the mouse.
+- Cursor placement, clicks, distortion, and particles align with each crop, including at the seam and at mixed scale factors.
+- Closing/opening from either laptop affects the one logical surface. Reconnect, sleep, or a disappearing display recovers a visible, controllable window without creating a second full copy.
+- Validate on the actual Windows 11 + Mac setup, not only two processes on one Windows desktop.
+
+## Goal 3: proposed shared top bar — evaluate during goal 1
+
+The user additionally suggested a top bar at the very top of the window that can be grabbed to drag the window between computers, with dragging usable from either computer regardless of which computer hosts the session. Treat this as the preferred candidate to prototype, not a finalized platform implementation.
+
+- Keep the bar separate from interior interaction: grabbing it moves the one logical window; clicking the contents controls the shared cursor and, later, programs. Releasing a drag or pressing Escape must reliably restore ordinary pointer behavior.
+- Either laptop must be able to initiate a drag from its visible portion of the bar. When the window spans the seam, bar fragments should align with the shared window geometry; neither should create a second independent window or rescale the contents.
+- Use the same authoritative drag transaction regardless of which laptop initiated it. Resolve simultaneous grabs, interruptions, and transfer of control explicitly. Preserve the drag when the source fragment becomes too small or disappears; a top bar by itself does not solve edge-clamped OS input.
+- Distinguish dragging from an available bar from controlling a window wholly on the other laptop. If “from both computers on any computer” also means initiating a drag with no local window fragment, a window-attached bar is insufficient. Present a concrete option, such as a small local companion handle or explicit remote-control mode, and confirm that interaction with the user. Do not silently add a full duplicate surface or always-on global input capture.
+
+Acceptance: grab and move from Windows and from Mac, with either acting as host; stop across the seam and resume from either visible bar fragment; finish a crossing without losing the drag; release/Escape cleanly; and verify that no extra full surface appears. Test the separately agreed no-local-fragment interaction if included.
+
+## Goal 2, later: a host-executed mini desktop
+
+The user wants to drag files and programs from either computer into the shared window, create directories, and run programs inside a simplified desktop UI. The host performs execution; the program interfaces appear inside the shared surface even when that surface is displayed on the other computer. All programs should be able to use the files added to this workspace from either side. The user suggested a sandbox or simplified VM as possible forms, not a chosen implementation.
+
+**None of this exists yet:** no file import/transfer, file manager, folders, process manager, embedded native apps, streaming video/audio, VM, container, or actual execution sandbox. The current grid is a rendered scene, not a remote desktop protocol.
+
+After goal 1, establish the following architecture before promising arbitrary program support:
+
+- **Execution versus display:** make host identity explicit. Moving the surface does not migrate processes. A program started once on the host should stay running there as its view moves. Define host loss, stopping programs, and recovery separately from view handoff.
+- **Compatibility:** “whatever program” is an aspiration requiring a concrete compatibility strategy. A Windows host cannot automatically execute a macOS application, or vice versa, because it was dragged into a UI. Decide an initial host-compatible program scope, then assess virtualization/emulation where needed. Communicate unsupported types honestly.
+- **Workspace storage:** use a host-owned workspace with controlled imports from either peer, directory operations, progress/error reporting, persistence, collision handling, and clear save semantics. Design path, symlink, and permission boundaries. Do not expose arbitrary host filesystem access through renderer IPC.
+- **Program presentation:** investigate native application capture/composition and remote input/video transport versus a real isolated desktop/VM. A web launcher or file-manager mockup is not enough; a real host program must appear and be usable inside the surface. Do not assume arbitrary native windows can be reparented into Electron on both platforms.
+- **Containment:** distinguish visually containing windows from isolating processes. Electron's renderer sandbox does not sandbox a native program launched by the main process. Define the actual filesystem/process/network permissions and execution boundary before describing it as a sandbox.
+- **Transport and authority:** separate latency-sensitive input/state from bulk files and rendered program output. Extend protocol validation, capability checks, and key/device revocation deliberately. A paired renderer/network message must not become an unrestricted shell command. Use explicit launch intent and structured arguments.
+
+A useful first real vertical slice is: import a file from either laptop into the shared workspace, browse it in the mini desktop, launch one supported host-native program to edit it, operate that program from the peer, save the change, and move the surface without restarting the program. Expand supported applications and stronger isolation only after that path works.
+
+## Starting the next session
+
+Read this document, the current source, and any new repository instructions; recheck the working tree before editing. Establish physical Mac access/testing early. Fix regressions and prove the goal-1 coordinate/capture approach before building the larger runtime.
+
+If using a team, first agree on the coordinate and protocol contract. Then useful independent ownership areas are state/protocol and geometry tests; native window/input behavior; viewport rendering; and Windows/Mac acceptance testing. Keep Phase 2 research distinct from Phase 1 implementation. Avoid overlapping edits to `src/main.cjs` without coordination.
+
+Useful commands:
+
+```sh
+npm ci
+npm start
+npm run demo
+npm run check
+npm test
+npm run test:e2e
+npm run test:e2e -- startup.spec.cjs
+npm run dist:win
+# On a Mac:
+npm run dist:mac
+```
+
+PowerShell can mishandle some npm option forwarding; use `npm.cmd` for option-heavy commands if necessary. Windows GUI tests/build-cache downloads may need the environment's normal approval mechanism. Do not change global security settings, stop user processes, publish builds, or push repository changes merely because this handoff exists. Work inside the user's requested application scope and the next session's permissions.
+
+This handoff does not switch the current model, start another agent, change the application, rebuild artifacts, or implement any of the requested features.
