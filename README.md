@@ -1,72 +1,93 @@
 # CompuSync
 
-A shared desktop window with an interactive grid and one shared cursor, for a Windows 11 laptop and a MacBook. Pair the apps over your local network, move either trackpad inside the window, and drag the window through a screen edge to hand it to the other laptop.
+CompuSync creates one logical application window across a Windows 11 laptop and a Mac. The window can sit on either display or cross their configured seam. During a crossing, each computer renders only its adjoining crop of the same scene: there is no second full copy and the content does not resize at the seam.
 
-The window contains a light grid that bends and twists around the cursor, ambient particles, and a fading particle trail. Clicking expands the distortion. The effects use shared cursor history and a host clock reference so both laptops see the same activity. Pairing and preferences live in a separate settings window, accessible from the tray/menu bar or **Ctrl+,** on Windows / **Cmd+,** on Mac.
+The shared surface contains an interactive grid, a persistent host-owned workspace, and a bundled text editor that runs on the host. Files can be imported from either laptop. When the text editor is opened from the peer, its real host-rendered interface is streamed into the shared surface and mouse, keyboard, wheel, and save input is sent back to the host.
 
 ## Run on both laptops
 
-The grid works on one laptop by itself. To share it between Windows and macOS, CompuSync must be running on both machines on the same network. The Windows `.exe` only runs on Windows; use the source instructions below on the Mac, or build its macOS app there with `npm run dist:mac`.
-
-For the transferable source bundle, see the [Mac setup guide](docs/mac-setup.md).
-
-Install Node.js 22.12 or newer. Copy or clone this project onto each laptop, then run these commands in the project folder:
+CompuSync must run on both computers on the same local network. Install Node.js 22.12 or newer, copy or clone this repository onto each computer, and install dependencies separately on each operating system:
 
 ```sh
 npm ci
 npm start
 ```
 
-Node is needed to run from source, but not to run a packaged app. Both Apple Silicon and Intel Macs are supported by Electron; install dependencies separately on each machine instead of copying `node_modules` from Windows to Mac.
+Do not copy `node_modules` between Windows and macOS. A packaged Windows `.exe` runs only on Windows; build the macOS app on a Mac with `npm run dist:mac`. See the [Mac setup guide](docs/mac-setup.md).
 
-1. Put both laptops on the same Wi-Fi or wired network. Allow CompuSync/Electron through the firewall on the private network if prompted.
-2. On either laptop, open **Share from here** in settings. It shows an eight-character code such as **AB7K-3M9Q**.
-3. On the other laptop, open **Join other laptop**, type the code, and click **Connect laptops** (or press Enter). The laptop is discovered automatically on your network. Lowercase and a missing dash are accepted. Wait for both to say **Connected**. There is no cloud account or external server.
-4. In **Where is the other laptop?**, choose its physical direction. If the Mac is to the right of Windows, choose **right** on Windows and **left** on Mac.
-5. Click **Open on both laptops**. Move either mouse into its grid. Both inputs control the same cursor, bend the grid, and emit particles. Clicks produce a brief shared ripple and strengthen the distortion.
+## Pair the computers
 
-The first laptop is the connection host. Either laptop can serve this role, but the chosen host must stay running for the pair to communicate. Pairing is remembered across restarts, including connections saved by earlier versions. Short codes expire after 15 minutes or one successful pairing; **New code** generates a replacement without changing the saved connection key. Use **Start sharing from here** to replace the connection entirely.
+1. On the computer that should own the workspace and run programs, choose **Share from here**. It displays an eight-character code such as **AB7K-3M9Q**.
+2. On the other computer, choose **Join other laptop**, enter the code, and select **Connect laptops**. Lowercase and an omitted dash are accepted.
+3. On the host, set **Where is the other laptop?** to match the physical layout. If the Mac is to the right of the Windows host, choose **To my right** on the host. The host's choice defines the shared seam.
+4. Select **Open shared window**. A newly opened surface is centered on the host. It does not open a full duplicate on the peer.
 
-Opening CompuSync manually shows the pairing screen whenever the other laptop is not connected, including after the first run or when the app is already in the tray. You can always reopen it with **Ctrl+,** on Windows, **Cmd+,** on Mac, or **Connection & settings…** in the tray/menu bar. Optional startup at sign-in stays in the background. When updating, use **Quit on this laptop** in the old version's tray/menu first, so the new executable can start instead of forwarding to the old background process.
+Pairing uses local UDP discovery and an encrypted direct WebSocket connection. There is no cloud account or external server. If discovery is blocked, expand **Connection help** and enter the host's address and port manually. Discovery uses UDP port 43188; the connection normally uses TCP port 43187.
 
-If discovery is blocked, expand **Connection help** in the pairing section. The host shows its addresses and port; the joining laptop has optional address and port fields. Discovery uses local UDP port 43188; the connection normally uses TCP port 43187. Both laptops need the updated app to pair using a short code.
+The host owns the authoritative session. It must remain running for the peer to control the surface, browse the workspace, or operate a program. A saved pairing reconnects automatically when its previous host address is reachable.
 
-## Use the shared window
+## Move and control the shared window
+
+The frameless window has a 36-DIP shared bar at its top. Grab this bar to move the logical window. CompuSync captures relative pointer movement for the drag, so the same trackpad can continue moving after the physical OS cursor reaches a display edge.
 
 | Action | Result |
 | --- | --- |
-| Move into the grid | Your OS cursor is replaced by the shared application cursor; the grid and particles respond. |
-| Click inside | Captures relative trackpad movement so you cannot run out of window space. |
-| Press Escape | Releases capture and restores the OS cursor. Re-enter or click to resume. |
-| Drag the native title bar to the chosen screen edge | The source window disappears and the other laptop presents it at the opposite edge. Release capture first if necessary. |
-| Ctrl/Cmd+Shift+Enter | Sends the window to the other laptop without dragging. |
-| Show here (tray/menu/settings) | Adds a local view again after a handoff, so both trackpads can participate. |
-| Close the native window / Ctrl/Cmd+W | Closes the shared window on both laptops. |
-| Open on both laptops / Ctrl/Cmd+Shift+O | Reopens both views. Keyboard shortcuts operate while the app is focused; tray/menu controls work while its window is hidden. |
-| Quit on this laptop | Stops that laptop's background connection. The other laptop remains running. |
+| Drag the shared top bar | Moves the one logical window. At the seam, the two computers show complementary crops. |
+| Release the primary button | Commits the drag at its current position. |
+| Press Escape during a bar drag | Cancels the drag and restores its starting position. |
+| Choose **Bring window here** | Moves the window to this computer when it has no local fragment. |
+| Move within the desktop | Moves the shared application cursor and distorts the grid. |
+| Click within the desktop | Captures relative interior movement. Press Escape to restore the OS pointer. |
+| Close / Ctrl or Cmd+W | Closes the one shared surface on both computers while leaving the tray or menu process running. |
+| Open / Ctrl or Cmd+Shift+O | Reopens the shared surface. |
+| Bring here / Ctrl or Cmd+Shift+Enter | Places the shared surface on the computer where the command is invoked. |
+| Ctrl+, on Windows / Cmd+, on Mac | Opens connection and placement settings. |
 
-Closing the shared window keeps a small tray/menu bar process alive so either laptop can reopen it. To receive a remote open or handoff, CompuSync must already be running and the laptop awake. Installed builds can optionally start in the background at sign-in. Opening the app again from the OS also brings its shared window back.
+Either computer can start a bar drag from a visible fragment. If the source crop disappears while the button is held, CompuSync retains pointer capture in a tiny transparent local window until release. This behavior has automated Windows coverage; physical macOS and Retina validation remains in the [two-laptop checklist](docs/testing.md).
 
-After handoff, the source laptop needs **Show here** to provide trackpad input again. Input is captured only within a visible CompuSync window; the app does not monitor your mouse while you use other applications.
+Outside the CompuSync window, mouse and trackpad input behaves normally. CompuSync does not install a global input hook. A computer with no visible fragment uses **Bring window here** rather than an invisible remote drag handle.
 
-## What this build does
+## Use the workspace and text editor
 
-This is an application-level shared surface. It synchronizes the cursor, button presses, grid distortion, particle history, click feedback, window dimensions, open/close state, and handoff. It does not yet host documents, arbitrary apps, or dropped files. It does not install a virtual display driver or extend the operating system desktop. Handoff is a discrete transfer at the configured edge, rather than a window spanning the two physical screens during the drag.
+The desktop panel is the persistent workspace stored on the session host.
 
-Normal hover control begins without a click. Continuous pointer capture requires a click because desktop Chromium requires a user gesture for pointer lock. Escape always releases capture.
+- Choose **Import** to select local files, or drop local files into the desktop. Imports made on the peer are transferred to the host.
+- Dropped directories are imported recursively. Symbolic links and unsupported filesystem entry types are rejected.
+- Use **New Folder**, **Rename**, and **Delete** to organize the workspace. Deleting a directory removes its contents after confirmation.
+- Double-click a directory to browse it. Double-click a file to open it in the bundled text editor. The editor accepts valid UTF-8 text documents up to 2 MiB.
+- Click the rendered editor to focus it, then use the mouse, keyboard, and wheel normally. Use the editor's **Save** button or Ctrl/Cmd+S to write the document to the host workspace.
+- Moving the logical window between computers does not restart the editor. Its process and files remain on the host while its current JPEG frames are shown on whichever crop contains it.
 
-Wi-Fi interruptions trigger automatic reconnect and a fresh state snapshot. Inputs are not queued while offline. The host continues working locally; the joiner cannot change shared state until reconnected. The host also restores its local view if the laptop holding the only visible window disconnects. There is no automatic host migration if the host quits. Connection state is shown in settings and the tray tooltip, keeping controls out of the shared surface.
+The workspace survives application restarts. Running editor processes are session state and stop when the host session or app stops; saved file contents remain. Import name collisions receive a numbered name such as `notes (1).txt` rather than overwriting an existing entry.
 
-## Build a standalone app
+Default workspace limits are 32 path segments, 10,000 files and directories, 256 MiB per file, 1 GiB total stored file data, four concurrent incoming transfers, and 128 KiB transfer chunks. The text editor limit is 2 MiB. Public workspace operations use portable relative paths and never expose the host's absolute workspace path.
+
+## Supported program scope
+
+The bundled **Text Editor** is the only supported host program in this release. It runs in a separate sandboxed, offscreen Electron window at 800x500 and publishes JPEG frames at up to 15 frames per second. CompuSync validates and forwards a small set of mouse, wheel, and keyboard events to that program.
+
+Arbitrary native Windows or macOS applications, dragged executable bundles, audio/video streaming, cross-operating-system execution, and virtual-machine isolation are unsupported. The shared surface visually contains the bundled editor, but that does not constitute a VM or an operating-system process sandbox. Renderer sandboxing limits the Electron renderer; it is not a general isolation boundary for future native programs.
+
+## Persistence, recovery, and boundaries
+
+The workspace is stored beneath CompuSync's OS user-data directory, normally `%APPDATA%\CompuSync\workspace` on Windows or `~/Library/Application Support/CompuSync/workspace` on macOS. Pairing configuration is stored alongside the app profile. Pairing secrets use Electron safe storage where available, with a restricted local-file fallback.
+
+Workspace APIs reject absolute paths, traversal, backslashes, reserved Windows device names, the internal `.compusync` directory, and symbolic-link escapes. Text saves use a temporary file and replacement. Peer imports are transferred in order, acknowledged, SHA-256 checked, and cleaned up if the peer disconnects.
+
+Control traffic and bulk data use separate authenticated channels and separate derived keys, keeping pointer and window actions from queuing behind file or frame payloads. Each data channel is bound to the already authenticated active peer. Requests use a fixed capability catalog; peers and renderers cannot submit host paths, executable paths, shell text, or unrestricted command-line arguments.
+
+Wi-Fi interruption triggers reconnect. Input is not queued while offline. The host continues locally, and its running editor remains available after a peer-only disconnect. There is no automatic host migration. If the host exits, the peer cannot operate the workspace or editor until that host returns.
+
+## Build packages
 
 ```sh
-# Windows: portable executable in dist/
+# Windows portable executable in dist/
 npm run dist:win
 
-# macOS, run on the Mac: DMG + ZIP for the current architecture in dist/
+# macOS DMG and ZIP for the current architecture; run on a Mac
 npm run dist:mac
 
-# macOS explicit architectures (requires macOS)
+# Explicit Mac architectures
 npm run dist:mac -- --arm64
 npm run dist:mac -- --x64
 
@@ -74,29 +95,28 @@ npm run dist:mac -- --x64
 npm run build
 ```
 
-Builds are unsigned during development. macOS packaging and signing should be performed on a Mac. The included GitHub Actions workflow runs tests on Windows and macOS and produces unsigned build artifacts when manually requested. No remote repository or signing identity is configured by this project.
+Development packages are unsigned. Build and sign macOS releases on a Mac. The GitHub Actions workflow runs syntax, unit/integration, and Electron end-to-end checks on Windows and macOS; manually dispatched runs can also produce unsigned artifacts.
 
 ## Develop and verify
 
 ```sh
-npm run check       # Syntax checks
-npm test            # State, geometry, encryption, and real network integration tests
-npm run test:e2e    # Launches TWO real desktop apps and exercises the UI
-npm run demo        # Two paired local instances with isolated demo profiles
+npm run check       # JavaScript syntax checks
+npm test            # State, geometry, workspace, program, encryption, and network tests
+npm run test:e2e    # Real Electron windows and local paired-process behavior
+npm run demo        # Two isolated profiles paired over loopback
 ```
 
-The end-to-end test requires an interactive desktop. It tests pairing through the settings UI, mouse movement from both instances, synchronized particle history, pointer lock and Escape, handoff through the UI, native close, and reopen in both directions. On Windows it also performs an actual title-bar drag to the screen edge using a DPI-aware native input helper. Geometry tests cover screen edge detection and differently sized displays. Mac dragging, macOS permissions, sleep/wake, and cross-platform scaling still need the two-laptop checks in [docs/testing.md](docs/testing.md).
+The end-to-end suite covers one-window crops and cross-seam drag transactions, Pointer Lock cancellation, lifecycle and pairing, plus the host workspace/editor vertical slice. Automated local processes cannot establish actual Windows-to-Mac behavior, Retina alignment, macOS Pointer Lock retention, firewall behavior, sleep/wake, or signed-package behavior. Run the [physical acceptance checklist](docs/testing.md) before treating those paths as released.
 
-The demo creates profiles beneath `.demo/` and uses loopback connections. The normal app stores its small settings file in the OS user-data directory (typically `%APPDATA%/CompuSync` or `~/Library/Application Support/CompuSync`). Session cursor state is transient. Pairing secrets use Electron's OS-backed safe storage when available; a mode-0600 local file is the fallback. Treat a pairing code as a temporary password: someone who knows it and can reach the host can claim the available connection.
+## Implementation map
 
-## Implementation
+- `src/core/state.cjs` owns the version-2 logical window, drag, cursor, and lifecycle state.
+- `src/core/geometry.cjs` creates the virtual two-display topology and derives per-computer crop rectangles.
+- `src/core/session.cjs` and `src/core/wire.cjs` manage pairing and the authenticated control and bulk-data channels.
+- `src/core/workspace.cjs`, `src/core/capabilities.cjs`, and `src/core/transfer.cjs` implement bounded storage and transfer authority.
+- `src/desktop-service.cjs` coordinates local or remote desktop requests with the host-owned services.
+- `src/programs/` contains the bundled host text editor and its offscreen program manager.
+- `src/main.cjs` integrates Electron windows, display topology, tray/menu controls, the workspace picker, and program services.
+- `src/renderer/` renders the cropped shared world, desktop browser, streamed program interface, and settings.
 
-- Electron provides native windows, the tray/menu bar, and Windows/macOS drag events.
-- One host orders input actions and publishes snapshots over WebSocket. Relative deltas from both trackpads are accumulated in normalized coordinates, so different DPI settings work without competing absolute cursors.
-- LAN discovery advertises only an identifier and connection port, never the code or key. A random 40-bit code bootstraps a one-use encrypted exchange of the existing 256-bit connection key, using scrypt with fresh salt from both endpoints. Codes expire after 15 minutes; the host allows at most six pairing attempts per minute and two concurrent derivations. Existing pairings reconnect using the stored full-length key, independent of the code's expiry.
-- Each connection exchanges fresh random values from both endpoints, derives directional keys using HKDF-SHA256, and authenticates/encrypts messages with AES-256-GCM and strict sequence numbers. Browser origins, unauthenticated clients, oversized messages, excess peers, and excessive input rates are rejected.
-- Heartbeats detect dead connections; exponential retries reconnect automatically. Cursor updates are coalesced to screen frames and slow connections cannot build unbounded buffers.
-- A DPI-aware Canvas renderer bends continuous grid lines around the cursor. Particles are generated deterministically from bounded shared trail samples and a host clock reference, so handoff and reconnect do not reset an independent local simulation. Network latency can produce a small difference in visual phase.
-- Renderers load local files with Node access disabled, context isolation, sandboxing, a restrictive content policy, and a narrow IPC bridge, following [Electron's security guidance](https://www.electronjs.org/docs/latest/tutorial/security). Edge transfer uses the native [`will-move` event](https://www.electronjs.org/docs/latest/api/browser-window#event-will-move-macos-windows).
-
-See `src/core/` for the shared state and transport, `src/main.cjs` for OS integration, and `src/renderer/` for the interactive surface and separate connection UI.
+Implementation rationale and compatibility boundaries are recorded in [docs/DESIGN_CHOICES.md](docs/DESIGN_CHOICES.md). Current validation evidence and remaining work are in [docs/IMPLEMENTATION_REPORT.md](docs/IMPLEMENTATION_REPORT.md).

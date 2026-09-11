@@ -1,7 +1,7 @@
 {
   "name": "compusync",
-  "version": "0.1.2",
-  "description": "An interactive grid and one shared cursor, across two laptops.",
+  "version": "0.2.0",
+  "description": "One logical window, shared workspace, and host editor across two laptops.",
   "private": true,
   "main": "src/main.cjs",
   "author": "CompuSync",

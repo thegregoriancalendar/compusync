@@ -23,15 +23,21 @@ This document records the implementation decisions made while carrying out `HAND
 - The computer hosting the CompuSync session also owns the persistent workspace and runs programs. Moving the logical window changes presentation only; it does not migrate storage or processes.
 - Renderer and peer requests use named, validated capabilities. They never contain arbitrary host paths, executable paths, shell strings, or unrestricted command-line arguments.
 - Imported files live under the host profile's `workspace` directory. Public operations use normalized relative identifiers. Path traversal, reserved internal paths, and symbolic-link escapes are rejected. Writes use temporary files and atomic replacement where the platform permits it.
+- The picker imports regular files; drag and drop may import regular files or directory trees. Imports never overwrite: case-insensitive name collisions receive a numbered suffix. Directory delete is recursive after UI confirmation.
 - Bulk files and rendered program frames use a separate authenticated data channel so cursor, drag, lifecycle, and metadata state cannot queue behind large payloads. Transfers are chunked, bounded, acknowledged, and hash-checked. Program frames may be dropped under backpressure because a newer frame supersedes them.
 - The first supported program is a bundled host text editor in a separate sandboxed, offscreen Electron window. This is a real host-run process surface that CompuSync can capture and control consistently on Windows and macOS without global Accessibility or Screen Recording privileges. The supported catalog is explicit; arbitrary native Windows and macOS applications are outside this first compatibility boundary.
+- The editor has a fixed 800x500 logical surface. Its offscreen renderer publishes complete JPEG frames at up to 15 FPS; peer mouse, wheel, and keyboard events are mapped back into those program coordinates. Complete frames make recovery after a dropped frame independent of a video codec or delta history.
+- A validated single-modifier Ctrl/Meta+A uses Electron's focused `selectAll` edit command. Hosted macOS showed that a synthetic Meta+A key event does not consistently apply Chromium's default selection behavior; the explicit bounded edit command keeps Windows and Mac remote editing equivalent without adding general renderer commands.
+- Only valid UTF-8 workspace documents no larger than 2 MiB open in the editor. Saves replace the host workspace document through the same bounded workspace API. Opening a program uses an explicit catalog ID and public document path; program uploads, executable paths, shell commands, and arbitrary arguments have no capability.
 - The workspace persists across app restarts. Program process state is transient; saved document bytes are durable. A lost peer does not stop a host program, and a lost host ends the peer's ability to operate it until reconnection.
 
 ## Security and limits
 
 - Existing sandboxed renderers, context isolation, disabled Node integration, local-only CSP, navigation blocking, authenticated encryption, counters, origin rejection, and sender-checked IPC remain required.
 - Control and data connections use distinct key-derivation contexts. A data connection is accepted only for the member that already owns the active authenticated control connection and is terminated with it.
-- The initial implementation favors bounded behavior: one peer, one selected display per member, a finite workspace quota, bounded file count/depth/file size, and one supported editor catalog entry. These limits can be raised deliberately without expanding authority to the host filesystem or shell.
+- Incoming peer files are written in ordered chunks of at most 128 KiB, belong to the authenticated peer that began them, and are checked against a declared SHA-256 hash before import. At most four transfers are active; partial transfers are removed on failure, disconnect, and service startup.
+- Default workspace bounds are 32 path segments, 10,000 public entries, 256 MiB per file, and 1 GiB of file data. These limits can be raised deliberately without expanding authority to the host filesystem or shell.
+- Electron renderer sandboxing and capability validation are security boundaries around this supported surface. They do not provide a VM, container, or operating-system sandbox for arbitrary programs. Arbitrary native applications, cross-OS execution, screen/audio capture, and general remote-desktop behavior are explicitly unsupported.
 
 ## Recovery and compatibility
 
