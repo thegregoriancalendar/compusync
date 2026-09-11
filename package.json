@@ -1,0 +1,41 @@
+{
+  "name": "compusync",
+  "version": "0.1.0",
+  "description": "An interactive grid and one shared cursor, across two laptops.",
+  "private": true,
+  "main": "src/main.cjs",
+  "author": "CompuSync",
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "test": "node --test tests/*.test.cjs",
+    "test:e2e": "playwright test",
+    "check": "node scripts/check.cjs",
+    "build": "electron-builder --dir",
+    "dist:win": "electron-builder --win portable",
+    "dist:mac": "electron-builder --mac dmg zip",
+    "demo": "node scripts/demo.cjs"
+  },
+  "dependencies": {
+    "ws": "8.21.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "electron": "44.3.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "app.compusync.desktop",
+    "productName": "CompuSync",
+    "directories": { "output": "dist" },
+    "files": ["src/**/*", "package.json"],
+    "asar": true,
+    "win": { "target": ["portable"], "signAndEditExecutable": false },
+    "mac": {
+      "target": ["dmg", "zip"],
+      "category": "public.app-category.utilities",
+      "extendInfo": { "NSLocalNetworkUsageDescription": "CompuSync connects to your other laptop to share its window and cursor." }
+    }
+  }
+}

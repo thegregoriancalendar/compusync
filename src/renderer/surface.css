@@ -1,0 +1,11 @@
+:root { color-scheme: light; background: #fff; }
+* { box-sizing: border-box; }
+html, body, #surface { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+#surface { cursor: none; user-select: none; background: #fff; }
+#field { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+#cursor { position: absolute; top: 0; left: 0; pointer-events: none; filter: drop-shadow(0 1px 1px #0003); will-change: transform; }
+#cursor path { fill: #16191f; stroke: white; stroke-width: 1.5; stroke-linejoin: round; }
+#cursor.pressed path { fill: #436ae8; }
+#ripple { position: absolute; width: 30px; height: 30px; margin: -15px; border: 1.5px solid #6b80b9; border-radius: 50%; opacity: 0; pointer-events: none; }
+#ripple.pulse { animation: pulse 360ms ease-out; }
+@keyframes pulse { from { transform: scale(.3); opacity: .65; } to { transform: scale(1.4); opacity: 0; } }

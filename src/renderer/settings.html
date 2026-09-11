@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'none'; img-src 'self' data:">
+  <title>CompuSync · Connection</title>
+  <link rel="stylesheet" href="settings.css">
+</head>
+<body>
+  <main>
+    <header>
+      <div class="mark" aria-hidden="true"><span></span><span></span></div>
+      <div><h1>CompuSync</h1><p>Two laptops. One little space.</p></div>
+    </header>
+
+    <section class="connection" aria-live="polite">
+      <span id="status-dot" class="dot"></span>
+      <div><strong id="status">Starting…</strong><p id="status-description">Getting your window ready.</p></div>
+    </section>
+
+    <section class="card">
+      <h2>Connect your laptops</h2>
+      <p>Keep both laptops on the same Wi-Fi or wired network, with CompuSync running on each.</p>
+      <div class="tabs" role="tablist" aria-label="Pairing method">
+        <button id="share-tab" role="tab" aria-selected="true" aria-controls="share-panel">Share from here</button>
+        <button id="join-tab" role="tab" aria-selected="false" aria-controls="join-panel">Join other laptop</button>
+      </div>
+
+      <div id="share-panel" role="tabpanel" aria-labelledby="share-tab">
+        <div id="hosting">
+          <label for="address">This laptop’s network address</label>
+          <select id="address"></select>
+          <label for="invitation">Invitation for your other laptop</label>
+          <textarea id="invitation" rows="3" readonly spellcheck="false" aria-describedby="invitation-help"></textarea>
+          <div class="row"><button id="copy" class="primary">Copy invitation</button><span id="copy-status" aria-live="polite"></span></div>
+          <p id="invitation-help" class="small">Send this invitation to yourself, then paste it into “Join other laptop” there. It is the key to your shared window.</p>
+        </div>
+        <div id="create-host" hidden>
+          <p>Start a new connection here and invite your other laptop.</p>
+          <label for="port">Connection port</label><input id="port" type="number" min="1" max="65535" value="43187">
+          <button id="host" class="primary">Start sharing from here</button>
+        </div>
+      </div>
+
+      <div id="join-panel" role="tabpanel" aria-labelledby="join-tab" hidden>
+        <label for="join-code">Invitation from the other laptop</label>
+        <textarea id="join-code" rows="3" placeholder="CS1.…" spellcheck="false" autocomplete="off"></textarea>
+        <button id="join" class="primary">Connect laptops</button>
+      </div>
+      <p id="error" role="alert" hidden></p>
+    </section>
+
+    <section class="card">
+      <h2>Where is the other laptop?</h2>
+      <label for="edge">Drag through this screen edge to send the window</label>
+      <select id="edge"><option value="right">To my right →</option><option value="left">To my left ←</option><option value="top">Above me ↑</option><option value="bottom">Below me ↓</option></select>
+      <p class="small">Choose the opposite edge on your other laptop.</p>
+      <label class="check"><input id="auto-launch" type="checkbox"> Start in the background when I sign in</label>
+      <p id="launch-note" class="small" hidden>Available in the installed app.</p>
+    </section>
+
+    <section class="actions">
+      <button id="open" class="primary">Open on both laptops</button>
+      <button id="show">Show here</button>
+      <button id="send">Send to other laptop</button>
+      <button id="close">Close on both</button>
+    </section>
+
+    <footer>
+      <p>Move into the grid to bend it and leave a particle trail with the shared cursor. Click to capture your trackpad; press <kbd>Esc</kbd> to release it. Both laptops can control the same cursor while their windows are visible.</p>
+      <p>Drag the title bar to your chosen screen edge to hand it over. Use “Show here” to keep controlling from this laptop too.</p>
+      <p><kbd id="shortcut">Ctrl</kbd> + <kbd>,</kbd> opens these settings. Closing the shared window closes it on both laptops. The tray or menu bar icon can reopen it.</p>
+      <details><summary>Connection help</summary><p>Allow CompuSync through the firewall on your private network. Guest Wi-Fi may block laptop-to-laptop connections. If pairing fails, choose the Wi-Fi address above and copy a fresh invitation. A sleeping or fully quit app cannot receive a window; the connection returns automatically when it is available again.</p></details>
+    </footer>
+  </main>
+  <script src="settings.js"></script>
+</body>
+</html>

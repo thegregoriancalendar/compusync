@@ -1,0 +1,45 @@
+:root { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #222a35; background: #f6f7f9; font-size: 13px; color-scheme: light; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { max-width: 650px; margin: auto; padding: 28px; }
+header { display: flex; gap: 16px; align-items: center; margin-bottom: 24px; }
+h1 { font-size: 24px; letter-spacing: -.8px; font-weight: 650; margin: 0 0 5px; }
+h2 { font-size: 14px; font-weight: 650; margin: 0 0 8px; }
+p { color: #657080; line-height: 1.6; margin: 0 0 14px; }
+header p { margin: 0; }
+.mark { display: flex; align-items: center; width: 50px; height: 50px; padding: 11px 8px; gap: 3px; background: #e7edf9; border-radius: 14px; }
+.mark span { border: 1.5px solid #526fa7; border-radius: 3px; width: 18px; height: 24px; }
+.mark span:last-child { transform: translateY(4px); }
+.connection { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 20px; }
+.connection strong { display: block; font-size: 13px; font-weight: 600; }
+.connection p { margin: 4px 0 0; font-size: 12px; }
+.dot { flex: 0 0 7px; height: 7px; margin-top: 5px; border-radius: 50%; background: #a6abb3; }
+.dot.connected { background: #349473; box-shadow: 0 0 0 3px #34947315; }
+.dot.error, .dot.reconnecting { background: #c39146; }
+.card { padding: 20px; background: white; border: 1px solid #e4e7ec; border-radius: 12px; margin-bottom: 16px; }
+label { display: block; font-size: 12px; color: #566170; margin-bottom: 7px; }
+input, select, textarea, button { font: inherit; }
+select, textarea, input[type=number] { width: 100%; border: 1px solid #dce1e9; background: #fcfcfd; color: #384252; padding: 10px; border-radius: 6px; margin-bottom: 14px; }
+textarea { resize: vertical; min-height: 65px; font: 11px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
+button { border: 1px solid #dce1e9; border-radius: 6px; padding: 9px 13px; background: white; color: #39465b; cursor: pointer; font-size: 12px; font-weight: 550; }
+button:hover { background: #f1f4f9; }
+button.primary { background: #466393; border-color: #466393; color: white; }
+button.primary:hover { background: #395582; }
+button:disabled { opacity: .45; cursor: default; }
+button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px solid #668bce; outline-offset: 2px; }
+.tabs { display: flex; margin-bottom: 20px; padding: 3px; background: #f1f3f6; border-radius: 7px; }
+.tabs button { flex: 1; border: 0; background: transparent; font-weight: 500; }
+.tabs button[aria-selected=true] { background: white; box-shadow: 0 1px 3px #0000000c; }
+.small { font-size: 11px; margin: 12px 0 0; }
+.row { display: flex; align-items: center; gap: 12px; }
+#copy-status { color: #349473; font-size: 12px; }
+#error { color: #aa4747; font-size: 12px; margin: 12px 0 0; }
+.check { display: flex; align-items: center; gap: 8px; margin-top: 16px; margin-bottom: 0; }
+.check input { margin: 0; accent-color: #466393; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 20px 0; }
+footer { padding: 0 4px; }
+footer p, details { font-size: 11px; line-height: 1.7; }
+footer p { margin-bottom: 10px; }
+kbd { border: 1px solid #dce1e9; background: white; border-radius: 3px; padding: 1px 4px; font: inherit; }
+summary { color: #536b92; cursor: pointer; margin-bottom: 8px; }
+[hidden] { display: none !important; }
