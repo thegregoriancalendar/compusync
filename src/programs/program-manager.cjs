@@ -333,6 +333,15 @@ class ProgramManager extends EventEmitter {
     if (!event) return false;
     try {
       record.webContents.focus?.();
+      const modifiers = event.modifiers || [];
+      const selectAll = event.type === 'keyDown'
+        && event.keyCode.toLowerCase() === 'a'
+        && modifiers.length === 1
+        && (modifiers[0] === 'control' || modifiers[0] === 'meta');
+      if (selectAll && typeof record.webContents.selectAll === 'function') {
+        record.webContents.selectAll();
+        return true;
+      }
       record.webContents.sendInputEvent(event);
       return true;
     } catch {

@@ -34,11 +34,13 @@ class FakeWebContents extends EventEmitter {
     this.events = [];
     this.destroyed = false;
     this.focused = false;
+    this.selectionCount = 0;
   }
   setWindowOpenHandler(handler) { this.openHandler = handler; }
   setFrameRate(rate) { this.frameRate = rate; }
   sendInputEvent(event) { this.events.push(event); }
   focus() { this.focused = true; }
+  selectAll() { this.selectionCount++; }
   isDestroyed() { return this.destroyed; }
 }
 
@@ -186,8 +188,20 @@ test('manager launches one sandboxed editor, owns IPC and input, throttles frame
   assert.equal(manager.input(launched.id, { type: 'mouseMove', x: 900, y: -1 }), true);
   assert.deepEqual(window.webContents.events[0], { type: 'mouseMove', x: 639, y: 0 });
   assert.equal(window.webContents.focused, true);
+  const eventsBeforeSelection = window.webContents.events.length;
+  assert.equal(manager.input(launched.id, { type: 'keyDown', key: 'a', modifiers: ['control'] }), true);
+  assert.equal(window.webContents.selectionCount, 1);
+  assert.equal(window.webContents.events.length, eventsBeforeSelection);
+  assert.equal(manager.input(launched.id, { type: 'keyDown', key: 'A', modifiers: ['meta'] }), true);
+  assert.equal(window.webContents.selectionCount, 2);
+  assert.equal(window.webContents.events.length, eventsBeforeSelection);
+  assert.equal(manager.input(launched.id, { type: 'keyDown', key: 'a', modifiers: ['control', 'shift'] }), true);
+  assert.equal(window.webContents.selectionCount, 2);
+  assert.deepEqual(window.webContents.events.at(-1), { type: 'keyDown', keyCode: 'a', modifiers: ['control', 'shift'] });
   assert.equal(manager.input(launched.id, { type: 'keyDown', key: 'run-shell-command' }), false);
   assert.equal(manager.input('unknown', { type: 'keyDown', key: 'A' }), false);
+  assert.equal(manager.input('unknown', { type: 'keyDown', key: 'a', modifiers: ['control'] }), false);
+  assert.equal(window.webContents.selectionCount, 2);
 
   assert.equal(manager.close(launched.id), true);
   assert.equal(window.destroyed, true);
