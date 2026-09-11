@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, clipboard, screen, safeStorage, session: electronSession } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, clipboard, dialog, screen, safeStorage, session: electronSession } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
@@ -10,6 +10,7 @@ const { newSecret, parseInvitation } = require('./core/wire.cjs');
 const { pairWithCode } = require('./core/pairing.cjs');
 const { viewportsForActor } = require('./core/geometry.cjs');
 const { EDGES } = require('./core/state.cjs');
+const { DesktopService } = require('./desktop-service.cjs');
 
 if (process.env.COMPUSYNC_PROFILE) {
   const profile = path.resolve(process.env.COMPUSYNC_PROFILE);
@@ -20,7 +21,7 @@ app.setName('CompuSync');
 const hasLock = app.requestSingleInstanceLock();
 if (!hasLock) app.quit();
 
-let surface, settings, tray, sync, config;
+let surface, settings, tray, sync, desktopService, config;
 let quitting = false;
 let changingSession = false;
 let applyingBounds = false;
@@ -303,15 +304,28 @@ function createTray() {
 }
 
 async function startSession() {
+  if (desktopService) await desktopService.stop();
   if (sync) await sync.stop();
   const layout = localLayout();
   sync = new Session({ ...config, layout, startClosed: backgroundLaunch });
+  desktopService = new DesktopService({
+    session: sync,
+    workspaceRoot: path.join(app.getPath('userData'), 'workspace'),
+    hostName: config.name,
+    BrowserWindow,
+    ipcMain,
+    programRendererPath: path.join(__dirname, 'programs'),
+  });
+  desktopService.on('state', (value) => send(surface, 'desktop:state', value));
+  desktopService.on('frame', (value) => send(surface, 'desktop:frame', value));
+  desktopService.on('transfer', (value) => send(surface, 'desktop:transfer', value));
   sync.on('state', applyState);
   sync.on('status', () => {
     refreshStatus();
     if (sync.phase === 'connected' && !sync.state.layouts[config.id]) sync.action({ type: 'layout', layout: localLayout() });
   });
   try {
+    await desktopService.start();
     await sync.start();
     if (config.role === 'host' && config.port === 0) config.port = sync.port;
     saveConfig();
@@ -377,6 +391,33 @@ function setupIpc() {
       return { ok: true };
     } catch (error) { return { ok: false, error: error.message }; }
   });
+  ipcMain.handle('desktop:bootstrap', (event) => {
+    if (!trusted(event) || event.sender !== surface?.webContents) throw new Error('Unknown window.');
+    return desktopService?.state() || { role: config.role, hostName: config.name, workspaceSerial: 0, programs: [] };
+  });
+  ipcMain.handle('desktop:command', async (event, command, data) => {
+    if (!trusted(event) || event.sender !== surface?.webContents) return { ok: false, error: 'Unknown window.' };
+    if (!desktopService) return { ok: false, error: 'The shared workspace is still starting.' };
+    try {
+      let value;
+      if (command === 'import-picker') {
+        const result = await dialog.showOpenDialog(surface, {
+          title: 'Import into the CompuSync workspace',
+          buttonLabel: 'Import',
+          properties: ['openFile', 'multiSelections'],
+        });
+        if (result.canceled) value = { cancelled: true, count: 0 };
+        else value = await desktopService.importPaths(result.filePaths, data?.target || '');
+      } else if (command === 'import-paths') {
+        value = await desktopService.importPaths(data?.paths, data?.target || '');
+      } else {
+        value = await desktopService.handleCommand(command, data || {});
+      }
+      return { ok: true, value };
+    } catch (error) {
+      return { ok: false, error: error?.publicMessage || error?.message || 'The desktop operation failed.' };
+    }
+  });
 }
 
 app.on('second-instance', (_event, argv) => { if (!argv.includes('--background')) activateApp(); });
@@ -388,8 +429,8 @@ app.on('before-quit', (event) => {
   quitting = true;
   clearTimeout(layoutTimer);
   cancelOwnedDrag();
-  sync?.stop().finally(() => app.quit());
-  if (!sync) app.quit();
+  Promise.resolve(desktopService?.stop()).finally(() => sync?.stop()).finally(() => app.quit());
+  if (!sync && !desktopService) app.quit();
 });
 
 if (hasLock) app.whenReady().then(async () => {

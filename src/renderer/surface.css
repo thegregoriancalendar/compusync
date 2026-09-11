@@ -16,9 +16,43 @@ html, body, #surface { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 #close-window:hover { color: #fff; background: #bd4b52; }
 #desktop { position: absolute; z-index: 1; overflow: hidden; cursor: none; background: #fbfcfe; }
 #field { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-#cursor { position: absolute; top: 0; left: 0; pointer-events: none; filter: drop-shadow(0 1px 1px #0003); will-change: transform; }
+#desktop-world { position: absolute; z-index: 2; width: 900px; height: 564px; pointer-events: none; color: #283241; cursor: default; }
+#desktop-world button, #desktop-world input, #desktop-world [tabindex] { pointer-events: auto; }
+.workspace-panel { position: absolute; inset: 18px; pointer-events: none; }
+.workspace-toolbar { display: flex; align-items: center; gap: 7px; height: 34px; pointer-events: auto; }
+.workspace-toolbar button, .name-dialog button, .program-titlebar button { min-height: 28px; padding: 0 10px; border: 1px solid #cfd8e5; border-radius: 6px; color: #354259; background: #f9fbfd; font: 600 11px/1 system-ui, sans-serif; cursor: pointer; }
+.workspace-toolbar button:hover, .name-dialog button:hover, .program-titlebar button:hover { background: #e9eff7; }
+.workspace-toolbar button:disabled { opacity: .42; cursor: default; }
+#host-badge { margin-left: auto; padding: 5px 8px; border-radius: 999px; color: #52637b; background: #eef2f7dd; font-size: 10px; }
+#breadcrumbs { display: flex; align-items: center; min-height: 30px; gap: 2px; pointer-events: auto; }
+#breadcrumbs button { padding: 3px 5px; border: 0; color: #4a6897; background: transparent; font: 11px/1 system-ui, sans-serif; cursor: pointer; }
+#breadcrumbs span { color: #8b96a6; }
+#file-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); align-content: start; gap: 10px; max-height: 460px; padding: 8px 2px 18px; overflow: auto; pointer-events: auto; }
+.file-entry { min-width: 0; height: 82px; padding: 10px 7px; border: 1px solid transparent; border-radius: 9px; color: #303b4c; background: #ffffffb8; text-align: center; cursor: default; }
+.file-entry:hover { border-color: #d4dce8; background: #fff; }
+.file-entry.selected { border-color: #6f91c7; background: #e9f0fb; box-shadow: 0 0 0 1px #6f91c733; }
+.file-entry .icon { display: block; height: 31px; color: #6281af; font-size: 26px; line-height: 29px; }
+.file-entry.folder .icon { color: #c28f4d; }
+.file-entry .name { display: block; overflow: hidden; margin-top: 5px; font-size: 11px; line-height: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.file-entry .meta { display: block; margin-top: 2px; color: #8a94a3; font-size: 9px; }
+#empty-workspace { position: absolute; top: 105px; left: 0; right: 0; color: #7b8798; text-align: center; pointer-events: none; }
+.program-window { position: absolute; z-index: 6; left: 65px; top: 38px; width: 770px; height: 488px; overflow: hidden; border: 1px solid #aeb9c8; border-radius: 9px; background: #fff; box-shadow: 0 18px 60px #24304442; pointer-events: auto; }
+.program-titlebar { display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 7px 0 12px; color: #344156; background: #edf1f6; border-bottom: 1px solid #d2d9e3; }
+.program-titlebar strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#program-host { margin-left: auto; color: #7c8796; font-size: 10px; }
+#program-frame { display: block; width: 768px; height: 452px; object-fit: fill; outline: none; background: #fff; cursor: default; }
+#program-frame:focus { box-shadow: inset 0 0 0 2px #668bce; }
+#program-waiting { position: absolute; top: 48%; left: 0; right: 0; color: #778293; text-align: center; }
+#transfer-status { position: absolute; z-index: 9; right: 18px; bottom: 18px; max-width: 330px; padding: 10px 13px; border: 1px solid #cbd5e2; border-radius: 8px; background: #ffffffed; box-shadow: 0 8px 28px #24304424; pointer-events: auto; }
+.name-dialog { position: absolute; z-index: 10; left: 50%; top: 50%; width: 300px; padding: 18px; transform: translate(-50%, -50%); border: 1px solid #bfc9d6; border-radius: 10px; background: #fff; box-shadow: 0 18px 70px #24304455; pointer-events: auto; }
+.name-dialog label { display: block; margin-bottom: 8px; font-weight: 600; }
+.name-dialog input { width: 100%; margin-bottom: 14px; padding: 8px; border: 1px solid #cbd5e2; border-radius: 6px; font: inherit; }
+.name-dialog div { display: flex; justify-content: flex-end; gap: 8px; }
+.name-dialog button.primary { color: #fff; border-color: #466393; background: #466393; }
+#desktop-world.drag-over::after { content: "Import into the shared workspace"; position: absolute; z-index: 8; inset: 12px; display: grid; place-items: center; border: 2px dashed #668bce; border-radius: 12px; color: #3f5f91; background: #eaf1fcdd; font-size: 15px; font-weight: 600; pointer-events: none; }
+#cursor { position: absolute; z-index: 8; top: 0; left: 0; pointer-events: none; filter: drop-shadow(0 1px 1px #0003); will-change: transform; }
 #cursor path { fill: #16191f; stroke: white; stroke-width: 1.5; stroke-linejoin: round; }
 #cursor.pressed path { fill: #436ae8; }
-#ripple { position: absolute; width: 30px; height: 30px; margin: -15px; border: 1.5px solid #6b80b9; border-radius: 50%; opacity: 0; pointer-events: none; }
+#ripple { position: absolute; z-index: 7; width: 30px; height: 30px; margin: -15px; border: 1.5px solid #6b80b9; border-radius: 50%; opacity: 0; pointer-events: none; }
 #ripple.pulse { animation: pulse 360ms ease-out; }
 @keyframes pulse { from { transform: scale(.3); opacity: .65; } to { transform: scale(1.4); opacity: 0; } }

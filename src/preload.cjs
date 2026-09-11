@@ -1,6 +1,6 @@
 'use strict';
 
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 const subscribe = (channel, callback) => {
   const listener = (_event, value) => callback(value);
   ipcRenderer.on(channel, listener);
@@ -17,4 +17,22 @@ contextBridge.exposeInMainWorld('compusync', {
   onDetails: (callback) => subscribe('sync:details', callback),
   onConnection: (callback) => subscribe('sync:connection', callback),
   onRelease: (callback) => subscribe('sync:release', callback),
+  desktop: {
+    bootstrap: () => ipcRenderer.invoke('desktop:bootstrap'),
+    list: (workspacePath = '') => ipcRenderer.invoke('desktop:command', 'list', { path: workspacePath }),
+    importPicker: (target = '') => ipcRenderer.invoke('desktop:command', 'import-picker', { target }),
+    importDroppedFiles: (files, target = '') => ipcRenderer.invoke('desktop:command', 'import-paths', {
+      target,
+      paths: Array.from(files || [], (file) => webUtils.getPathForFile(file)).filter(Boolean),
+    }),
+    mkdir: (parent, name) => ipcRenderer.invoke('desktop:command', 'mkdir', { parent, name }),
+    rename: (workspacePath, name) => ipcRenderer.invoke('desktop:command', 'rename', { path: workspacePath, name }),
+    delete: (workspacePath) => ipcRenderer.invoke('desktop:command', 'delete', { path: workspacePath }),
+    launchTextEditor: (workspacePath) => ipcRenderer.invoke('desktop:command', 'program-launch', { path: workspacePath, kind: 'text-editor' }),
+    programInput: (programId, input) => ipcRenderer.invoke('desktop:command', 'program-input', { programId, input }),
+    closeProgram: (programId) => ipcRenderer.invoke('desktop:command', 'program-close', { programId }),
+    onState: (callback) => subscribe('desktop:state', callback),
+    onFrame: (callback) => subscribe('desktop:frame', callback),
+    onTransfer: (callback) => subscribe('desktop:transfer', callback),
+  },
 });

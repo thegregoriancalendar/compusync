@@ -43,7 +43,7 @@ async function save() {
 text.addEventListener('input', updateDirtyState);
 saveButton.addEventListener('click', save);
 document.addEventListener('keydown', (event) => {
-  if ((event.controlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
     event.preventDefault();
     save();
   }

@@ -81,6 +81,7 @@ function applyGeometry(next) {
   desktop.style.width = `${view ? geometry.desktopWidth : 0}px`;
   desktop.style.height = `${view ? geometry.desktopHeight : 0}px`;
   desktop.setAttribute('aria-hidden', String(!view || geometry.desktopHeight <= 0));
+  window.sharedDesktop?.updateGeometry(geometry);
 }
 
 function render(next) {
@@ -148,6 +149,20 @@ function releaseContent() {
   if (document.pointerLockElement === desktop) document.exitPointerLock();
   leaveContent();
 }
+
+window.compusyncSurface = {
+  pauseContent() {
+    contentPaused = true;
+    releaseContent();
+    desktop.style.cursor = 'default';
+  },
+  resumeContent() {
+    contentPaused = false;
+    inside = false;
+    contentPrevious = null;
+    desktop.style.cursor = 'none';
+  },
+};
 
 function newDragId() {
   if (typeof crypto?.randomUUID === 'function') return crypto.randomUUID();
