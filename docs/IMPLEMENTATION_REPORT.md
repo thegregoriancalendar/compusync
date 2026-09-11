@@ -4,7 +4,7 @@
 
 All implementation work requested by `docs/HANDOFF.md` is present in the repository in the required order. Goals 1 and 3 replaced the old mirrored handoff with one cropped logical window and a shared drag bar. After that gate passed, Goal 2 added the host-owned workspace and the first explicit host-program compatibility slice: the bundled text editor.
 
-The implementation is ready for physical Windows 11 and Mac acceptance. No physical Mac was available during development, so the cross-computer seam, Retina, macOS Pointer Lock, sleep/wake, and intended-device package checks remain open. These are validation items rather than missing implementation.
+The implementation is ready for physical Windows 11 and Mac acceptance. No physical Mac was available during development, so the cross-computer seam, Retina, macOS Pointer Lock, sleep/wake, and intended-device package launch checks remain open. These are validation items rather than missing implementation. Hosted runners successfully built the Windows x64 portable executable and macOS arm64 DMG and ZIP from the final source.
 
 ## Completed work
 
@@ -69,6 +69,8 @@ The following implementation checkpoints were committed and pushed in order:
 | `f4cc080` | Integrate the shared workspace and host editor |
 | `efbbf52` | Harden cross-platform editor input |
 | `d3c0f88` | Stabilize hosted macOS drag coverage without claiming physical Pointer Lock |
+| `431c11c` | Document and package the 0.2.0 implementation |
+| `f47b621` | Make release packaging artifact-only and tolerate cold CI starts |
 
 ## Automated verification
 
@@ -78,6 +80,8 @@ The latest local and hosted verification completed during implementation include
 - `npm test`: 60/60 tests passed. Coverage includes state/version behavior, topology and crop geometry, drag ownership and recovery, wire encryption, data-channel isolation and binding, pairing/discovery, real WebSocket sessions, workspace paths/quotas/persistence, transfers, capability validation, the program manager, and desktop orchestration.
 - `npm run test:e2e`: 5/5 scenarios passed together on Windows in 17.3 seconds. These launch real Electron processes and cover one logical surface, complementary crops, drag from either fragment, Pointer Lock and Escape, interior input, close/open/bring-here lifecycle, pairing, saved profiles, startup activation, host import and folder operations, a real JPEG frame, forwarded edit/save input, metadata synchronization, movement without program restart, peer import stored only under the host profile, a fresh peer frame, peer save, program close, and workspace delete. The workspace test stubs Electron's native file chooser deterministically; real Windows/macOS dialogs remain a physical check.
 - GitHub Actions run `34597095488` passed `npm ci`, syntax, all 60 unit tests, and all five Electron scenarios on both `windows-latest` and `macos-latest`. Hosted macOS verified Cmd+A replacement, Cmd+S persistence, peer import, frames, geometry, and authoritative drag actions. The runner rejects automated Pointer Lock, so that one assertion remains Windows-automated and physical-Mac work.
+- Final push run `34598020894` repeated syntax, all 60 unit tests, and all five Electron scenarios successfully on both platforms at commit `f47b621`.
+- Package run `34598028012` passed the same checks on both platforms, then built and uploaded `CompuSync 0.2.0.exe` for Windows x64 and `CompuSync-0.2.0-arm64.dmg` plus `CompuSync-0.2.0-arm64-mac.zip` for Apple silicon. The retained workflow artifacts are `compusync-windows-latest` (100,048,779-byte archive, SHA-256 `b7639abe8a4f1fe190cdb930e287bbeb22e8f2c7faba7750c53eb647a638ff54`) and `compusync-macos-latest` (254,344,052-byte archive, SHA-256 `58ceefcc455f3e3991c15813cfe682581e3f826f190e45ba27a2f8e7a2b4ee76`). Packaging is explicitly artifact-only and cannot attempt an implicit GitHub release upload.
 - `npm run dist:win`: passed for the final package version 0.2.0. It produced `dist/CompuSync 0.2.0.exe` at 100,042,519 bytes. The packaged `app.asar` contains the core, workspace, program, and renderer assets; `main.cjs`, the desktop service, desktop renderer, program manager, and editor matched the final working source byte for byte.
 
 The geometry/state and renderer assertions use exact shared crop coordinates. Windows may round native outer bounds by one or two DIPs at fractional display scaling; tests allow that native-window tolerance while keeping logical and rendered crops exact.
@@ -93,7 +97,7 @@ No physical Mac test was possible in this session. Complete `docs/testing.md` wi
 - imports from both physical computers, including nested directories, collision names, interrupted transfers, and exact host bytes;
 - peer operation and save of the host editor while the surface is moved across the seam;
 - real firewall/discovery behavior, weak Wi-Fi, reconnect, host loss, sleep/wake, and display changes;
-- unsigned DMG/ZIP behavior, target Mac architecture, menu-bar controls, start at sign-in, and eventual signing/notarization requirements;
+- launch and Gatekeeper behavior of the hosted unsigned Apple-silicon DMG/ZIP on the intended Mac, menu-bar controls, start at sign-in, any required Intel build, and eventual signing/notarization requirements;
 - Windows portable artifact launch and a paired packaged-app smoke test.
 
 ## Items to watch during continued development
