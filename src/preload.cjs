@@ -9,6 +9,8 @@ const subscribe = (channel, callback) => {
 
 contextBridge.exposeInMainWorld('compusync', {
   bootstrap: () => ipcRenderer.invoke('sync:bootstrap'),
+  // Input remains a narrow, data-only channel. Main validates the sender and
+  // every action type before it can reach the authoritative session reducer.
   input: (action) => ipcRenderer.send('sync:input', action),
   command: (name, data) => ipcRenderer.invoke('sync:command', name, data),
   onState: (callback) => subscribe('sync:state', callback),

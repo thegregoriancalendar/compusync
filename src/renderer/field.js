@@ -1,13 +1,16 @@
 'use strict';
 
-// The host shares cursor history and a clock reference. Particle positions are
-// computed from that history, so skipped network frames do not lose particles.
-// No independent random simulation runs on either laptop.
+// Every renderer draws the same full scene and translates it by its viewport
+// offset. The local canvas is only as large as the native fragment, so crossing
+// a seam neither reflows the grid nor allocates a full Retina-sized canvas.
 (() => {
   const canvas = document.getElementById('field');
   const ctx = canvas.getContext('2d', { alpha: false });
-  let width = 1, height = 1, scale = 1;
+  let width = 0;
+  let height = 0;
+  let scale = 1;
   let state;
+  let viewport;
   let clockOffset = 0;
   let previousFrame = performance.now();
   let intensity = 0;
@@ -20,11 +23,15 @@
   };
 
   function resize() {
-    width = canvas.clientWidth;
-    height = canvas.clientHeight;
-    scale = Math.min(window.devicePixelRatio || 1, 2);
-    canvas.width = Math.round(width * scale);
-    canvas.height = Math.round(height * scale);
+    const nextWidth = Math.max(0, Math.round(canvas.clientWidth));
+    const nextHeight = Math.max(0, Math.round(canvas.clientHeight));
+    const nextScale = Math.min(window.devicePixelRatio || 1, 2);
+    if (nextWidth === width && nextHeight === height && nextScale === scale) return;
+    width = nextWidth;
+    height = nextHeight;
+    scale = nextScale;
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
     ctx.setTransform(scale, 0, 0, scale, 0, 0);
   }
 
@@ -40,40 +47,67 @@
 
   function draw(time) {
     animation = null;
+    resize();
     const dt = Math.min((time - previousFrame) / 1000, .05);
     previousFrame = time;
     const now = Date.now() + clockOffset;
-    const elapsed = (now - (state?.scene.epoch || now)) / 1000;
-    const active = Boolean(state?.cursor.active.length);
+    const elapsed = (now - (state?.scene?.epoch || now)) / 1000;
+    const active = Boolean(state?.cursor?.active?.length);
     intensity += ((active ? 1 : 0) - intensity) * (1 - Math.exp(-dt * 8));
-    const cx = (state?.cursor.x ?? .5) * Math.max(1, width - 24) + 3;
-    const cy = (state?.cursor.y ?? .5) * Math.max(1, height - 30) + 2;
-    const radius = Math.min(175, Math.min(width, height) * .36);
-    const pressed = state && Object.values(state.cursor.buttons).some((button) => button & 1);
-    const strength = intensity * (pressed ? .95 : .65);
+    ctx.setTransform(scale, 0, 0, scale, 0, 0);
     ctx.fillStyle = '#fbfcfe';
     ctx.fillRect(0, 0, width, height);
+    if (!state || !viewport?.viewport || width <= 0 || height <= 0) {
+      if (!document.hidden) animation = requestAnimationFrame(draw);
+      return;
+    }
 
-    // A Gaussian displacement keeps every grid line continuous while the
-    // cursor pushes the lattice outwards and adds a little rotational flow.
+    const fullWidth = viewport.contentWidth;
+    const fullHeight = viewport.contentHeight;
+    const offsetX = viewport.contentOffsetX;
+    const offsetY = viewport.contentOffsetY;
+    const cx = (state.cursor?.x ?? .5) * Math.max(1, fullWidth - 24) + 3;
+    const cy = (state.cursor?.y ?? .5) * Math.max(1, fullHeight - 30) + 2;
+    const radius = Math.min(175, Math.min(fullWidth, fullHeight) * .36);
+    const pressed = Object.values(state.cursor?.buttons || {}).some((button) => button & 1);
+    const strength = intensity * (pressed ? .95 : .65);
+
+    // Drawing uses full-content coordinates. Native canvas clipping produces
+    // complementary pixels while this translation selects the local crop.
+    ctx.save();
+    ctx.translate(-offsetX, -offsetY);
     const warp = (x, y) => {
-      const dx = x - cx, dy = y - cy;
+      const dx = x - cx;
+      const dy = y - cy;
       const influence = Math.exp(-(dx * dx + dy * dy) / (radius * radius * .72)) * strength;
       const twist = .18 + Math.sin(elapsed * .65) * .035;
       return [x + (dx - dy * twist) * influence, y + (dy + dx * twist) * influence];
     };
+
     const grid = new Path2D();
     const spacing = 32;
-    for (let x = -spacing; x <= width + spacing; x += spacing) {
-      for (let y = -spacing; y <= height + spacing; y += 7) {
+    const padding = radius + spacing;
+    const anchoredStart = (minimum, step) => -spacing + Math.floor((minimum + spacing) / step) * step;
+    const xStart = Math.max(-spacing, anchoredStart(offsetX - padding, spacing));
+    const xEnd = Math.min(fullWidth + spacing, offsetX + width + padding);
+    const yStart = Math.max(-spacing, anchoredStart(offsetY - padding, spacing));
+    const yEnd = Math.min(fullHeight + spacing, offsetY + height + padding);
+    const sampleXStart = Math.max(-spacing, anchoredStart(offsetX - padding, 7));
+    const sampleYStart = Math.max(-spacing, anchoredStart(offsetY - padding, 7));
+    for (let x = xStart; x <= xEnd; x += spacing) {
+      let first = true;
+      for (let y = sampleYStart; y <= yEnd; y += 7) {
         const point = warp(x, y);
-        if (y === -spacing) grid.moveTo(...point); else grid.lineTo(...point);
+        if (first) grid.moveTo(...point); else grid.lineTo(...point);
+        first = false;
       }
     }
-    for (let y = -spacing; y <= height + spacing; y += spacing) {
-      for (let x = -spacing; x <= width + spacing; x += 7) {
+    for (let y = yStart; y <= yEnd; y += spacing) {
+      let first = true;
+      for (let x = sampleXStart; x <= xEnd; x += 7) {
         const point = warp(x, y);
-        if (x === -spacing) grid.moveTo(...point); else grid.lineTo(...point);
+        if (first) grid.moveTo(...point); else grid.lineTo(...point);
+        first = false;
       }
     }
     ctx.lineWidth = .7;
@@ -93,18 +127,16 @@
       ctx.stroke(grid);
     }
 
-    // Quiet ambient motes; a fixed seed and the shared clock keep their phase
-    // consistent even after a window has been hidden or a peer reconnects.
+    // Particle seeds use the full logical dimensions. Changing a local crop
+    // only clips this world and cannot reseed or redistribute its particles.
     for (let i = 0; i < 65; i++) {
       const phase = hash(i + 20) * TAU;
-      const x = hash(i * 4 + 1) * width + Math.sin(elapsed * .22 + phase) * 9;
-      const y = hash(i * 4 + 2) * height + Math.cos(elapsed * .18 + phase) * 9;
+      const x = hash(i * 4 + 1) * fullWidth + Math.sin(elapsed * .22 + phase) * 9;
+      const y = hash(i * 4 + 2) * fullHeight + Math.cos(elapsed * .18 + phase) * 9;
       const [px, py] = warp(x, y);
       particle(px, py, .7 + hash(i * 4 + 3) * .8, .12 + hash(i + 400) * .19, i % 6 === 0);
     }
 
-    // Small motes circle the moving field, then a ribbon of particles peels
-    // away along its recent path. A press expands the field and its orbit.
     if (intensity > .005) for (let i = 0; i < 38; i++) {
       const orbit = (18 + hash(i + 90) * 76) * (pressed ? 1.2 : 1);
       const angle = hash(i + 130) * TAU + elapsed * (.3 + hash(i + 200) * .5);
@@ -112,29 +144,40 @@
       particle(cx + Math.cos(angle) * orbit, cy + Math.sin(angle) * orbit * .84, .8 + hash(i + 300) * 1.3, intensity * shimmer, i % 7 === 0);
     }
 
-    for (const point of state?.cursor.trail || []) {
+    for (const point of state.cursor?.trail || []) {
       const age = (now - point.t) / 1000;
       if (age < 0 || age > 1.4) continue;
       for (let i = 0; i < 5; i++) {
         const seed = point.serial * 19 + i * 7;
         const angle = hash(seed) * TAU + age * .65;
         const distance = hash(seed + 1) * 12 + age * (12 + hash(seed + 2) * 32);
-        const x = point.x * Math.max(1, width - 24) + 3 + Math.cos(angle) * distance;
-        const y = point.y * Math.max(1, height - 30) + 2 + Math.sin(angle) * distance - age * 12;
+        const x = point.x * Math.max(1, fullWidth - 24) + 3 + Math.cos(angle) * distance;
+        const y = point.y * Math.max(1, fullHeight - 30) + 2 + Math.sin(angle) * distance - age * 12;
         const fade = (1 - age / 1.4) ** 2;
         particle(x, y, .7 + hash(seed + 3) * 1.5, fade * .75, i === 0);
       }
     }
+    ctx.restore();
     if (!document.hidden) animation = requestAnimationFrame(draw);
   }
 
   window.sharedField = {
-    update(next) { state = next; clockOffset = next.clockOffsetMs || 0; },
+    update(next, nextViewport) {
+      state = next;
+      viewport = nextViewport;
+      clockOffset = next.clockOffsetMs || 0;
+      resize();
+    },
   };
   window.addEventListener('resize', resize);
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden && animation) { cancelAnimationFrame(animation); animation = null; }
-    else if (!document.hidden && !animation) { previousFrame = performance.now(); animation = requestAnimationFrame(draw); }
+    if (document.hidden && animation) {
+      cancelAnimationFrame(animation);
+      animation = null;
+    } else if (!document.hidden && !animation) {
+      previousFrame = performance.now();
+      animation = requestAnimationFrame(draw);
+    }
   });
   resize();
   animation = requestAnimationFrame(draw);

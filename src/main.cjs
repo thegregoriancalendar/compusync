@@ -8,7 +8,7 @@ const { randomUUID } = require('node:crypto');
 const { Session } = require('./core/session.cjs');
 const { newSecret, parseInvitation } = require('./core/wire.cjs');
 const { pairWithCode } = require('./core/pairing.cjs');
-const { edgeCrossing, arrivalBounds } = require('./core/geometry.cjs');
+const { viewportsForActor } = require('./core/geometry.cjs');
 const { EDGES } = require('./core/state.cjs');
 
 if (process.env.COMPUSYNC_PROFILE) {
@@ -24,11 +24,11 @@ let surface, settings, tray, sync, config;
 let quitting = false;
 let changingSession = false;
 let applyingBounds = false;
-let handoffAt = 0;
-let lastHandoff = null;
 let backgroundLaunch = false;
 let pendingActivation = false;
-let resizeTimer;
+let layoutRevision = 0;
+let layoutTimer;
+let lastNativeBounds = null;
 const rendererPath = (file) => path.join(__dirname, 'renderer', file);
 const configPath = () => path.join(app.getPath('userData'), 'settings.json');
 
@@ -62,6 +62,40 @@ function addresses() {
   return [...new Set(Object.values(os.networkInterfaces()).flat().filter((entry) => entry && entry.family === 'IPv4' && !entry.internal).map((entry) => entry.address))];
 }
 
+function selectedDisplay() {
+  if (!surface || surface.isDestroyed()) return screen.getPrimaryDisplay();
+  return screen.getDisplayMatching(surface.getBounds());
+}
+
+function localLayout() {
+  const active = selectedDisplay();
+  const displays = screen.getAllDisplays().slice(0, 8).map((display) => ({
+    id: String(display.id),
+    bounds: display.bounds,
+    workArea: display.workArea,
+    scaleFactor: display.scaleFactor,
+    primary: display.id === screen.getPrimaryDisplay().id,
+  }));
+  return { revision: ++layoutRevision, edge: config.edge, activeDisplayId: String(active.id), displays };
+}
+
+function scheduleLayoutUpdate() {
+  clearTimeout(layoutTimer);
+  layoutTimer = setTimeout(() => {
+    if (!sync || sync.stopped) return;
+    sync.action({ type: 'layout', layout: localLayout() });
+  }, 100);
+}
+
+function viewportFor(state) {
+  if (!state?.window?.rect || !state?.topology) return null;
+  return viewportsForActor(state.window.rect, state.topology, config.id)[0] || null;
+}
+
+function surfaceState(state) {
+  return state ? { ...state, viewport: viewportFor(state)?.viewport || null } : state;
+}
+
 function details() {
   const ips = addresses();
   return {
@@ -71,7 +105,7 @@ function details() {
     invitation: config.role === 'host' ? sync?.invitation() : null,
     addresses: ips.length ? ips : ['127.0.0.1'],
     host: config.host, port: sync?.port || config.port,
-    state: sync?.state,
+    state: surfaceState(sync?.state),
     clockOffsetMs: sync?.clockOffsetMs || 0,
   };
 }
@@ -98,8 +132,10 @@ function secureWindow(window) {
 
 function createSurface() {
   surface = new BrowserWindow({
-    width: 900, height: 600, minWidth: 360, minHeight: 240,
+    width: 900, height: 600,
     title: 'CompuSync', backgroundColor: '#ffffff', show: false,
+    frame: false, resizable: false, fullscreenable: false,
+    roundedCorners: false, hasShadow: false, useContentSize: true,
     autoHideMenuBar: true, webPreferences: webPreferences(),
   });
   surface.setMenuBarVisibility(false);
@@ -115,76 +151,78 @@ function createSurface() {
     event.preventDefault();
     if (!sync.action({ type: 'close' })) { surface.hide(); showSettings(); }
   });
-  surface.on('hide', releasePointer);
-  surface.on('blur', releasePointer);
-  surface.on('will-move', (_event, bounds) => {
-    if (applyingBounds || Date.now() - handoffAt < 1200 || sync.phase !== 'connected') return;
-    const pointer = screen.getCursorScreenPoint();
-    const display = screen.getDisplayMatching(surface.getBounds());
-    const crossing = edgeCrossing(bounds, pointer, display.bounds, config.edge);
-    if (crossing) transfer(crossing);
+  surface.on('hide', releaseContentPointer);
+  surface.on('blur', () => {
+    releaseContentPointer();
+    cancelOwnedDrag();
   });
-  surface.on('resize', () => {
-    if (applyingBounds) return;
-    clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(() => {
-      const [width, height] = surface.getSize();
-      if (width !== sync.state.size.width || height !== sync.state.size.height) sync.action({ type: 'resize', width, height });
-    }, 100);
-  });
+  surface.webContents.on('render-process-gone', () => cancelOwnedDrag());
   surface.webContents.on('before-input-event', (event, input) => {
-    if (input.type !== 'keyDown' || !(input.control || input.meta)) return;
+    if (input.type !== 'keyDown') return;
+    if (input.key === 'Escape' && sync?.state.drag?.owner === config.id) {
+      event.preventDefault();
+      cancelOwnedDrag();
+      send(surface, 'sync:release', { reason: 'cancel' });
+      return;
+    }
+    if (!(input.control || input.meta)) return;
     const key = input.key.toLowerCase();
     if (key === ',') { event.preventDefault(); showSettings(); }
     if (key === 'w') { event.preventDefault(); closeShared(); }
-    if (key === 'enter' && input.shift) { event.preventDefault(); transfer({ edge: config.edge, ratio: 0.5 }); }
+    if (key === 'enter' && input.shift) { event.preventDefault(); bringHere(); }
     if (key === 'o' && input.shift) { event.preventDefault(); openShared(); }
   });
 }
 
-function releasePointer() {
-  send(surface, 'sync:release', null);
+function releaseContentPointer() {
+  send(surface, 'sync:release', { reason: 'content' });
   if (sync?.state.cursor.active.includes(config.id)) sync.action({ type: 'leave' });
+}
+
+function cancelOwnedDrag() {
+  const drag = sync?.state.drag;
+  if (drag?.owner === config.id) sync.action({ type: 'drag-cancel', id: drag.id });
+}
+
+function captureKeeperBounds() {
+  const area = selectedDisplay().workArea;
+  const previous = lastNativeBounds || { x: area.x, y: area.y };
+  return {
+    x: Math.max(area.x, Math.min(area.x + area.width - 1, previous.x)),
+    y: Math.max(area.y, Math.min(area.y + area.height - 1, previous.y)),
+    width: 1,
+    height: 1,
+  };
 }
 
 function applyState(state) {
   if (!surface || surface.isDestroyed()) return;
-  const visible = state.open && state.views.includes(config.id);
-  const incoming = state.handoff && state.handoff.serial !== lastHandoff;
-  if (incoming) lastHandoff = state.handoff.serial;
+  const view = state.open ? viewportFor(state) : null;
+  const ownsDrag = state.open && state.drag?.owner === config.id;
   applyingBounds = true;
-  const display = screen.getDisplayMatching(surface.getBounds());
-  if (incoming && state.handoff.to === config.id && visible) {
-    handoffAt = Date.now();
-    surface.setBounds(arrivalBounds(state.size, display.workArea, state.handoff));
-    surface.show();
-    surface.focus();
-  } else if (visible) {
-    const width = Math.min(state.size.width, display.workArea.width);
-    const height = Math.min(state.size.height, display.workArea.height);
-    const current = surface.getBounds();
-    if (current.width !== width || current.height !== height) surface.setSize(width, height);
-    if (!surface.isVisible()) {
-      surface.setBounds(arrivalBounds({ width, height }, display.workArea, { edge: 'center', ratio: 0.5 }));
-      surface.show();
-    }
-  } else if (surface.isVisible()) surface.hide();
+  if (view) {
+    lastNativeBounds = view.nativeBounds;
+    if (typeof surface.setOpacity === 'function') surface.setOpacity(1);
+    surface.setBounds(view.nativeBounds, false);
+    if (!surface.isVisible()) surface.showInactive();
+  } else if (ownsDrag) {
+    if (typeof surface.setOpacity === 'function') surface.setOpacity(.01);
+    surface.setBounds(captureKeeperBounds(), false);
+    if (!surface.isVisible()) surface.show();
+  } else if (surface.isVisible()) {
+    if (typeof surface.setOpacity === 'function') surface.setOpacity(1);
+    surface.hide();
+  }
   applyingBounds = false;
-  send(surface, 'sync:state', { ...state, clockOffsetMs: sync.clockOffsetMs });
+  send(surface, 'sync:state', { ...surfaceState(state), clockOffsetMs: sync.clockOffsetMs });
   // Settings does not need high-frequency cursor updates.
-  if (state.open !== applyState.lastOpen || state.views.join() !== applyState.lastViews) {
+  const placement = `${state.open}:${state.window.rect.x}:${state.window.rect.y}:${state.layouts[config.id]?.revision || 0}`;
+  if (placement !== applyState.lastPlacement) {
     applyState.lastOpen = state.open;
-    applyState.lastViews = state.views.join();
+    applyState.lastPlacement = placement;
     send(settings, 'sync:details', details());
     updateMenu();
   }
-}
-
-function transfer(crossing) {
-  if (sync.phase !== 'connected') return false;
-  handoffAt = Date.now();
-  releasePointer();
-  return sync.action({ type: 'handoff', ...crossing });
 }
 
 function showSettings() {
@@ -203,8 +241,8 @@ function openShared() {
   else if (surface.isVisible()) { surface.restore(); surface.focus(); }
 }
 
-function showLocal() {
-  if (!sync.action({ type: 'show' })) showSettings();
+function bringHere() {
+  if (!sync.action({ type: 'place-here' })) showSettings();
   else if (surface.isVisible()) { surface.restore(); surface.focus(); }
 }
 
@@ -213,8 +251,10 @@ function showLocal() {
 function activateApp() {
   if (!sync) { pendingActivation = true; return; }
   pendingActivation = false;
-  showLocal();
-  if (sync.phase !== 'connected') showSettings();
+  if (!sync.state.open) openShared();
+  if (sync.phase !== 'connected') { showSettings(); return; }
+  if (viewportFor(sync.state)) { surface.show(); surface.focus(); }
+  else showSettings();
 }
 
 function closeShared() {
@@ -225,10 +265,9 @@ function menuTemplate() {
   return [
     { label: sync?.phase === 'connected' ? `Connected to ${sync.status().peers[0]?.name || 'laptop'}` : 'CompuSync · Waiting for connection', enabled: false },
     { type: 'separator' },
-    { label: 'Open on both laptops', accelerator: 'CmdOrCtrl+Shift+O', click: openShared },
-    { label: 'Show on this laptop', click: showLocal },
-    { label: 'Send to other laptop', accelerator: 'CmdOrCtrl+Shift+Enter', enabled: sync?.phase === 'connected' && sync?.state.open, click: () => transfer({ edge: config.edge, ratio: 0.5 }) },
-    { label: 'Close on both laptops', accelerator: 'CmdOrCtrl+W', click: closeShared },
+    { label: 'Open shared window', accelerator: 'CmdOrCtrl+Shift+O', click: openShared },
+    { label: 'Bring window here', accelerator: 'CmdOrCtrl+Shift+Enter', click: bringHere },
+    { label: 'Close shared window', accelerator: 'CmdOrCtrl+W', click: closeShared },
     { type: 'separator' },
     { label: 'Connection & settings…', accelerator: 'CmdOrCtrl+,', click: showSettings },
     { type: 'separator' },
@@ -265,16 +304,12 @@ function createTray() {
 
 async function startSession() {
   if (sync) await sync.stop();
-  lastHandoff = null;
-  sync = new Session({ ...config, startClosed: backgroundLaunch });
-  let openWhenConnected = config.role === 'join' && !backgroundLaunch;
+  const layout = localLayout();
+  sync = new Session({ ...config, layout, startClosed: backgroundLaunch });
   sync.on('state', applyState);
   sync.on('status', () => {
     refreshStatus();
-    if (openWhenConnected && sync.phase === 'connected') {
-      openWhenConnected = false;
-      sync.action({ type: 'show' });
-    }
+    if (sync.phase === 'connected' && !sync.state.layouts[config.id]) sync.action({ type: 'layout', layout: localLayout() });
   });
   try {
     await sync.start();
@@ -291,7 +326,10 @@ function setupIpc() {
   const trusted = (event) => [surface, settings].some((window) => window && !window.isDestroyed() && event.sender === window.webContents && event.senderFrame === window.webContents.mainFrame);
   ipcMain.handle('sync:bootstrap', (event) => { if (!trusted(event)) throw new Error('Unknown window.'); return details(); });
   ipcMain.on('sync:input', (event, action) => {
-    if (!trusted(event) || event.sender !== surface.webContents || !['enter', 'leave', 'move', 'button'].includes(action?.type)) return;
+    if (!trusted(event) || event.sender !== surface.webContents || ![
+      'enter', 'leave', 'move', 'button',
+      'drag-start', 'drag-move', 'drag-end', 'drag-cancel',
+    ].includes(action?.type)) return;
     sync.action(action);
   });
   ipcMain.handle('sync:command', async (event, command, data) => {
@@ -299,9 +337,8 @@ function setupIpc() {
     try {
       if (command === 'settings') showSettings();
       else if (command === 'open') openShared();
-      else if (command === 'show') showLocal();
+      else if (command === 'place-here') bringHere();
       else if (command === 'close') closeShared();
-      else if (command === 'handoff') transfer({ edge: config.edge, ratio: 0.5 });
       else if (event.sender !== settings?.webContents) throw new Error('Open settings to change this.');
       else if (command === 'copy') {
         const code = details().invitation?.code;
@@ -334,6 +371,7 @@ function setupIpc() {
           ...(process.platform === 'win32' ? { path: process.env.PORTABLE_EXECUTABLE_FILE || process.execPath } : {}),
         });
         saveConfig();
+        sync.action({ type: 'layout', layout: localLayout() });
         refreshStatus();
       } else throw new Error('Unknown command.');
       return { ok: true };
@@ -348,7 +386,8 @@ app.on('before-quit', (event) => {
   if (quitting) return;
   event.preventDefault();
   quitting = true;
-  clearTimeout(resizeTimer);
+  clearTimeout(layoutTimer);
+  cancelOwnedDrag();
   sync?.stop().finally(() => app.quit());
   if (!sync) app.quit();
 });
@@ -363,6 +402,9 @@ if (hasLock) app.whenReady().then(async () => {
   setupIpc();
   createSurface();
   createTray();
+  screen.on('display-added', scheduleLayoutUpdate);
+  screen.on('display-removed', scheduleLayoutUpdate);
+  screen.on('display-metrics-changed', scheduleLayoutUpdate);
   await startSession();
   if (!backgroundLaunch || pendingActivation) activateApp();
   else if (sync.phase === 'error') showSettings();

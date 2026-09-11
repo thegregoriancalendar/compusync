@@ -22,7 +22,7 @@ function render(next) {
   $('status').textContent = connected ? `Connected to ${status.peers[0]?.name || 'your other laptop'}` : {
     starting: 'Getting ready', hosting: 'Ready to pair', connecting: 'Connecting…', reconnecting: 'Waiting for your other laptop', error: 'Connection needs attention',
   }[status.phase] || 'Not connected';
-  $('status-description').textContent = status.message || (connected ? 'Your window and cursor are shared live.' : status.role === 'host' ? `${next.name} · Share the invitation below.` : 'Keep CompuSync open on the other laptop.');
+  $('status-description').textContent = status.message || (connected ? 'One logical window is shared across the display seam.' : status.role === 'host' ? `${next.name} · Share the invitation below.` : 'Keep CompuSync open on the other laptop.');
   $('hosting').hidden = status.role !== 'host' || status.phase === 'error';
   $('create-host').hidden = !$('hosting').hidden;
   const code = next.invitation?.code || '';
@@ -36,7 +36,7 @@ function render(next) {
   $('auto-launch').checked = next.autoLaunch;
   $('auto-launch').disabled = !next.packaged;
   $('launch-note').hidden = next.packaged;
-  $('send').disabled = !connected || !next.state?.open;
+  $('place-here').disabled = !next.state?.layouts?.[next.id];
   if (!selectedTab) tab(status.role === 'join');
 }
 
@@ -88,8 +88,7 @@ $('host').addEventListener('click', async () => {
   $('host').disabled = false;
 });
 for (const id of ['edge', 'auto-launch']) $(id).addEventListener('change', () => command('preferences', { edge: $('edge').value, autoLaunch: $('auto-launch').checked }));
-for (const id of ['open', 'show', 'close']) $(id).addEventListener('click', () => command(id));
-$('send').addEventListener('click', () => command('handoff'));
+for (const id of ['open', 'place-here', 'close']) $(id).addEventListener('click', () => command(id));
 if (/Mac/.test(navigator.platform)) $('shortcut').textContent = '⌘';
 api.onDetails(render);
 api.bootstrap().then(render);

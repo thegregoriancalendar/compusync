@@ -3,19 +3,91 @@
 const { EventEmitter } = require('node:events');
 const { WebSocket, WebSocketServer } = require('ws');
 const { initialState, reduce, disconnect } = require('./state.cjs');
+const { normalizeLayout, buildTopology, normalizeLogicalRect } = require('./geometry.cjs');
 const { newSecret, createChannel, handshakeSalt } = require('./wire.cjs');
 const { newCode, pairingSecret, CODE_LIFETIME } = require('./pairing.cjs');
 const { advertise } = require('./discovery.cjs');
 
+const PROTOCOL_VERSION = 2;
+const DRAG_TOKEN = /^[A-Za-z0-9_-]{8,80}$/;
+
 const validMember = (member) => member && /^[a-zA-Z0-9-]{1,80}$/.test(member.id) && typeof member.name === 'string' && member.name.length > 0 && member.name.length <= 80;
+
+function sameRect(first, second) {
+  return first && second && first.x === second.x && first.y === second.y
+    && first.width === second.width && first.height === second.height;
+}
+
+// Rebuild derived topology instead of trusting it from the network. This also
+// bounds every collection copied into the renderer-facing client state.
+function validateSnapshot(value, members) {
+  if (!value || value.version !== 2 || !Number.isSafeInteger(value.revision) || value.revision < 0
+    || typeof value.open !== 'boolean' || !value.window?.rect || !value.layouts
+    || typeof value.layouts !== 'object' || Array.isArray(value.layouts)) return null;
+  const ids = members.map((member) => member.id);
+  const normalizedRect = normalizeLogicalRect(value.window.rect);
+  if (!sameRect(normalizedRect, value.window.rect)) return null;
+  const layouts = {};
+  for (const [id, candidate] of Object.entries(value.layouts)) {
+    if (!ids.includes(id) || Object.keys(layouts).length >= ids.length) return null;
+    const layout = normalizeLayout(candidate);
+    if (!layout) return null;
+    layouts[id] = layout;
+  }
+  const cursor = value.cursor;
+  if (!cursor || !Number.isFinite(cursor.x) || cursor.x < 0 || cursor.x > 1
+    || !Number.isFinite(cursor.y) || cursor.y < 0 || cursor.y > 1
+    || !Array.isArray(cursor.active) || cursor.active.length > ids.length
+    || new Set(cursor.active).size !== cursor.active.length || !cursor.active.every((id) => ids.includes(id))
+    || !cursor.buttons || typeof cursor.buttons !== 'object' || Array.isArray(cursor.buttons)
+    || !Array.isArray(cursor.trail) || cursor.trail.length > 48) return null;
+  for (const [id, buttons] of Object.entries(cursor.buttons)) {
+    if (!ids.includes(id) || !Number.isInteger(buttons) || buttons < 0 || buttons > 31) return null;
+  }
+  if (!cursor.trail.every((point) => point && Number.isFinite(point.x) && point.x >= 0 && point.x <= 1
+    && Number.isFinite(point.y) && point.y >= 0 && point.y <= 1 && Number.isFinite(point.t)
+    && Number.isSafeInteger(point.serial) && point.serial >= 0)) return null;
+  if (!value.scene || !Number.isFinite(value.scene.epoch)) return null;
+  if (value.click !== null && (!value.click || !Number.isSafeInteger(value.click.serial)
+    || !Number.isFinite(value.click.x) || value.click.x < 0 || value.click.x > 1
+    || !Number.isFinite(value.click.y) || value.click.y < 0 || value.click.y > 1)) return null;
+  let drag = null;
+  if (value.drag !== null) {
+    const candidate = value.drag;
+    const startRect = normalizeLogicalRect(candidate?.startRect);
+    if (!candidate || !DRAG_TOKEN.test(candidate.id) || !ids.includes(candidate.owner)
+      || !Number.isFinite(candidate.offsetX) || !Number.isFinite(candidate.offsetY)
+      || !sameRect(startRect, candidate.startRect) || !Number.isSafeInteger(candidate.lastSeq)
+      || candidate.lastSeq < 0 || !Number.isFinite(candidate.leaseUntil)) return null;
+    drag = { ...candidate, startRect };
+  }
+  return {
+    version: 2,
+    revision: value.revision,
+    open: value.open,
+    window: { rect: normalizedRect },
+    layouts,
+    topology: buildTopology(layouts, ids),
+    drag,
+    cursor: {
+      x: cursor.x,
+      y: cursor.y,
+      active: [...cursor.active],
+      buttons: { ...cursor.buttons },
+      trail: cursor.trail.map((point) => ({ ...point })),
+    },
+    scene: { epoch: value.scene.epoch },
+    click: value.click ? { ...value.click } : null,
+  };
+}
 
 class Session extends EventEmitter {
   constructor(config) {
     super();
     this.config = config;
     this.self = { id: config.id, name: config.name };
-    this.state = initialState(config.id);
-    if (config.startClosed) { this.state.open = false; this.state.views = []; }
+    this.state = initialState(config.id, Date.now(), config.layout);
+    if (config.startClosed) this.state.open = false;
     this.members = [this.self];
     this.connections = new Map();
     this.phase = 'starting';
@@ -104,7 +176,7 @@ class Session extends EventEmitter {
     let rateStart = Date.now();
     let messages = 0;
     const timeout = setTimeout(() => socket.terminate(), 5000);
-    socket.send(JSON.stringify({ type: 'challenge', version: 1, salt }));
+    socket.send(JSON.stringify({ type: 'challenge', version: PROTOCOL_VERSION, salt }));
     socket.on('message', async (raw) => {
       try {
         if (deriving || mode === 'done') throw new Error('Unexpected message.');
@@ -155,7 +227,6 @@ class Session extends EventEmitter {
           clearTimeout(timeout);
           this.connections.set(member.id, { socket, channel });
           this.members = [this.self, member];
-          if (this.state.open) this.state = reduce(this.state, member.id, { type: 'show' }, this.members.map((m) => m.id));
           socket.send(channel.seal({ type: 'welcome', state: this.state, members: this.members, serverTime: Date.now() }));
           this.setStatus('connected');
           this.publish();
@@ -175,6 +246,7 @@ class Session extends EventEmitter {
       this.connections.delete(member.id);
       this.members = [this.self];
       this.state = disconnect(this.state, member.id, [this.self.id]);
+      this.scheduleDragLease();
       if (!this.stopped) { this.setStatus('hosting', 'The other laptop disconnected. Waiting for it to reconnect.'); this.publish(); }
     });
   }
@@ -197,7 +269,7 @@ class Session extends EventEmitter {
       try {
         if (!this.channel) {
           const challenge = JSON.parse(raw.toString());
-          if (challenge.type !== 'challenge' || challenge.version !== 1) throw new Error('Incompatible version.');
+          if (challenge.type !== 'challenge' || challenge.version !== PROTOCOL_VERSION) throw new Error('Incompatible version.');
           const peerSalt = newSecret();
           this.channel = createChannel(this.config.secret, handshakeSalt(challenge.salt, peerSalt), false);
           socket.send(JSON.stringify({ type: 'key', salt: peerSalt }));
@@ -206,9 +278,11 @@ class Session extends EventEmitter {
         }
         const message = this.channel.open(raw);
         if (message.type === 'rejected') { failure = message.message; socket.close(); return; }
-        if (!['welcome', 'snapshot'].includes(message.type) || !message.state || message.state.version !== 1 || !Array.isArray(message.members) || message.members.length !== 2 || !message.members.every(validMember) || !message.members.some((m) => m.id === this.self.id)) throw new Error('Invalid state.');
+        if (!['welcome', 'snapshot'].includes(message.type) || !Array.isArray(message.members) || message.members.length !== 2 || !message.members.every(validMember) || !message.members.some((m) => m.id === this.self.id)) throw new Error('Invalid state.');
         if (!authenticated && message.type !== 'welcome') throw new Error('Missing welcome.');
-        this.state = message.state;
+        const nextState = validateSnapshot(message.state, message.members);
+        if (!nextState) throw new Error('Invalid state.');
+        this.state = nextState;
         this.members = message.members;
         if (Number.isFinite(message.serverTime)) {
           const offset = message.serverTime - Date.now();
@@ -239,6 +313,10 @@ class Session extends EventEmitter {
       this.state = structuredClone(this.state);
       this.state.cursor.active = [];
       this.state.cursor.buttons = {};
+      if (this.state.drag) {
+        this.state.window.rect = this.state.drag.startRect;
+        this.state.drag = null;
+      }
       this.emit('state', this.state);
       this.setStatus('reconnecting', failure);
       this.retryTimer = setTimeout(() => this.connect(), this.retryDelay);
@@ -259,8 +337,22 @@ class Session extends EventEmitter {
     const next = reduce(this.state, id, action, this.members.map((m) => m.id));
     if (next === this.state) return false;
     this.state = next;
+    this.scheduleDragLease();
     this.publish();
     return true;
+  }
+
+  scheduleDragLease() {
+    clearTimeout(this.dragLeaseTimer);
+    this.dragLeaseTimer = null;
+    if (this.config.role !== 'host' || !this.state.drag) return;
+    const { owner, id, leaseUntil } = this.state.drag;
+    this.dragLeaseTimer = setTimeout(() => {
+      if (!this.state.drag || this.state.drag.owner !== owner || this.state.drag.id !== id) return;
+      if (this.state.drag.leaseUntil > Date.now()) { this.scheduleDragLease(); return; }
+      this.apply(owner, { type: 'drag-cancel', id });
+    }, Math.max(1, leaseUntil - Date.now() + 1));
+    this.dragLeaseTimer.unref();
   }
 
   publish() {
@@ -282,6 +374,7 @@ class Session extends EventEmitter {
     this.stopped = true;
     clearTimeout(this.retryTimer);
     clearTimeout(this.broadcastTimer);
+    clearTimeout(this.dragLeaseTimer);
     clearInterval(this.heartbeat);
     clearTimeout(this.pairingTimer);
     this.discovery?.stop();
@@ -295,4 +388,4 @@ class Session extends EventEmitter {
   }
 }
 
-module.exports = { Session };
+module.exports = { Session, PROTOCOL_VERSION, validateSnapshot };

@@ -55,24 +55,23 @@
 
     <section class="card">
       <h2>Where is the other laptop?</h2>
-      <label for="edge">Drag through this screen edge to send the window</label>
+      <label for="edge">When this laptop hosts, the other laptop is</label>
       <select id="edge"><option value="right">To my right →</option><option value="left">To my left ←</option><option value="top">Above me ↑</option><option value="bottom">Below me ↓</option></select>
-      <p class="small">Choose the opposite edge on your other laptop.</p>
+      <p class="small">The host's choice defines the shared display seam. Drag the shared top bar through that edge to move one continuous window between laptops.</p>
       <label class="check"><input id="auto-launch" type="checkbox"> Start in the background when I sign in</label>
       <p id="launch-note" class="small" hidden>Available in the installed app.</p>
     </section>
 
     <section class="actions">
-      <button id="open" class="primary">Open on both laptops</button>
-      <button id="show">Show here</button>
-      <button id="send">Send to other laptop</button>
-      <button id="close">Close on both</button>
+      <button id="open" class="primary">Open shared window</button>
+      <button id="place-here">Bring window here</button>
+      <button id="close">Close shared window</button>
     </section>
 
     <footer>
-      <p>Move into the grid to bend it and leave a particle trail with the shared cursor. Click to capture your trackpad; press <kbd>Esc</kbd> to release it. Both laptops can control the same cursor while their windows are visible.</p>
-      <p>Drag the title bar to your chosen screen edge to hand it over. Use “Show here” to keep controlling from this laptop too.</p>
-      <p><kbd id="shortcut">Ctrl</kbd> + <kbd>,</kbd> opens these settings. Closing the shared window closes it on both laptops. The tray or menu bar icon can reopen it.</p>
+      <p>Move into the desktop to bend the grid and leave a particle trail with the shared cursor. Click the desktop to capture your trackpad; press <kbd>Esc</kbd> to release it.</p>
+      <p>Grab the bar at the very top to move the one logical window. While crossing, each laptop shows only its adjoining crop. Use “Bring window here” when the window is wholly on the other laptop.</p>
+      <p><kbd id="shortcut">Ctrl</kbd> + <kbd>,</kbd> opens these settings. Closing or reopening the shared window affects the same surface on both laptops.</p>
       <details><summary>Connection help</summary><p>Allow CompuSync through the firewall on your private network. Guest Wi-Fi may block laptop-to-laptop connections. If pairing fails, check the code or generate a new one. You can also enter the address in the pairing section’s Connection help. A sleeping or fully quit app cannot receive a window; the connection returns automatically when it is available again.</p></details>
     </footer>
   </main>

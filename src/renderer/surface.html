@@ -8,10 +8,22 @@
   <link rel="stylesheet" href="surface.css">
 </head>
 <body>
-  <main id="surface" aria-label="Shared interactive grid. Move to bend the grid and emit particles with the shared cursor. Click to capture; Escape to release. Control or Command comma opens settings.">
-    <canvas id="field" aria-hidden="true"></canvas>
-    <svg id="cursor" width="24" height="30" viewBox="0 0 24 30" aria-hidden="true" hidden><path d="M3 2 L3 23 L8.4 17.7 L12.4 27 L16.5 25.2 L12.5 16.3 L20 16 Z"/></svg>
-    <div id="ripple" aria-hidden="true"></div>
+  <main id="surface" aria-label="One shared CompuSync window. Drag its top bar to move it between laptops. Move inside the desktop to bend the grid and emit particles with the shared cursor. Click the desktop to capture; Escape to release.">
+    <header id="top-bar" aria-label="Shared window title bar">
+      <div id="drag-handle" aria-label="Drag the shared window">
+        <span class="window-mark" aria-hidden="true"><i></i><i></i></span>
+        <span class="window-title">CompuSync</span>
+      </div>
+      <div class="window-actions">
+        <button id="open-settings" type="button" aria-label="Open connection settings" title="Connection settings">Settings</button>
+        <button id="close-window" type="button" aria-label="Close the shared window" title="Close shared window">Close</button>
+      </div>
+    </header>
+    <section id="desktop" aria-label="Shared desktop">
+      <canvas id="field" aria-hidden="true"></canvas>
+      <svg id="cursor" width="24" height="30" viewBox="0 0 24 30" aria-hidden="true" hidden><path d="M3 2 L3 23 L8.4 17.7 L12.4 27 L16.5 25.2 L12.5 16.3 L20 16 Z"/></svg>
+      <div id="ripple" aria-hidden="true"></div>
+    </section>
   </main>
   <script src="field.js"></script>
   <script src="surface.js"></script>

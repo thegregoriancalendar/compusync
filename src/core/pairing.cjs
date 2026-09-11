@@ -6,6 +6,8 @@ const { WebSocket } = require('ws');
 const { newSecret, createChannel, handshakeSalt, validHost } = require('./wire.cjs');
 const { discover } = require('./discovery.cjs');
 
+const PROTOCOL_VERSION = 2;
+
 // Crockford's alphabet avoids ambiguous I/L/O; typed aliases are accepted.
 const ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 const CODE_LIFETIME = 15 * 60 * 1000;
@@ -48,7 +50,7 @@ function claimCode(endpoint, code, { timeout = 3500 } = {}) {
         if (stage === 'challenge') {
           stage = 'deriving';
           const message = JSON.parse(raw.toString());
-          if (message.type !== 'challenge' || message.version !== 1) throw new Error('Incompatible app version.');
+          if (message.type !== 'challenge' || message.version !== PROTOCOL_VERSION) throw new Error('Incompatible app version.');
           const salt = newSecret();
           const combined = handshakeSalt(message.salt, salt);
           channel = createChannel(await pairingSecret(code, combined), combined, false);

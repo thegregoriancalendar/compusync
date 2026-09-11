@@ -1,7 +1,20 @@
 :root { color-scheme: light; background: #fff; }
 * { box-sizing: border-box; }
 html, body, #surface { width: 100%; height: 100%; margin: 0; overflow: hidden; }
-#surface { cursor: none; user-select: none; background: #fff; }
+#surface { position: relative; cursor: default; user-select: none; background: #fff; font: 12px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+#top-bar { position: absolute; z-index: 10; display: flex; align-items: stretch; height: 36px; overflow: hidden; color: #39465b; background: linear-gradient(#f7f9fc, #edf1f6); border: 1px solid #d8dee8; box-shadow: inset 0 -1px #dfe4ec; -webkit-app-region: no-drag; }
+#drag-handle { min-width: 0; flex: 1; display: flex; align-items: center; gap: 8px; padding: 0 10px; cursor: grab; }
+#drag-handle.dragging { cursor: grabbing; }
+.window-mark { display: flex; width: 19px; height: 13px; border: 1px solid #8c9aaf; border-radius: 3px; overflow: hidden; flex: 0 0 auto; }
+.window-mark i { flex: 1; }
+.window-mark i + i { border-left: 1px solid #8c9aaf; }
+.window-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; letter-spacing: .01em; }
+.window-actions { display: flex; flex: 0 0 auto; align-items: center; padding-right: 4px; }
+.window-actions button { height: 27px; margin: 0 2px; padding: 0 9px; border: 0; border-radius: 5px; color: #4a5668; background: transparent; font: inherit; cursor: default; -webkit-app-region: no-drag; }
+.window-actions button:hover { background: #dfe5ee; }
+.window-actions button:focus-visible { outline: 2px solid #668bce; outline-offset: -2px; }
+#close-window:hover { color: #fff; background: #bd4b52; }
+#desktop { position: absolute; z-index: 1; overflow: hidden; cursor: none; background: #fbfcfe; }
 #field { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 #cursor { position: absolute; top: 0; left: 0; pointer-events: none; filter: drop-shadow(0 1px 1px #0003); will-change: transform; }
 #cursor path { fill: #16191f; stroke: white; stroke-width: 1.5; stroke-linejoin: round; }
