@@ -2,10 +2,16 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { WebSocket } = require('ws');
-const { Session } = require('../src/core/session.cjs');
+const {
+  Session,
+  PROTOCOL_VERSION,
+  DATA_PLAINTEXT_MAX,
+  DATA_WIRE_MAX,
+  DATA_BACKPRESSURE_MAX,
+} = require('../src/core/session.cjs');
 const { DRAG_LEASE_MS } = require('../src/core/state.cjs');
 const { viewportsForActor } = require('../src/core/geometry.cjs');
-const { newSecret } = require('../src/core/wire.cjs');
+const { newSecret, createChannel, handshakeSalt } = require('../src/core/wire.cjs');
 
 async function until(predicate, timeout = 5000) {
   const start = Date.now();
@@ -65,6 +71,7 @@ async function pair(t) {
   assert.equal(peer.action({ type: 'layout', layout: peerLayout() }), true);
   await until(() => host.state.topology.displays.length === 2);
   await until(() => peer.state.revision === host.state.revision);
+  await until(() => host.dataPhase === 'connected' && peer.dataPhase === 'connected');
   return { host, peer, secret };
 }
 
@@ -74,6 +81,33 @@ async function straddle(host, peer, token = 'host-seam-1') {
   assert.equal(host.action({ type: 'drag-move', id: token, seq: 2, dx: 480, dy: 0 }), true);
   assert.equal(host.action({ type: 'drag-end', id: token }), true);
   await until(() => peer.state.drag === null && peer.state.window.rect.x === 1470);
+}
+
+function rejectedDataSocket(port, secret, memberId, token) {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}`, { maxPayload: DATA_WIRE_MAX, perMessageDeflate: false });
+    let channel;
+    const timeout = setTimeout(() => { socket.terminate(); reject(new Error('Data rejection timed out.')); }, 3000);
+    socket.on('message', (raw) => {
+      try {
+        if (channel) return;
+        const challenge = JSON.parse(raw.toString());
+        assert.equal(challenge.version, PROTOCOL_VERSION);
+        const peerSalt = newSecret();
+        channel = createChannel(secret, handshakeSalt(challenge.salt, peerSalt), false, { context: 'data', maxMessage: DATA_WIRE_MAX });
+        socket.send(JSON.stringify({ type: 'key', purpose: 'data', salt: peerSalt }));
+        socket.send(channel.seal({ type: 'data-hello', memberId, token }));
+      } catch (error) {
+        clearTimeout(timeout);
+        reject(error);
+      }
+    });
+    socket.on('error', () => {});
+    socket.on('close', (code) => {
+      clearTimeout(timeout);
+      resolve(code);
+    });
+  });
 }
 
 test('real sockets share topology, dual input, and a reversible client-owned seam drag', async (t) => {
@@ -115,6 +149,83 @@ test('real sockets share topology, dual input, and a reversible client-owned sea
   assert.deepEqual(positions, [1470, 1970, 1670, 2170]);
   assert.equal(viewportsForActor(host.state.window.rect, host.state.topology, 'windows').length, 0);
   assert.equal(viewportsForActor(host.state.window.rect, host.state.topology, 'mac').length, 1);
+});
+
+test('bulk data moves large messages both ways while control actions stay responsive', async (t) => {
+  const { host, peer } = await pair(t);
+  const peerPayload = 'p'.repeat(700000);
+  const hostReceived = new Promise((resolve) => host.once('data', (message, memberId) => resolve({ message, memberId })));
+  assert.equal(peer.sendData({ type: 'test-peer-bulk', payload: peerPayload }), true);
+
+  host.action({ type: 'enter', x: .3, y: .4 });
+  host.action({ type: 'move', dx: .1, dy: 0 });
+  await until(() => peer.state.cursor.x === .4);
+  const fromPeer = await hostReceived;
+  assert.equal(fromPeer.memberId, 'mac');
+  assert.equal(fromPeer.message.type, 'test-peer-bulk');
+  assert.equal(fromPeer.message.payload.length, peerPayload.length);
+
+  const hostPayload = 'h'.repeat(700000);
+  const peerReceived = new Promise((resolve) => peer.once('data', (message, memberId) => resolve({ message, memberId })));
+  assert.equal(host.sendData({ type: 'test-host-bulk', payload: hostPayload }), true);
+  host.action({ type: 'drag-start', id: 'bulk-drag-1', offsetX: 100, offsetY: 10 });
+  host.action({ type: 'drag-move', id: 'bulk-drag-1', seq: 1, dx: 200, dy: 0 });
+  host.action({ type: 'drag-cancel', id: 'bulk-drag-1' });
+  await until(() => peer.state.drag === null && peer.state.revision === host.state.revision);
+  const fromHost = await peerReceived;
+  assert.equal(fromHost.memberId, 'windows');
+  assert.equal(fromHost.message.type, 'test-host-bulk');
+  assert.equal(fromHost.message.payload.length, hostPayload.length);
+});
+
+test('bulk limits and backpressure return false without disturbing control', async (t) => {
+  const { host, peer } = await pair(t);
+  assert.equal(peer.sendData({ type: 'too-large', payload: 'x'.repeat(DATA_PLAINTEXT_MAX) }), false);
+  assert.equal(peer.sendData(null), false);
+
+  Object.defineProperty(peer.dataSocket, 'bufferedAmount', { value: DATA_BACKPRESSURE_MAX + 1, configurable: true });
+  assert.equal(peer.sendData({ type: 'backpressured', payload: 'small' }), false);
+  delete peer.dataSocket.bufferedAmount;
+
+  host.action({ type: 'enter', x: .2, y: .2 });
+  host.action({ type: 'move', dx: .1, dy: .1 });
+  await until(() => Math.abs(peer.state.cursor.x - .3) < 1e-10 && Math.abs(peer.state.cursor.y - .3) < 1e-10);
+  assert.equal(host.phase, 'connected');
+  assert.equal(peer.phase, 'connected');
+});
+
+test('the raised server receiver still rejects oversized raw control frames', async (t) => {
+  const { host, peer } = await pair(t);
+  peer.socket.send(Buffer.alloc(70000, 1));
+  await until(() => host.phase === 'hosting');
+  await peer.stop();
+  assert.equal(host.connections.size, 0);
+  assert.equal(host.sendData({ type: 'no-orphan-data' }), false);
+});
+
+test('orphan, wrong-token, and duplicate bulk sockets cannot bind to control', async (t) => {
+  const { host, peer, secret } = await pair(t);
+  assert.equal(await rejectedDataSocket(host.port, secret, 'orphan', newSecret()), 1008);
+  assert.equal(await rejectedDataSocket(host.port, secret, 'mac', newSecret()), 1008);
+  assert.equal(await rejectedDataSocket(host.port, secret, 'mac', peer.dataToken), 1008);
+  assert.equal(host.phase, 'connected');
+  assert.equal(peer.dataPhase, 'connected');
+});
+
+test('bulk socket retries independently and control teardown removes it', async (t) => {
+  const { host, peer } = await pair(t);
+  const firstSocket = peer.dataSocket;
+  firstSocket.terminate();
+  await until(() => peer.dataSocket && peer.dataSocket !== firstSocket && peer.dataPhase === 'connected');
+  assert.equal(host.phase, 'connected');
+  const received = new Promise((resolve) => host.once('data', resolve));
+  assert.equal(peer.sendData({ type: 'after-data-reconnect', ok: true }), true);
+  assert.deepEqual(await received, { type: 'after-data-reconnect', ok: true });
+
+  await peer.stop();
+  await until(() => host.phase === 'hosting');
+  assert.equal(host.sendData({ type: 'after-control-close' }), false);
+  assert.equal(host.dataPhase, 'disconnected');
 });
 
 test('the first accepted drag owner rejects a conflicting peer grab and stale movement', async (t) => {

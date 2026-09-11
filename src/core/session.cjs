@@ -10,8 +10,25 @@ const { advertise } = require('./discovery.cjs');
 
 const PROTOCOL_VERSION = 2;
 const DRAG_TOKEN = /^[A-Za-z0-9_-]{8,80}$/;
+const DATA_TOKEN = /^[A-Za-z0-9_-]{43}$/;
+const CONTROL_WIRE_MAX = 65536;
+const DATA_PLAINTEXT_MAX = 1024 * 1024;
+const DATA_WIRE_MAX = 1500000;
+const DATA_BACKPRESSURE_MAX = 2 * 1024 * 1024;
 
 const validMember = (member) => member && /^[a-zA-Z0-9-]{1,80}$/.test(member.id) && typeof member.name === 'string' && member.name.length > 0 && member.name.length <= 80;
+
+function sanitizeDataMessage(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  try {
+    const serialized = JSON.stringify(value);
+    if (!serialized || Buffer.byteLength(serialized) > DATA_PLAINTEXT_MAX) return null;
+    const clean = JSON.parse(serialized);
+    return clean && typeof clean === 'object' && !Array.isArray(clean) ? clean : null;
+  } catch {
+    return null;
+  }
+}
 
 function sameRect(first, second) {
   return first && second && first.x === second.x && first.y === second.y
@@ -99,6 +116,9 @@ class Session extends EventEmitter {
     this.pairingAttempts = [];
     this.pairingInFlight = 0;
     this.pairingCode = null;
+    this.dataPhase = 'disconnected';
+    this.dataRetryDelay = 250;
+    this.dataToken = null;
   }
 
   status() {
@@ -111,6 +131,11 @@ class Session extends EventEmitter {
     this.emit('status', this.status());
   }
 
+  setDataStatus(phase, message = '', memberId = null) {
+    this.dataPhase = phase;
+    this.emit('data-status', { phase, message, memberId });
+  }
+
   async start() {
     if (this.config.role === 'host') await this.startHost();
     else this.connect();
@@ -119,7 +144,9 @@ class Session extends EventEmitter {
   async startHost() {
     this.server = new WebSocketServer({
       host: this.config.bindHost || '0.0.0.0', port: this.config.port,
-      maxPayload: 16384, perMessageDeflate: false,
+      // The shared listener must admit bulk frames. Each channel below still
+      // enforces its own authenticated wire limit, including control's 64 KiB.
+      maxPayload: DATA_WIRE_MAX, perMessageDeflate: false,
       // A browser page must not be able to connect to the local service.
       verifyClient: ({ origin }, done) => done(!origin, 403, 'Desktop clients only'),
     });
@@ -169,10 +196,10 @@ class Session extends EventEmitter {
     if (this.server.clients.size > 8) { socket.close(1013, 'Busy'); return; }
     const salt = newSecret();
     let channel;
-    let mode = 'session', codeForAttempt, deriving = false;
+    let mode = 'session', purpose = 'control', codeForAttempt, deriving = false;
     socket.isAlive = true;
     socket.on('pong', () => { socket.isAlive = true; });
-    let member;
+    let member, dataMemberId;
     let rateStart = Date.now();
     let messages = 0;
     const timeout = setTimeout(() => socket.terminate(), 5000);
@@ -183,10 +210,14 @@ class Session extends EventEmitter {
         if (Date.now() - rateStart > 1000) { rateStart = Date.now(); messages = 0; }
         if (++messages > 300) throw new Error('Too many messages.');
         if (!channel) {
+          if (raw.length > CONTROL_WIRE_MAX) throw new Error('Handshake too large.');
           const keyMessage = JSON.parse(raw.toString());
           if (keyMessage.type !== 'key') throw new Error('Missing key handshake.');
+          purpose = keyMessage.purpose ?? 'control';
+          if (!['control', 'data'].includes(purpose)) throw new Error('Invalid channel purpose.');
           const combined = handshakeSalt(salt, keyMessage.salt);
           if (keyMessage.mode === 'pair') {
+            if (purpose !== 'control') throw new Error('Invalid pairing channel.');
             this.pairingAttempts = this.pairingAttempts.filter((time) => Date.now() - time < 60000);
             if (!this.canPair() || this.pairingAttempts.length >= 6 || this.pairingInFlight >= 2) throw new Error('Pairing unavailable.');
             this.pairingAttempts.push(Date.now());
@@ -201,7 +232,10 @@ class Session extends EventEmitter {
             channel = createChannel(secret, combined, true);
             socket.send(channel.seal({ type: 'pair-ready' }));
           } else {
-            channel = createChannel(this.config.secret, combined, true);
+            mode = purpose === 'data' ? 'data' : 'session';
+            channel = createChannel(this.config.secret, combined, true, purpose === 'data'
+              ? { context: 'data', maxMessage: DATA_WIRE_MAX }
+              : undefined);
           }
           return;
         }
@@ -216,6 +250,25 @@ class Session extends EventEmitter {
           socket.close(1000, 'Paired');
           return;
         }
+        if (mode === 'data') {
+          if (!dataMemberId) {
+            const connection = this.connections.get(message?.memberId);
+            if (message?.type !== 'data-hello' || !connection || !DATA_TOKEN.test(message.token)
+              || message.token !== connection.dataToken || connection.dataSocket) throw new Error('Invalid data binding.');
+            dataMemberId = message.memberId;
+            clearTimeout(timeout);
+            connection.dataSocket = socket;
+            connection.dataChannel = channel;
+            socket.send(channel.seal({ type: 'data-ready' }));
+            this.setDataStatus('connected', '', dataMemberId);
+          } else {
+            if (message?.type !== 'data-message') throw new Error('Unknown data message.');
+            const clean = sanitizeDataMessage(message.message);
+            if (!clean) throw new Error('Invalid data message.');
+            this.emit('data', clean, dataMemberId);
+          }
+          return;
+        }
         if (!member) {
           if (message.type !== 'hello' || !validMember(message.member) || message.member.id === this.self.id) throw new Error('Invalid identity.');
           if (this.connections.size > 0) {
@@ -225,9 +278,10 @@ class Session extends EventEmitter {
           }
           member = { id: message.member.id, name: message.member.name };
           clearTimeout(timeout);
-          this.connections.set(member.id, { socket, channel });
+          const dataToken = newSecret();
+          this.connections.set(member.id, { socket, channel, dataToken, dataSocket: null, dataChannel: null });
           this.members = [this.self, member];
-          socket.send(channel.seal({ type: 'welcome', state: this.state, members: this.members, serverTime: Date.now() }));
+          socket.send(channel.seal({ type: 'welcome', state: this.state, members: this.members, serverTime: Date.now(), dataToken }));
           this.setStatus('connected');
           this.publish();
         } else if (message.type === 'action') {
@@ -242,7 +296,20 @@ class Session extends EventEmitter {
     socket.on('error', () => {});
     socket.on('close', () => {
       clearTimeout(timeout);
+      if (dataMemberId) {
+        const connection = this.connections.get(dataMemberId);
+        if (connection?.dataSocket === socket) {
+          connection.dataSocket = null;
+          connection.dataChannel = null;
+          this.setDataStatus('disconnected', '', dataMemberId);
+        }
+        return;
+      }
       if (!member || this.connections.get(member.id)?.socket !== socket) return;
+      if (this.connections.get(member.id)?.dataSocket) {
+        this.connections.get(member.id).dataSocket.terminate();
+        this.setDataStatus('disconnected', '', member.id);
+      }
       this.connections.delete(member.id);
       this.members = [this.self];
       this.state = disconnect(this.state, member.id, [this.self.id]);
@@ -280,6 +347,7 @@ class Session extends EventEmitter {
         if (message.type === 'rejected') { failure = message.message; socket.close(); return; }
         if (!['welcome', 'snapshot'].includes(message.type) || !Array.isArray(message.members) || message.members.length !== 2 || !message.members.every(validMember) || !message.members.some((m) => m.id === this.self.id)) throw new Error('Invalid state.');
         if (!authenticated && message.type !== 'welcome') throw new Error('Missing welcome.');
+        if (!authenticated && !DATA_TOKEN.test(message.dataToken)) throw new Error('Missing data binding.');
         const nextState = validateSnapshot(message.state, message.members);
         if (!nextState) throw new Error('Invalid state.');
         this.state = nextState;
@@ -293,6 +361,8 @@ class Session extends EventEmitter {
           clearTimeout(timer);
           this.retryDelay = 500;
           this.setStatus('connected');
+          this.dataToken = message.dataToken;
+          this.connectData();
         }
         this.emit('state', this.state);
       } catch {
@@ -306,6 +376,7 @@ class Session extends EventEmitter {
     socket.on('close', (_code, reason) => {
       clearTimeout(timer);
       clearInterval(watchdog);
+      this.closeData();
       this.channel = null;
       if (this.stopped) return;
       if (!authenticated && reason.toString().includes('authentication')) failure = 'Pairing failed. Copy a fresh invitation from the other laptop.';
@@ -322,6 +393,104 @@ class Session extends EventEmitter {
       this.retryTimer = setTimeout(() => this.connect(), this.retryDelay);
       this.retryDelay = Math.min(5000, this.retryDelay * 2);
     });
+  }
+
+  closeData() {
+    clearTimeout(this.dataRetryTimer);
+    this.dataRetryTimer = null;
+    const socket = this.dataSocket;
+    this.dataSocket = null;
+    this.dataChannel = null;
+    this.dataToken = null;
+    if (socket && socket.readyState !== WebSocket.CLOSED) socket.terminate();
+    if (this.dataPhase !== 'disconnected') this.setDataStatus('disconnected');
+  }
+
+  connectData() {
+    if (this.stopped || this.config.role !== 'join' || this.phase !== 'connected'
+      || !DATA_TOKEN.test(this.dataToken) || this.dataSocket) return;
+    clearTimeout(this.dataRetryTimer);
+    this.dataRetryTimer = null;
+    const token = this.dataToken;
+    const socket = new WebSocket(`ws://${this.config.host}:${this.config.port}`, {
+      handshakeTimeout: 5000,
+      maxPayload: DATA_WIRE_MAX,
+      perMessageDeflate: false,
+    });
+    this.dataSocket = socket;
+    this.dataChannel = null;
+    this.setDataStatus('connecting');
+    let channel;
+    let authenticated = false;
+    const timer = setTimeout(() => socket.terminate(), 6000);
+    socket.on('message', (raw) => {
+      try {
+        if (!channel) {
+          if (raw.length > CONTROL_WIRE_MAX) throw new Error('Handshake too large.');
+          const challenge = JSON.parse(raw.toString());
+          if (challenge.type !== 'challenge' || challenge.version !== PROTOCOL_VERSION) throw new Error('Incompatible version.');
+          const peerSalt = newSecret();
+          channel = createChannel(this.config.secret, handshakeSalt(challenge.salt, peerSalt), false, { context: 'data', maxMessage: DATA_WIRE_MAX });
+          socket.send(JSON.stringify({ type: 'key', purpose: 'data', salt: peerSalt }));
+          socket.send(channel.seal({ type: 'data-hello', memberId: this.self.id, token }));
+          return;
+        }
+        const packet = channel.open(raw);
+        if (!authenticated) {
+          if (packet?.type !== 'data-ready') throw new Error('Missing data welcome.');
+          authenticated = true;
+          clearTimeout(timer);
+          this.dataChannel = channel;
+          this.dataRetryDelay = 250;
+          this.setDataStatus('connected', '', this.members.find((member) => member.id !== this.self.id)?.id || null);
+          return;
+        }
+        if (packet?.type !== 'data-message') throw new Error('Unknown data message.');
+        const clean = sanitizeDataMessage(packet.message);
+        if (!clean) throw new Error('Invalid data message.');
+        this.emit('data', clean, this.members.find((member) => member.id !== this.self.id)?.id || null);
+      } catch {
+        socket.close(1008, 'Invalid data message');
+      }
+    });
+    socket.on('error', () => {});
+    socket.on('close', () => {
+      clearTimeout(timer);
+      if (this.dataSocket !== socket) return;
+      this.dataSocket = null;
+      this.dataChannel = null;
+      if (this.stopped || this.phase !== 'connected' || this.dataToken !== token) {
+        this.setDataStatus('disconnected');
+        return;
+      }
+      this.setDataStatus('reconnecting', 'Bulk data connection interrupted.');
+      this.dataRetryTimer = setTimeout(() => this.connectData(), this.dataRetryDelay);
+      this.dataRetryTimer.unref();
+      this.dataRetryDelay = Math.min(3000, this.dataRetryDelay * 2);
+    });
+  }
+
+  sendData(message) {
+    if (this.stopped) return false;
+    const clean = sanitizeDataMessage(message);
+    if (!clean) return false;
+    let socket, channel;
+    if (this.config.role === 'host') {
+      const connection = this.connections.values().next().value;
+      socket = connection?.dataSocket;
+      channel = connection?.dataChannel;
+    } else {
+      socket = this.dataSocket;
+      channel = this.dataChannel;
+    }
+    if (!socket || !channel || socket.readyState !== WebSocket.OPEN
+      || socket.bufferedAmount > DATA_BACKPRESSURE_MAX) return false;
+    try {
+      socket.send(channel.seal({ type: 'data-message', message: clean }));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   action(action) {
@@ -377,6 +546,7 @@ class Session extends EventEmitter {
     clearTimeout(this.dragLeaseTimer);
     clearInterval(this.heartbeat);
     clearTimeout(this.pairingTimer);
+    this.closeData();
     this.discovery?.stop();
     this.socket?.terminate();
     if (this.server) {
@@ -388,4 +558,12 @@ class Session extends EventEmitter {
   }
 }
 
-module.exports = { Session, PROTOCOL_VERSION, validateSnapshot };
+module.exports = {
+  Session,
+  PROTOCOL_VERSION,
+  validateSnapshot,
+  sanitizeDataMessage,
+  DATA_PLAINTEXT_MAX,
+  DATA_WIRE_MAX,
+  DATA_BACKPRESSURE_MAX,
+};

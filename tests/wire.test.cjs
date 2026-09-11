@@ -41,3 +41,23 @@ test('freshness from either laptop prevents replaying an entire old handshake', 
   assert.throws(() => newPeer.open(oldWelcome));
   assert.notEqual(handshakeSalt(newSecret(), peerSalt), oldSalt);
 });
+
+test('bulk data uses distinct keys from control and enforces its configured wire limit', () => {
+  const secret = newSecret(), salt = newSecret();
+  const controlHost = createChannel(secret, salt, true);
+  const controlPeer = createChannel(secret, salt, false);
+  const dataHost = createChannel(secret, salt, true, { context: 'data', maxMessage: 1500000 });
+  const dataPeer = createChannel(secret, salt, false, { context: 'data', maxMessage: 1500000 });
+  const controlPacket = controlHost.seal({ type: 'action', private: 'control' });
+  const dataPacket = dataHost.seal({ type: 'data-message', payload: 'x'.repeat(200000) });
+  assert.deepEqual(controlPeer.open(controlPacket), { type: 'action', private: 'control' });
+  assert.equal(dataPeer.open(dataPacket).payload.length, 200000);
+  assert.throws(() => createChannel(secret, salt, false, { context: 'data', maxMessage: 1500000 }).open(controlPacket));
+  assert.throws(() => createChannel(secret, salt, false).open(dataPacket), /too large|authenticate/i);
+
+  const limited = createChannel(secret, salt, true, { context: 'limited', maxMessage: 128 });
+  const limitedPeer = createChannel(secret, salt, false, { context: 'limited', maxMessage: 128 });
+  assert.throws(() => limited.seal({ payload: 'x'.repeat(100) }), /too large/);
+  assert.deepEqual(limitedPeer.open(limited.seal({ ok: true })), { ok: true });
+  assert.throws(() => createChannel(secret, salt, true, { context: 'UPPERCASE' }), /options/);
+});

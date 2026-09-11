@@ -40,10 +40,19 @@ function parseInvitation(value) {
 
 // Every connection has a fresh challenge and separate directional keys. Strict
 // counters reject replay/reordering, and AES-GCM authenticates each message.
-function createChannel(secret, salt, isHost) {
+function createChannel(secret, salt, isHost, options = {}) {
   const root = secretBytes(secret);
   if (typeof salt !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(salt)) throw new Error('Invalid handshake.');
-  const derive = (direction) => Buffer.from(hkdfSync('sha256', root, Buffer.from(salt, 'base64url'), `compusync-v1-${direction}`, 32));
+  const context = options.context ?? 'control';
+  const maxMessage = options.maxMessage ?? 65536;
+  if (typeof context !== 'string' || !/^[a-z0-9-]{1,32}$/.test(context)
+    || !Number.isSafeInteger(maxMessage) || maxMessage < 64 || maxMessage > 16 * 1024 * 1024) throw new Error('Invalid channel options.');
+  // Keep the original control KDF labels stable while giving every auxiliary
+  // channel a distinct cryptographic context.
+  const label = (direction) => context === 'control'
+    ? `compusync-v1-${direction}`
+    : `compusync-v1-${context}-${direction}`;
+  const derive = (direction) => Buffer.from(hkdfSync('sha256', root, Buffer.from(salt, 'base64url'), label(direction), 32));
   const sendKey = derive(isHost ? 'host-to-peer' : 'peer-to-host');
   const receiveKey = derive(isHost ? 'peer-to-host' : 'host-to-peer');
   let sent = 0;
@@ -51,13 +60,16 @@ function createChannel(secret, salt, isHost) {
   const nonce = (n) => { const bytes = Buffer.alloc(12); bytes.writeBigUInt64BE(BigInt(n), 4); return bytes; };
   return {
     seal(message) {
-      const n = ++sent;
+      const n = sent + 1;
       const cipher = createCipheriv('aes-256-gcm', sendKey, nonce(n));
       const encrypted = Buffer.concat([cipher.update(JSON.stringify(message)), cipher.final()]);
-      return JSON.stringify({ n, data: encrypted.toString('base64'), tag: cipher.getAuthTag().toString('base64') });
+      const packet = JSON.stringify({ n, data: encrypted.toString('base64'), tag: cipher.getAuthTag().toString('base64') });
+      if (Buffer.byteLength(packet) > maxMessage) throw new Error('Message too large.');
+      sent = n;
+      return packet;
     },
     open(raw) {
-      if (raw.length > 65536) throw new Error('Message too large.');
+      if (raw.length > maxMessage) throw new Error('Message too large.');
       const packet = JSON.parse(raw.toString());
       if (!Number.isSafeInteger(packet.n) || packet.n !== received + 1 || typeof packet.data !== 'string' || typeof packet.tag !== 'string') throw new Error('Invalid message sequence.');
       const decipher = createDecipheriv('aes-256-gcm', receiveKey, nonce(packet.n));
