@@ -1,5 +1,6 @@
 use super::{EventSink, Platform};
 use crate::{DisplayMetric, NativeEvent, Point, Rect, WindowInfo};
+use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use std::{
     collections::{BTreeMap, HashSet},
@@ -52,6 +53,43 @@ const CG_FLAG_COMMAND: u64 = 1 << 20;
 const AX_VALUE_POINT: u32 = 1;
 const AX_VALUE_SIZE: u32 = 2;
 
+struct AxConstants {
+    windows: usize,
+    focused_window: usize,
+    position: usize,
+    size: usize,
+    title: usize,
+    fullscreen: usize,
+    moved: usize,
+    resized: usize,
+    focused: usize,
+    raise: usize,
+    close: usize,
+}
+
+static AX: Lazy<AxConstants> = Lazy::new(|| {
+    let make = |value: &'static [u8]| unsafe {
+        CFStringCreateWithCString(null(), value.as_ptr().cast(), 0x0800_0100) as usize
+    };
+    AxConstants {
+        windows: make(b"AXWindows\0"),
+        focused_window: make(b"AXFocusedWindow\0"),
+        position: make(b"AXPosition\0"),
+        size: make(b"AXSize\0"),
+        title: make(b"AXTitle\0"),
+        fullscreen: make(b"AXFullScreen\0"),
+        moved: make(b"AXMoved\0"),
+        resized: make(b"AXResized\0"),
+        focused: make(b"AXFocused\0"),
+        raise: make(b"AXRaise\0"),
+        close: make(b"AXClose\0"),
+    }
+});
+
+fn ax(value: usize) -> CfString {
+    value as CfString
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct CgPoint {
@@ -78,18 +116,6 @@ unsafe extern "C" {
     static kCGWindowOwnerName: CfString;
     static kCGWindowName: CfString;
     static kCGWindowLayer: CfString;
-    static kAXWindowsAttribute: CfString;
-    static kAXFocusedWindowAttribute: CfString;
-    static kAXPositionAttribute: CfString;
-    static kAXSizeAttribute: CfString;
-    static kAXTitleAttribute: CfString;
-    static kAXFullScreenAttribute: CfString;
-    static kAXMovedNotification: CfString;
-    static kAXResizedNotification: CfString;
-    static kAXFocusedAttribute: CfString;
-    static kAXRaiseAction: CfString;
-    static kAXCloseAction: CfString;
-
     fn CFRelease(value: CfType);
     fn CFArrayGetCount(array: CfArray) -> isize;
     fn CFArrayGetValueAtIndex(array: CfArray, index: isize) -> CfType;
@@ -103,6 +129,11 @@ unsafe extern "C" {
         size: isize,
         encoding: u32,
     ) -> bool;
+    fn CFStringCreateWithCString(
+        allocator: CfType,
+        value: *const c_char,
+        encoding: u32,
+    ) -> CfString;
     fn CFMachPortCreateRunLoopSource(allocator: CfType, port: CfMachPort, order: isize) -> CfType;
     fn CFRunLoopGetCurrent() -> CfRunLoop;
     fn CFRunLoopAddSource(run_loop: CfRunLoop, source: CfType, mode: CfString);
@@ -371,13 +402,7 @@ fn ax_window(id: &str) -> Result<(OwnedCf, AxElement), String> {
     let mut windows = null();
     ax_error(
         unsafe {
-            AXUIElementCopyAttributeValues(
-                app.0 as AxElement,
-                kAXWindowsAttribute,
-                0,
-                200,
-                &mut windows,
-            )
+            AXUIElementCopyAttributeValues(app.0 as AxElement, ax(AX.windows), 0, 200, &mut windows)
         },
         "AX windows",
     )?;
@@ -433,11 +458,7 @@ fn focused_window() -> Option<(String, i32, OwnedCf)> {
     }
     let mut focused = null();
     if unsafe {
-        AXUIElementCopyAttributeValue(
-            system.0 as AxElement,
-            kAXFocusedWindowAttribute,
-            &mut focused,
-        )
+        AXUIElementCopyAttributeValue(system.0 as AxElement, ax(AX.focused_window), &mut focused)
     } != 0
         || focused.is_null()
     {
@@ -451,13 +472,7 @@ fn focused_window() -> Option<(String, i32, OwnedCf)> {
     let app = OwnedCf(unsafe { AXUIElementCreateApplication(pid) });
     let mut windows = null();
     if unsafe {
-        AXUIElementCopyAttributeValues(
-            app.0 as AxElement,
-            kAXWindowsAttribute,
-            0,
-            200,
-            &mut windows,
-        )
+        AXUIElementCopyAttributeValues(app.0 as AxElement, ax(AX.windows), 0, 200, &mut windows)
     } != 0
         || windows.is_null()
     {
@@ -508,9 +523,9 @@ fn clear_drag_watch(context: &TapContext, emit_end: bool) {
         (context.sink)(event);
     }
     unsafe {
-        AXObserverRemoveNotification(watch.observer, watch.element, kAXMovedNotification);
+        AXObserverRemoveNotification(watch.observer, watch.element, ax(AX.moved));
         if watch.resize_subscribed {
-            AXObserverRemoveNotification(watch.observer, watch.element, kAXResizedNotification);
+            AXObserverRemoveNotification(watch.observer, watch.element, ax(AX.resized));
         }
         CFRunLoopRemoveSource(watch.run_loop, watch.source, kCFRunLoopCommonModes);
         CFRelease(watch.observer);
@@ -533,7 +548,7 @@ fn begin_drag_watch(context: &TapContext) {
         AXObserverAddNotification(
             observer,
             element.0 as AxElement,
-            kAXMovedNotification,
+            ax(AX.moved),
             context as *const TapContext as *mut c_void,
         )
     } != 0
@@ -547,7 +562,7 @@ fn begin_drag_watch(context: &TapContext) {
         AXObserverAddNotification(
             observer,
             element.0 as AxElement,
-            kAXResizedNotification,
+            ax(AX.resized),
             context as *const TapContext as *mut c_void,
         ) == 0
     };
@@ -849,7 +864,7 @@ impl Platform for HostPlatform {
             if unsafe {
                 AXUIElementCopyAttributeValues(
                     app.0 as AxElement,
-                    kAXWindowsAttribute,
+                    ax(AX.windows),
                     0,
                     200,
                     &mut array,
@@ -862,14 +877,13 @@ impl Platform for HostPlatform {
             let array = OwnedCf(array);
             for index in 0..unsafe { CFArrayGetCount(array.0) } {
                 let window = unsafe { CFArrayGetValueAtIndex(array.0, index) } as AxElement;
-                let pos =
-                    ax_value::<CgPoint>(window, unsafe { kAXPositionAttribute }, AX_VALUE_POINT)
-                        .unwrap_or_default();
-                let size = ax_value::<CgSize>(window, unsafe { kAXSizeAttribute }, AX_VALUE_SIZE)
+                let pos = ax_value::<CgPoint>(window, ax(AX.position), AX_VALUE_POINT)
                     .unwrap_or_default();
+                let size =
+                    ax_value::<CgSize>(window, ax(AX.size), AX_VALUE_SIZE).unwrap_or_default();
                 let mut title_ref = null();
                 let title = if unsafe {
-                    AXUIElementCopyAttributeValue(window, kAXTitleAttribute, &mut title_ref)
+                    AXUIElementCopyAttributeValue(window, ax(AX.title), &mut title_ref)
                 } == 0
                 {
                     let owned = OwnedCf(title_ref);
@@ -891,7 +905,7 @@ impl Platform for HostPlatform {
                     visible: visible.contains(&(pid, title)),
                     minimized: false,
                     maximized: false,
-                    fullscreen: ax_bool(window, unsafe { kAXFullScreenAttribute }).unwrap_or(false),
+                    fullscreen: ax_bool(window, ax(AX.fullscreen)).unwrap_or(false),
                 });
             }
         }
@@ -907,29 +921,29 @@ impl Platform for HostPlatform {
         let pv = OwnedCf(unsafe { AXValueCreate(AX_VALUE_POINT, (&p as *const CgPoint).cast()) });
         let sv = OwnedCf(unsafe { AXValueCreate(AX_VALUE_SIZE, (&s as *const CgSize).cast()) });
         ax_error(
-            unsafe { AXUIElementSetAttributeValue(w, kAXPositionAttribute, pv.0) },
+            unsafe { AXUIElementSetAttributeValue(w, ax(AX.position), pv.0) },
             "set AX position",
         )?;
         ax_error(
-            unsafe { AXUIElementSetAttributeValue(w, kAXSizeAttribute, sv.0) },
+            unsafe { AXUIElementSetAttributeValue(w, ax(AX.size), sv.0) },
             "set AX size",
         )
     }
     fn focus_window(&mut self, id: &str) -> Result<(), String> {
         let (_owner, w) = ax_window(id)?;
         ax_error(
-            unsafe { AXUIElementSetAttributeValue(w, kAXFocusedAttribute, kCFBooleanTrue) },
+            unsafe { AXUIElementSetAttributeValue(w, ax(AX.focused), kCFBooleanTrue) },
             "focus AX window",
         )?;
         ax_error(
-            unsafe { AXUIElementPerformAction(w, kAXRaiseAction) },
+            unsafe { AXUIElementPerformAction(w, ax(AX.raise)) },
             "raise AX window",
         )
     }
     fn close_window(&mut self, id: &str) -> Result<(), String> {
         let (_owner, w) = ax_window(id)?;
         ax_error(
-            unsafe { AXUIElementPerformAction(w, kAXCloseAction) },
+            unsafe { AXUIElementPerformAction(w, ax(AX.close)) },
             "close AX window",
         )
     }
