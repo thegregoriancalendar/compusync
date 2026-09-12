@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const { validUrl } = require('../../messages.cjs');
 
 const CHROME_IDENTITY = /^(?:chrome(?:\.exe)?|google chrome(?:\.app)?|com\.google\.chrome)$/i;
+const HISTORY_CONCURRENCY = 4;
 
 class ChromeCaptureError extends Error {
   constructor(code, message) {
@@ -139,6 +140,19 @@ async function activeHistory(cdp, targetId) {
   } catch { return undefined; }
 }
 
+async function mapConcurrent(values, concurrency, mapper) {
+  const results = new Array(values.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < values.length) {
+      const index = next++;
+      results[index] = await mapper(values[index], index);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, worker));
+  return results;
+}
+
 function normalizeTabState(tabs, state) {
   const byId = new Map();
   if (Array.isArray(state)) {
@@ -205,13 +219,14 @@ class ChromeCapture {
     }
     let activeIdx = ordered.findIndex(({ active }) => active);
     if (activeIdx < 0) activeIdx = 0;
-    const history = await activeHistory(this.cdp, ordered[activeIdx].target.id);
+    const histories = await mapConcurrent(ordered, HISTORY_CONCURRENCY,
+      ({ target }) => activeHistory(this.cdp, target.id));
     const tabs = ordered.map(({ target, pinned }, index) => ({
       url: target.url,
       title: String(target.title || '').slice(0, 1024),
       pinned,
       index,
-      ...(index === activeIdx && history ? { history } : {}),
+      ...(histories[index] ? { history: histories[index] } : {}),
     }));
     const id = this.identities.idFor(window, stableInput);
     const descriptor = {
@@ -241,6 +256,7 @@ class ChromeCapture {
 
 module.exports = {
   CHROME_IDENTITY,
+  HISTORY_CONCURRENCY,
   ChromeCapture,
   ChromeCaptureError,
   DescriptorIdentityCache,
@@ -250,6 +266,7 @@ module.exports = {
   geometryVU,
   hostOnly,
   isNativeChromeWindow,
+  mapConcurrent,
   nativeWindowId,
   safeLog,
   selectAddressableWindow,

@@ -5,7 +5,7 @@ const { normalizePlacement, ensureNonOverlapping } = require('./virtualspace.cjs
 const MAX_URL_LENGTH = 8192;
 const MAX_TABS = 200;
 // A worst-case valid descriptor can carry 200 8KiB tab URLs plus bounded
-// active-tab history. The authenticated transport must route this reliable
+// bounded per-tab history. The authenticated transport must route this reliable
 // control message over a channel with a matching cap.
 const MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
 const MAX_COORDINATE = 65536;
@@ -75,7 +75,7 @@ function sanitizeWindowDescriptor(value) {
     if (!candidate || !validUrl(candidate.url) || !text(candidate.title, 1024)
       || typeof candidate.pinned !== 'boolean'
       || !integer(candidate.index, 0, payload.tabs.length - 1) || indices.has(candidate.index)
-      || history === null || (history && tabPosition !== payload.activeIdx)) return null;
+      || history === null) return null;
     indices.add(candidate.index);
     const tab = {
       url: candidate.url,

@@ -31,7 +31,7 @@ function descriptor(overrides = {}) {
   };
 }
 
-test('CDP capture emits ordered/pinned tabs, the active history, VU geometry, and host-only logs', async () => {
+test('CDP capture emits ordered/pinned tabs, every tab history, VU geometry, and host-only logs', async () => {
   const logs = [];
   const selected = {
     id: 'hwnd-9', processName: 'chrome.exe', visible: true, maximized: true,
@@ -89,8 +89,39 @@ test('CDP capture emits ordered/pinned tabs, the active history, VU geometry, an
     currentIndex: 1,
     entries: ['https://active.example/one', 'https://active.example/two?credential=hidden'],
   });
+  assert.ok(result.payload.tabs.every((tab) => tab.history?.entries.length === 2));
   assert.equal(logs[0].details.host, 'active.example');
   assert.doesNotMatch(JSON.stringify(logs), /do-not-log|credential|\/watch|\/two/);
+});
+
+test('history capture never exceeds four concurrent CDP pages', async () => {
+  let active = 0;
+  let peak = 0;
+  const targets = Array.from({ length: 12 }, (_, index) => ({
+    id: `tab-${index}`, type: 'page', title: `${index}`, url: `https://example.com/${index}`,
+    index, active: index === 0,
+  }));
+  const nativeWindow = { id: 'bounded-window', processName: 'chrome.exe', visible: true };
+  const capture = new ChromeCapture({
+    machineId: 'win-b', native: { enumerateWindows: () => [nativeWindow] },
+    cdp: {
+      async connect() {},
+      async windows() { return [{ windowId: 1, nativeWindow, tabs: targets }]; },
+      async withPage(targetId, callback) {
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        try {
+          return await callback(async (method) => method === 'Page.getNavigationHistory'
+            ? { currentIndex: 0, entries: [{ id: 1, url: `https://example.com/${targetId}` }] }
+            : { result: { value: targetId === 'tab-0' ? 'visible' : 'hidden' } });
+        } finally { active -= 1; }
+      },
+    },
+  });
+  const result = await capture.capture(nativeWindow, { x: 0, y: 0, w: 800, h: 600 });
+  assert.equal(result.payload.tabs.filter((tab) => tab.history).length, 12);
+  assert.equal(peak, 4);
 });
 
 test('prepare creates active first, bounds it before staggered background tabs, pins, reactivates, restores history, and waits for load', async () => {

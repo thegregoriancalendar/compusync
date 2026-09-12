@@ -7,6 +7,7 @@ const { hostOnly, nativeWindowId, safeLog } = require('./capture.cjs');
 const LOAD_CAP_MS = 3_000;
 const TAB_STAGGER_MIN_MS = 80;
 const TAB_STAGGER_MAX_MS = 120;
+const HISTORY_CONCURRENCY = 4;
 
 class ChromePrepareError extends Error {
   constructor(code, message) {
@@ -92,6 +93,17 @@ async function restoreHistory(command, history) {
   if (Number.isInteger(entry?.id)) await command('Page.navigateToHistoryEntry', { entryId: entry.id });
 }
 
+async function mapConcurrent(values, concurrency, mapper) {
+  let next = 0;
+  const worker = async () => {
+    while (next < values.length) {
+      const index = next++;
+      await mapper(values[index], index);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, worker));
+}
+
 class ChromePrepare {
   constructor(options = {}) {
     if (!options.cdp) throw new TypeError('Chrome CDP client is required.');
@@ -147,13 +159,13 @@ class ChromePrepare {
       // The active URL is deliberately the only content created before bounds
       // are applied, preventing a populated window from flashing on-screen.
       created = await this.cdp.createWindow(active.url, bounds);
-      targets.push({ targetId: created.targetId, index: active.index, url: active.url, pinned: active.pinned });
+      targets.push({ targetId: created.targetId, index: active.index, url: active.url, pinned: active.pinned, history: active.history });
       for (const tab of tabs) {
         if (tab === active) continue;
         const stagger = TAB_STAGGER_MIN_MS + Math.floor(this.random() * (TAB_STAGGER_MAX_MS - TAB_STAGGER_MIN_MS + 1));
         await delay(stagger, this.sleep);
         const targetId = await this.cdp.createTarget(tab.url, { background: true });
-        targets.push({ targetId, index: tab.index, url: tab.url, pinned: tab.pinned });
+        targets.push({ targetId, index: tab.index, url: tab.url, pinned: tab.pinned, history: tab.history });
       }
       targets.sort((a, b) => a.index - b.index);
       for (const target of targets) await this.setPinned(target, target.pinned, {
@@ -165,17 +177,21 @@ class ChromePrepare {
       // Background tab creation can move selection; explicitly reactivate the
       // originally active tab before history restoration and readiness.
       await this.cdp.focusTarget(activeTargetId, nativeWindow, this.native);
-      await this.cdp.withPage(activeTargetId, async (command, page) => {
-        await command('Page.enable', {});
-        await restoreHistory(command, active.history);
-        const waiter = loadWaiter(page, this.loadCapMs, this.timers);
-        try {
-          const result = await command('Runtime.evaluate', {
-            expression: 'document.readyState', returnByValue: true,
-          });
-          if (result?.result?.value === 'complete') waiter.done('already-loaded');
-        } catch { /* The load event/cap remains authoritative. */ }
-        await waiter.promise;
+      await mapConcurrent(targets, HISTORY_CONCURRENCY, async (target) => {
+        if (!target.history && target.targetId !== activeTargetId) return;
+        await this.cdp.withPage(target.targetId, async (command, page) => {
+          await command('Page.enable', {});
+          await restoreHistory(command, target.history);
+          if (target.targetId !== activeTargetId) return;
+          const waiter = loadWaiter(page, this.loadCapMs, this.timers);
+          try {
+            const result = await command('Runtime.evaluate', {
+              expression: 'document.readyState', returnByValue: true,
+            });
+            if (result?.result?.value === 'complete') waiter.done('already-loaded');
+          } catch { /* The load event/cap remains authoritative. */ }
+          await waiter.promise;
+        });
       });
 
       const handle = {
@@ -213,6 +229,7 @@ class ChromePrepare {
 
 module.exports = {
   LOAD_CAP_MS,
+  HISTORY_CONCURRENCY,
   TAB_STAGGER_MIN_MS,
   TAB_STAGGER_MAX_MS,
   ChromePrepare,
@@ -220,6 +237,7 @@ module.exports = {
   boundsFromVU,
   createChromePrepare: (options) => new ChromePrepare(options),
   loadWaiter,
+  mapConcurrent,
   normalizePixelBounds,
   orderedTabs,
   prepareBounds,

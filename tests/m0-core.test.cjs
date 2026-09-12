@@ -147,6 +147,9 @@ test('window descriptors reject unsafe schemes, excessive tabs and malformed his
   const history = validDescriptor();
   history.payload.tabs[1].history.currentIndex = 9;
   assert.equal(sanitizeWindowDescriptor(history), null);
+  const allTabHistory = validDescriptor();
+  allTabHistory.payload.tabs[0].history = { currentIndex: 0, entries: ['https://example.com/before'] };
+  assert.deepEqual(sanitizeWindowDescriptor(allTabHistory), allTabHistory);
   const oversizedGeometry = validDescriptor();
   oversizedGeometry.geometryVU = { x: -1e9, y: 1e9, w: 1e9, h: .5 };
   assert.deepEqual(sanitizeWindowDescriptor(oversizedGeometry).geometryVU,
