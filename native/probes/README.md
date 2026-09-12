@@ -59,3 +59,16 @@ On a signed build with Accessibility and Input Monitoring granted:
 
 These checks require macOS permission state and real WindowServer behavior and
 cannot be represented faithfully by a Windows CI job.
+
+## Recorded Windows findings (2026-09-12)
+
+- Chrome accepted `SetWindowPos(x = -20000)` exactly; `GetWindowRect` returned
+  `x = -20000` for a 1050px-wide window, so full offscreen pre-warm is viable.
+- UI Automation exposed both test tab titles and zero HTTP URL value patterns.
+  It cannot supply the background-tab URLs required by the descriptor, so it is
+  not a viable no-relaunch Windows fallback.
+- Hard-terminating the addon process left its 1x1 `ClipCursor` active. With the
+  independent recovery guard installed, the same probe observed full-desktop
+  clipping and a visible cursor 500ms after termination.
+- The Windows modal move-loop test still requires a physical held drag; no
+  automated claim is made for it.
