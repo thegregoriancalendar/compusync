@@ -78,6 +78,7 @@ unsafe extern "C" {
     static kCGWindowName: CfString;
     static kCGWindowLayer: CfString;
     static kAXWindowsAttribute: CfString;
+    static kAXFocusedWindowAttribute: CfString;
     static kAXPositionAttribute: CfString;
     static kAXSizeAttribute: CfString;
     static kAXTitleAttribute: CfString;
@@ -89,6 +90,7 @@ unsafe extern "C" {
     fn CFArrayGetCount(array: CfArray) -> isize;
     fn CFArrayGetValueAtIndex(array: CfArray, index: isize) -> CfType;
     fn CFDictionaryGetValue(dictionary: CfType, key: CfType) -> CfType;
+    fn CFEqual(left: CfType, right: CfType) -> bool;
     fn CFNumberGetValue(number: CfType, kind: i32, value: *mut c_void) -> bool;
     fn CFStringGetCStringPtr(string: CfString, encoding: u32) -> *const c_char;
     fn CFStringGetCString(
@@ -139,7 +141,9 @@ unsafe extern "C" {
     fn CGWindowListCopyWindowInfo(options: u32, relative: u32) -> CfArray;
 
     fn AXIsProcessTrusted() -> bool;
+    fn AXUIElementCreateSystemWide() -> AxElement;
     fn AXUIElementCreateApplication(pid: i32) -> AxElement;
+    fn AXUIElementGetPid(element: AxElement, pid: *mut i32) -> i32;
     fn AXUIElementCopyAttributeValues(
         element: AxElement,
         attribute: CfString,
@@ -372,6 +376,7 @@ struct TapContext {
     sink: EventSink,
     linked: AtomicBool,
     owner: AtomicBool,
+    left_down: AtomicBool,
     tap: Mutex<CfMachPort>,
 }
 unsafe impl Send for TapContext {}
@@ -463,6 +468,11 @@ unsafe extern "C" fn event_tap(
                 CG_EVENT_LEFT_DOWN | CG_EVENT_RIGHT_DOWN | CG_EVENT_OTHER_DOWN
             ));
             native.modifiers = Some(modifiers);
+            if kind == CG_EVENT_LEFT_DOWN {
+                context.left_down.store(true, Ordering::Release);
+            } else if kind == CG_EVENT_LEFT_UP {
+                context.left_down.store(false, Ordering::Release);
+            }
             (context.sink)(native);
             if context.linked.load(Ordering::Acquire) && !context.owner.load(Ordering::Acquire) {
                 return null_mut();
@@ -477,10 +487,16 @@ struct CaptureRuntime {
     context: Arc<TapContext>,
     run_loop: CfRunLoop,
     thread: Option<JoinHandle<()>>,
+    drag_stop: Arc<AtomicBool>,
+    drag_thread: Option<JoinHandle<()>>,
 }
 unsafe impl Send for CaptureRuntime {}
 impl CaptureRuntime {
     fn stop(&mut self) {
+        self.drag_stop.store(true, Ordering::Release);
+        if let Some(thread) = self.drag_thread.take() {
+            let _ = thread.join();
+        }
         if !self.run_loop.is_null() {
             unsafe {
                 CFRunLoopStop(self.run_loop);
@@ -489,6 +505,105 @@ impl CaptureRuntime {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+fn focused_window_geometry() -> Option<(String, Rect)> {
+    let system = OwnedCf(unsafe { AXUIElementCreateSystemWide() });
+    if system.0.is_null() {
+        return None;
+    }
+    let mut focused = null();
+    if unsafe {
+        AXUIElementCopyAttributeValue(
+            system.0 as AxElement,
+            kAXFocusedWindowAttribute,
+            &mut focused,
+        )
+    } != 0
+        || focused.is_null()
+    {
+        return None;
+    }
+    let focused = OwnedCf(focused);
+    let mut pid = 0;
+    if unsafe { AXUIElementGetPid(focused.0 as AxElement, &mut pid) } != 0 {
+        return None;
+    }
+    let app = OwnedCf(unsafe { AXUIElementCreateApplication(pid) });
+    let mut windows = null();
+    if unsafe {
+        AXUIElementCopyAttributeValues(
+            app.0 as AxElement,
+            kAXWindowsAttribute,
+            0,
+            200,
+            &mut windows,
+        )
+    } != 0
+        || windows.is_null()
+    {
+        return None;
+    }
+    let windows = OwnedCf(windows);
+    let count = unsafe { CFArrayGetCount(windows.0) };
+    let index = (0..count)
+        .find(|index| unsafe { CFEqual(CFArrayGetValueAtIndex(windows.0, *index), focused.0) })?;
+    let position = ax_value::<CgPoint>(
+        focused.0 as AxElement,
+        unsafe { kAXPositionAttribute },
+        AX_VALUE_POINT,
+    )?;
+    let size = ax_value::<CgSize>(
+        focused.0 as AxElement,
+        unsafe { kAXSizeAttribute },
+        AX_VALUE_SIZE,
+    )?;
+    Some((
+        format!("ax:{pid}:{index}"),
+        Rect {
+            x: position.x,
+            y: position.y,
+            width: size.width,
+            height: size.height,
+        },
+    ))
+}
+
+fn geometry_changed(left: Rect, right: Rect) -> bool {
+    (left.x - right.x).abs() > 0.5
+        || (left.y - right.y).abs() > 0.5
+        || (left.width - right.width).abs() > 0.5
+        || (left.height - right.height).abs() > 0.5
+}
+
+fn drag_observer(context: Arc<TapContext>, stop: Arc<AtomicBool>) {
+    let mut previous: Option<(String, Rect)> = None;
+    let mut active: Option<String> = None;
+    while !stop.load(Ordering::Acquire) {
+        if context.left_down.load(Ordering::Acquire) {
+            if let Some(current) = focused_window_geometry() {
+                if active.is_none()
+                    && previous.as_ref().is_some_and(|(id, bounds)| {
+                        id == &current.0 && geometry_changed(*bounds, current.1)
+                    })
+                {
+                    active = Some(current.0.clone());
+                    let mut event = NativeEvent::simple("moveSizeStart");
+                    event.window_id = Some(current.0.clone());
+                    (context.sink)(event);
+                }
+                previous = Some(current);
+            }
+        } else {
+            if let Some(id) = active.take() {
+                let mut event = NativeEvent::simple("moveSizeEnd");
+                event.window_id = Some(id);
+                (context.sink)(event);
+            }
+            previous = None;
+        }
+        thread::sleep(std::time::Duration::from_millis(16));
     }
 }
 impl Drop for CaptureRuntime {
@@ -803,6 +918,7 @@ impl Platform for HostPlatform {
             sink,
             linked: AtomicBool::new(false),
             owner: AtomicBool::new(true),
+            left_down: AtomicBool::new(false),
             tap: Mutex::new(null_mut()),
         });
         let user = Arc::into_raw(context.clone()) as usize;
@@ -812,10 +928,19 @@ impl Platform for HostPlatform {
             .recv_timeout(std::time::Duration::from_secs(2))
             .map_err(|_| "event tap thread did not start".to_string())??
             as CfRunLoop;
+        let drag_stop = Arc::new(AtomicBool::new(false));
+        let drag_context = context.clone();
+        let drag_stop_thread = drag_stop.clone();
+        let drag_thread = thread::Builder::new()
+            .name("compusync-mac-drag".into())
+            .spawn(move || drag_observer(drag_context, drag_stop_thread))
+            .map_err(|error| error.to_string())?;
         self.capture = Some(CaptureRuntime {
             context,
             run_loop,
             thread: Some(thread),
+            drag_stop,
+            drag_thread: Some(drag_thread),
         });
         Ok(())
     }
