@@ -40,7 +40,7 @@
       "native/compusync-native.*-${arch}.node"
     ],
     "asar": true,
-    "asarUnpack": ["native/*.node"],
+    "asarUnpack": ["native/*.node", "src/main/adapters/chrome/extension/**/*"],
     "extraResources": [
       {
         "from": "native",

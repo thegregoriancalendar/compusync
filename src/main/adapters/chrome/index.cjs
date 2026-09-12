@@ -38,6 +38,17 @@ function cdpFromOptions(options, platform) {
   });
 }
 
+function tabControlFromOptions(options, platform, cdp) {
+  if (options.tabControl) return options.tabControl;
+  if (platform !== 'win32' || !cdp || typeof cdp.withExtensionServiceWorker !== 'function') return null;
+  const { ChromeExtensionTabControl } = require('./extension-tab-control.cjs');
+  const { defaultExtensionDirectory } = require('./windows.cjs');
+  return new ChromeExtensionTabControl({
+    cdp, extensionDirectory: options.extensionDirectory || defaultExtensionDirectory(),
+    timeoutMs: options.cdpTimeoutMs || options.timeoutMs,
+  });
+}
+
 class ChromeHandoffAdapter {
   constructor(options = {}) {
     this.adapterId = 'chrome';
@@ -46,6 +57,7 @@ class ChromeHandoffAdapter {
     // Runtime may either retain a connected client or pass the endpoint from
     // detectChrome(). No probing or Chrome launch occurs at construction.
     this.cdp = cdpFromOptions(options, this.platform);
+    this.tabControl = tabControlFromOptions(options, this.platform, this.cdp);
     this.placement = options.placement || null;
     this.getPlacement = typeof options.getPlacement === 'function' ? options.getPlacement : () => this.placement;
     this.identities = options.identities || new DescriptorIdentityCache(options);
@@ -56,7 +68,7 @@ class ChromeHandoffAdapter {
       this.apple = createAppleChromeAdapter({ ...options, native: this.native });
     }
     if (this.platform !== 'darwin' && this.cdp) {
-      const shared = { ...options, cdp: this.cdp, native: this.native, identities: this.identities, records: this.records };
+      const shared = { ...options, cdp: this.cdp, tabControl: this.tabControl, native: this.native, identities: this.identities, records: this.records };
       this.capturer = new ChromeCapture(shared);
       this.preparer = new ChromePrepare(shared);
     }
@@ -190,4 +202,5 @@ module.exports = {
   cdpFromOptions,
   endpointFromOptions,
   isNativeChromeWindow,
+  tabControlFromOptions,
 };

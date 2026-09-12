@@ -18,9 +18,11 @@ const {
   WindowsChromeRelaunch,
   chromeIsRunning,
   createSecureProfile,
+  defaultExtensionDirectory,
   migrateChromeSession,
   relaunchArguments,
   requestChromeClose,
+  unpackedExtensionDirectory,
   waitForChromeExit,
 } = require('../src/main/adapters/chrome/windows.cjs');
 
@@ -95,6 +97,12 @@ class MockWebSocket extends EventEmitter {
       : { bounds: { left: 900, top: 20, width: 800, height: 600, windowState: 'normal' } };
     else if (command.method === 'Target.createTarget') result = { targetId: 'created-target' };
     else if (command.method === 'Target.closeTarget') result = { success: true };
+    else if (command.method === 'Target.getTargets') result = { targetInfos: [{
+      targetId: 'extension-worker', type: 'service_worker',
+      url: 'chrome-extension://fpafmookkejpkjlegeppoecbhbgbogcp/service-worker.js',
+    }] };
+    else if (command.method === 'Target.attachToTarget') result = { sessionId: 'extension-session' };
+    else if (command.method === 'Runtime.evaluate') result = { result: { value: 17 } };
     queueMicrotask(() => this.emit('message', JSON.stringify({ id: command.id, result })));
     callback?.();
   }
@@ -141,6 +149,15 @@ test('CDP keeps a browser socket, caches target grouping, joins native geometry,
   assert.equal(pageResult, 'done');
   assert.equal(MockWebSocket.instances.length, 2);
   assert.equal(MockWebSocket.instances[1].readyState, 3);
+
+  const workerResult = await client.withExtensionServiceWorker(
+    'fpafmookkejpkjlegeppoecbhbgbogcp',
+    (command) => command('Runtime.evaluate', { expression: '17', returnByValue: true }),
+  );
+  assert.equal(workerResult.result.value, 17);
+  const workerCommand = MockWebSocket.commands.find((command) => command.method === 'Runtime.evaluate');
+  assert.equal(workerCommand.sessionId, 'extension-session');
+  assert.ok(MockWebSocket.commands.some((command) => command.method === 'Target.detachFromTarget'));
 
   MockWebSocket.instances[0].emit('message', JSON.stringify({ method: 'Target.targetDestroyed', params: { targetId: 'tab-a' } }));
   await client.getWindowForTarget('tab-a');
@@ -284,8 +301,13 @@ test('default restart helpers request non-forced taskkill and verify a bounded C
 });
 
 test('profile helpers constrain debug ports and enforce private directory setup', async (t) => {
-  assert.ok(relaunchArguments('C:\\isolated', 9250).includes('--remote-debugging-port=9250'));
+  const args = relaunchArguments('C:\\isolated', 9250);
+  assert.ok(args.includes('--remote-debugging-port=9250'));
+  assert.equal(args.some((arg) => arg.startsWith('--load-extension=')), false);
   assert.throws(() => relaunchArguments('C:\\isolated', 9251), RangeError);
+  assert.equal(unpackedExtensionDirectory('C:\\app\\resources\\app.asar\\src\\main\\adapters\\chrome\\extension'),
+    'C:\\app\\resources\\app.asar.unpacked\\src\\main\\adapters\\chrome\\extension');
+  assert.ok(path.isAbsolute(defaultExtensionDirectory()));
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'compusync-profile-'));
   t.after(() => fs.promises.rm(root, { recursive: true, force: true }));
   const directory = path.join(root, 'profile');

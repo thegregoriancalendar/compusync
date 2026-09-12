@@ -23,6 +23,10 @@ function validId(value) {
   return typeof value === 'string' && value.length > 0 && value.length <= 256 && /^[A-Za-z0-9._:-]+$/.test(value);
 }
 
+function validExtensionId(value) {
+  return typeof value === 'string' && /^[a-p]{32}$/.test(value);
+}
+
 function validatePort(port) {
   if (!Number.isInteger(port) || port < DEBUG_PORT_MIN || port > DEBUG_PORT_MAX) {
     throw new RangeError(`Chrome debug port must be ${DEBUG_PORT_MIN}-${DEBUG_PORT_MAX}.`);
@@ -162,7 +166,12 @@ class CdpSocket extends EventEmitter {
     if (this.nextId > 0x7fffffff) this.nextId = 1;
     const timeoutMs = timeoutValue(options.timeoutMs || this.timeoutMs);
     let payload;
-    try { payload = JSON.stringify({ id, method, params }); }
+    const envelope = { id, method, params };
+    if (options.sessionId !== undefined) {
+      if (!validId(options.sessionId)) return Promise.reject(new TypeError('Invalid CDP session id.'));
+      envelope.sessionId = options.sessionId;
+    }
+    try { payload = JSON.stringify(envelope); }
     catch { return Promise.reject(new TypeError('CDP params must be JSON serializable.')); }
     if (Buffer.byteLength(payload) > MAX_MESSAGE_BYTES) return Promise.reject(cdpError('CDP command is too large.', 'CDP_MESSAGE_TOO_LARGE'));
     return new Promise((resolve, reject) => {
@@ -425,6 +434,45 @@ class ChromeCdp extends EventEmitter {
     finally { page.close(); }
   }
 
+  async withExtensionServiceWorker(extensionId, callback, options = {}) {
+    if (!validExtensionId(extensionId) || typeof callback !== 'function') {
+      throw new TypeError('Extension id and callback are required.');
+    }
+    const scopeURL = `chrome-extension://${extensionId}/`;
+    const timeoutMs = timeoutValue(options.timeoutMs || this.timeoutMs);
+    await this.connect();
+    const findWorker = async () => {
+      const result = await this._command('Target.getTargets', {}, { timeoutMs });
+      return result?.targetInfos?.find((target) => target?.type === 'service_worker'
+        && validId(target.targetId) && typeof target.url === 'string' && target.url.startsWith(scopeURL));
+    };
+    let targetInfo = await findWorker();
+    if (!targetInfo) {
+      const tabs = await this._command('Target.getTargets', { filter: [{ type: 'tab' }] }, { timeoutMs });
+      const tab = tabs?.targetInfos?.find((target) => target?.type === 'tab' && validId(target.targetId)
+        && !String(target.url || '').startsWith('chrome-extension:'));
+      if (!tab) throw cdpError('Chrome has no tab available to start tab control.', 'CDP_EXTENSION_UNAVAILABLE');
+      await this._command('Extensions.triggerAction', { id: extensionId, targetId: tab.targetId }, { timeoutMs });
+      for (let attempt = 0; attempt < 3 && !targetInfo; attempt += 1) {
+        targetInfo = await findWorker();
+        if (!targetInfo && attempt < 2) await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    }
+    if (!targetInfo) throw cdpError('Chrome tab-control extension is unavailable.', 'CDP_EXTENSION_UNAVAILABLE');
+    const attached = await this._command('Target.attachToTarget', { targetId: targetInfo.targetId, flatten: true }, { timeoutMs });
+    if (!validId(attached?.sessionId)) throw cdpError('Chrome returned an invalid extension session.', 'CDP_PROTOCOL_ERROR');
+    const command = (method, params = {}, commandOptions = {}) => this._command(method, params, {
+      ...commandOptions, timeoutMs: commandOptions.timeoutMs || timeoutMs, sessionId: attached.sessionId,
+    });
+    try {
+      await command('Runtime.enable', {});
+      return await callback(command, targetInfo);
+    }
+    finally {
+      await this._command('Target.detachFromTarget', { sessionId: attached.sessionId }, { timeoutMs }).catch(() => {});
+    }
+  }
+
   async createTarget(url, options = {}) {
     let parsed;
     try { parsed = new URL(url); } catch { throw new TypeError('Target URL must be a valid HTTP(S) URL.'); }
@@ -484,4 +532,5 @@ module.exports = {
   isPageTarget,
   normalizeBounds,
   validateLocalPageSocket,
+  validExtensionId,
 };

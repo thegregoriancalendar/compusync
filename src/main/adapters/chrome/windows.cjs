@@ -55,6 +55,14 @@ function validatePort(port) {
   return result;
 }
 
+function unpackedExtensionDirectory(source) {
+  return source.replace(`${path.sep}app.asar${path.sep}`, `${path.sep}app.asar.unpacked${path.sep}`);
+}
+
+function defaultExtensionDirectory() {
+  return unpackedExtensionDirectory(path.resolve(__dirname, 'extension'));
+}
+
 function relaunchArguments(userDataDir, port = DEBUG_PORT_MIN) {
   if (typeof userDataDir !== 'string' || !path.isAbsolute(userDataDir) || userDataDir.length > 1_024) {
     throw new TypeError('An absolute isolated profile directory is required.');
@@ -423,6 +431,7 @@ module.exports = {
   WindowsChromeRelaunch,
   createWindowsChromeRelaunch: (options) => new WindowsChromeRelaunch(options),
   createSecureProfile,
+  defaultExtensionDirectory,
   chromeIsRunning,
   findChromeExecutable,
   migrateChromeSession,
@@ -431,5 +440,6 @@ module.exports = {
   requestChromeClose,
   relaunchArguments,
   standardChromePaths,
+  unpackedExtensionDirectory,
   waitForChromeExit,
 };
