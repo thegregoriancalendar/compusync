@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
-const { geometryToVU, WindowHandoffRuntime } = require('../src/main/window-runtime.cjs');
+const { sanitizeHandoffLog, geometryToVU, WindowHandoffRuntime } = require('../src/main/window-runtime.cjs');
 
 function runtimeFixture(options = {}) {
   const native = new EventEmitter();
@@ -40,7 +40,7 @@ function runtimeFixture(options = {}) {
   chrome.stop = () => {};
   const runtime = new WindowHandoffRuntime({
     input, native, chrome, frameMs: options.frameMs || 100000,
-    setSeam: options.setSeam, showHint: options.showHint,
+    setSeam: options.setSeam, showHint: options.showHint, logger: options.logger,
   });
   runtime.start();
   return {
@@ -179,5 +179,41 @@ test('authoritative position drives the seam overlay and recovery clears it', as
   setWindow(null);
   await runtime.poll();
   assert.equal(seamStates.at(-1), null);
+  await runtime.stop();
+});
+
+test('runtime forwards structured timing records without URL-bearing fields', async () => {
+  const logs = [];
+  const { runtime, input } = runtimeFixture({ logger: (event, details) => logs.push({ event, details }) });
+  await runtime.handleMoveStart('hwnd');
+  input.cursor.virtualCursor = { x: 900, y: 150 };
+  await runtime.poll();
+  assert.ok(logs.some(({ event, details }) => event === 'drag.timing'
+    && details.name === 'capture' && details.durationMs >= 0));
+  assert.ok(logs.some(({ event, details }) => event === 'drag.lifecycle'
+    && details.event === 'offer-sent' && details.id === 'window-stable'));
+  assert.doesNotMatch(JSON.stringify(logs), /https?:\/\//);
+  assert.deepEqual(sanitizeHandoffLog({
+    type: 'drag.lifecycle', reason: 'failed at https://example.test/private?token=secret',
+    url: 'https://example.test/private', payload: { tabs: [] },
+  }), { type: 'drag.lifecycle', reason: 'failed at [redacted-url]' });
+  await runtime.stop();
+});
+
+test('transport unlink and suspend-style mode recovery clear the seam immediately', async () => {
+  const seamStates = [];
+  const { runtime, input } = runtimeFixture({ setSeam: (state) => seamStates.push(state) });
+  await runtime.handleMoveStart('hwnd');
+  input.cursor.virtualCursor = { x: 900, y: 150 };
+  await runtime.poll();
+  await runtime.drag.receive({ type: 'window.ready', id: 'window-stable' });
+  input.cursor.virtualCursor = { x: 1040, y: 180 };
+  await runtime.poll();
+  assert.ok(seamStates.at(-1));
+
+  input.emit('mode', { linked: false, reason: 'system-suspend' });
+  assert.equal(seamStates.at(-1), null);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(runtime.drag.active, null);
   await runtime.stop();
 });

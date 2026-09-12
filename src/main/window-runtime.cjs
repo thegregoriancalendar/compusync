@@ -4,6 +4,28 @@ const { EventEmitter } = require('node:events');
 const { DragController } = require('./drag.cjs');
 
 const WINDOW_FRAME_MS = 1000 / 60;
+const HANDOFF_LOG_FIELDS = new Set([
+  'type', 'event', 'name', 'id', 'role', 'phase', 'at', 'elapsedMs', 'durationMs',
+  'status', 'winner', 'reason', 'instant', 'waitMs', 'keepaliveMs',
+]);
+
+function sanitizeHandoffLog(details) {
+  const clean = {};
+  for (const [key, value] of Object.entries(details || {})) {
+    if (!HANDOFF_LOG_FIELDS.has(key)) continue;
+    if (typeof value === 'string') clean[key] = value.slice(0, 160).replace(/https?:\/\/[^\s]+/gi, '[redacted-url]');
+    else if (typeof value === 'number' && Number.isFinite(value)) clean[key] = value;
+    else if (typeof value === 'boolean' || value === null) clean[key] = value;
+  }
+  return clean;
+}
+
+function writeHandoffLog(logger, event, details) {
+  if (!['drag.lifecycle', 'drag.timing'].includes(event)) return;
+  const method = typeof logger === 'function' ? logger : logger?.info;
+  if (typeof method !== 'function') return;
+  try { method.call(logger, event, sanitizeHandoffLog(details)); } catch { /* Logging cannot interrupt handoff. */ }
+}
 
 function boundsOf(window) {
   const bounds = window?.bounds;
@@ -48,6 +70,7 @@ class WindowHandoffRuntime extends EventEmitter {
     this.setBusy = typeof options.setBusy === 'function' ? options.setBusy : () => {};
     this.setSeam = typeof options.setSeam === 'function' ? options.setSeam : () => {};
     this.showHint = typeof options.showHint === 'function' ? options.showHint : () => {};
+    this.logger = options.logger || null;
     this.frameMs = options.frameMs || WINDOW_FRAME_MS;
     this.started = false;
     this.polling = false;
@@ -65,6 +88,7 @@ class WindowHandoffRuntime extends EventEmitter {
       getPlacements: () => this.input.cursor.placements,
       setDragging: (dragging) => this.input.setDragging(dragging),
       setBusy: this.setBusy,
+      logger: (event, details) => writeHandoffLog(this.logger, event, details),
     });
     this._moveStart = (id) => { void this.handleMoveStart(id); };
     this._moveEnd = (id) => { void this.handleMoveEnd(id); };
@@ -74,7 +98,10 @@ class WindowHandoffRuntime extends EventEmitter {
     };
     this._mode = ({ linked, reason }) => {
       this.chrome.setLinked(linked);
-      if (!linked && this.drag.active) void this.#restoreSafely(reason || 'unlinked');
+      if (!linked) {
+        this.setSeam(null);
+        if (this.drag.active) void this.#restoreSafely(reason || 'unlinked');
+      }
     };
     this._displayChanged = () => {
       if (this.drag.active) void this.#restoreSafely('display-changed');
@@ -239,4 +266,12 @@ class WindowHandoffRuntime extends EventEmitter {
   }
 }
 
-module.exports = { WINDOW_FRAME_MS, boundsOf, geometryToVU, cursorAtSharedEdge, WindowHandoffRuntime };
+module.exports = {
+  WINDOW_FRAME_MS,
+  sanitizeHandoffLog,
+  writeHandoffLog,
+  boundsOf,
+  geometryToVU,
+  cursorAtSharedEdge,
+  WindowHandoffRuntime,
+};

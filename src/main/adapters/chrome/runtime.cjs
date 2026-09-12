@@ -20,6 +20,7 @@ class ChromeAdapterRuntime extends EventEmitter {
     this.machineId = options.machineId;
     this.getPlacement = options.getPlacement;
     this.onNotice = typeof options.onNotice === 'function' ? options.onNotice : () => {};
+    this.logger = options.logger || null;
     this.requestRelaunch = typeof options.requestRelaunch === 'function' ? options.requestRelaunch : async () => false;
     this.sleep = options.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.now = options.now || Date.now;
@@ -75,7 +76,7 @@ class ChromeAdapterRuntime extends EventEmitter {
     this.connecting = (async () => {
       const adapter = this.createAdapter({
         platform: this.platform, native: this.native, machineId: this.machineId,
-        getPlacement: this.getPlacement, detection,
+        getPlacement: this.getPlacement, detection, logger: this.logger,
       });
       await adapter.cdp.connect();
       adapter.cdp.once?.('disconnect', () => { if (this.adapter === adapter) this.adapter = null; });

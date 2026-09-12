@@ -40,6 +40,20 @@ const notices = new Map();
 const rendererPath = (file) => path.join(__dirname, 'renderer', file);
 const configPath = () => path.join(app.getPath('userData'), 'settings.json');
 
+const applicationLogger = {
+  info(event, details) {
+    // Chrome producers report only the active hostname and tab count. Drag
+    // records are separately allow-listed at the runtime boundary.
+    const safe = String(event).startsWith('chrome.') ? {
+      id: typeof details?.id === 'string' ? details.id.slice(0, 160) : null,
+      host: typeof details?.host === 'string' ? details.host.slice(0, 253) : '',
+      tabCount: Number.isSafeInteger(details?.tabCount) ? details.tabCount : 0,
+    } : details;
+    console.info(JSON.stringify({ scope: 'window-handoff', event, ...safe }));
+  },
+  warn(event, details) { this.info(event, details); },
+};
+
 function readConfig() {
   let saved = {};
   try {
@@ -395,6 +409,7 @@ function ensureInputRuntime() {
         return result.response === 0;
       },
       onNotice: addNotice,
+      logger: applicationLogger,
     });
     windowRuntime = new WindowHandoffRuntime({
       input: inputRuntime,
@@ -404,6 +419,7 @@ function ensureInputRuntime() {
       setBusy: (busy) => send(surface, 'sync:handoff-busy', Boolean(busy)),
       setSeam: (state) => seamOverlay?.update(state, config.id),
       showHint: (message) => seamOverlay?.showHint(message),
+      logger: applicationLogger,
     });
     windowRuntime.start();
   } catch (error) {
