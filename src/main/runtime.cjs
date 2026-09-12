@@ -79,7 +79,17 @@ class SharedInputRuntime extends EventEmitter {
       edgeResistanceVU: this.settings.edgeResistanceVU,
       linked: false,
       send: (message) => this.send(message),
-      onFailure: (reason, error) => this.watchdog?.trigger?.(reason, error),
+      onFailure: (reason, error) => {
+        if ((this.native.platformName === 'darwin' || process.platform === 'darwin')
+          && /input monitoring|event tap|accessibility/i.test(String(error?.message || error))) {
+          this.onNotice({
+            id: 'input-monitoring-permission', kind: 'permission', title: 'Allow Input Monitoring',
+            message: 'Compusync could not capture shared input. Allow Accessibility and Input Monitoring, then link the cursors again.',
+            actionLabel: 'Open Input Monitoring Settings', action: 'open-input-monitoring', dismissible: false,
+          });
+        }
+        this.watchdog?.trigger?.(reason, error);
+      },
     });
     this.keyboard = new KeyboardRouter({
       cursor: this.cursor,

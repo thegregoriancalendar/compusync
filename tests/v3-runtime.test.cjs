@@ -112,3 +112,19 @@ test('overlapping peer placements are repaired with a runtime warning', () => {
   assert.equal(runtime.cursor.placementFor('mac').origin.x, 100);
   runtime.stop();
 });
+
+test('a denied macOS event tap reports persistent Input Monitoring remediation', () => {
+  const session = new FakeSession(), native = new FakeNative(), notices = [];
+  native.platformName = 'darwin';
+  native.startCursorCapture = () => { throw new Error('CGEventTapCreate failed; grant Accessibility and Input Monitoring permissions'); };
+  const runtime = new SharedInputRuntime({
+    session, native, machineId: 'win', hostId: 'win', peerId: 'mac', settings,
+    layouts: { win: layout(100, 100, 1), mac: layout(100, 100, 1) },
+    onNotice: (notice) => notices.push(notice),
+  });
+  runtime.start();
+  assert.equal(runtime.cursor.linked, false);
+  assert.equal(notices[0].action, 'open-input-monitoring');
+  assert.equal(notices[0].dismissible, false);
+  runtime.stop();
+});
