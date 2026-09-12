@@ -13,6 +13,10 @@ const {
 
 const DEFAULT_ACCELERATION = Object.freeze({ base: 1, threshold: .5, slope: .04 });
 const DEFAULT_FRAME_MS = 1000 / 60;
+// Leaves headroom for 60Hz authoritative positions and heartbeats below the
+// Session control-channel traffic budget while remaining well above frame rate.
+const MAX_DELTA_RATE_HZ = 200;
+const DELTA_SEND_INTERVAL_MS = 1000 / MAX_DELTA_RATE_HZ;
 const BUTTON_BITS = Object.freeze({ left: 1, right: 2, middle: 4, x1: 8, x2: 16 });
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);
 const noOp = () => {};
@@ -39,11 +43,6 @@ function accelerateDelta(dx, dy, dt, curve = DEFAULT_ACCELERATION) {
   return { dx: dx * gain, dy: dy * gain, gain };
 }
 
-function safeCall(target, method, ...args) {
-  if (typeof target?.[method] !== 'function') return undefined;
-  return target[method](...args);
-}
-
 class CursorController extends EventEmitter {
   constructor(options = {}) {
     super();
@@ -51,6 +50,7 @@ class CursorController extends EventEmitter {
     this.machineId = options.machineId;
     this.native = options.native || {};
     this.send = typeof options.send === 'function' ? options.send : () => false;
+    this.onFailure = typeof options.onFailure === 'function' ? options.onFailure : null;
     this.now = typeof options.now === 'function' ? options.now : Date.now;
     this.frameMs = finite(options.frameMs) && options.frameMs > 0 ? options.frameMs : DEFAULT_FRAME_MS;
     this.placements = this.#normalizePlacements(options.placements || []);
@@ -72,10 +72,14 @@ class CursorController extends EventEmitter {
     this.frameTimer = null;
     this.pendingLocal = { dx: 0, dy: 0 };
     this.pendingRemote = { dx: 0, dy: 0 };
+    this.outboundDelta = { dx: 0, dy: 0, t: 0 };
+    this.lastDeltaSentAt = -Infinity;
     this.edgePressure = null;
     this.localButtons = 0;
     this.remoteButtons = 0;
+    this.syntheticButtons = 0;
     this.modifiers = 0;
+    this.failureRaised = false;
   }
 
   #normalizePlacements(values) {
@@ -111,7 +115,7 @@ class CursorController extends EventEmitter {
   start() {
     if (this.started) return;
     this.started = true;
-    safeCall(this.native, 'setLinked', this.linked);
+    if (!this.#nativeCall('setLinked', this.linked)) return;
     if (this.linked) this.#enableCapture();
     this.#applyPhysicalOwnership();
     this.frameTimer = setInterval(() => this.flush(), this.frameMs);
@@ -142,7 +146,7 @@ class CursorController extends EventEmitter {
   setConfig(value = {}) {
     if (value.acceleration) {
       this.config.acceleration = normalizeAcceleration(value.acceleration);
-      safeCall(this.native, 'configureAcceleration', this.config.acceleration);
+      this.#nativeCall('configureAcceleration', this.config.acceleration);
     }
     if (value.edgeResistanceVU !== undefined) {
       if (!finite(value.edgeResistanceVU) || value.edgeResistanceVU < 0 || value.edgeResistanceVU > 1000) {
@@ -156,11 +160,13 @@ class CursorController extends EventEmitter {
   setLinked(linked, reason = 'user') {
     const next = Boolean(linked);
     if (this.linked === next) return false;
+    if (next) this.failureRaised = false;
     this.linked = next;
-    safeCall(this.native, 'setLinked', next);
+    if (!this.#nativeCall('setLinked', next)) return false;
     this.edgePressure = null;
     this.pendingLocal = { dx: 0, dy: 0 };
     this.pendingRemote = { dx: 0, dy: 0 };
+    this.outboundDelta = { dx: 0, dy: 0, t: 0 };
     if (next) this.#enableCapture();
     else this.#disableCapture();
     this.#applyPhysicalOwnership();
@@ -189,7 +195,10 @@ class CursorController extends EventEmitter {
     const accelerated = options.accelerated
       ? { dx, dy }
       : accelerateDelta(dx, dy, dt, this.config.acceleration);
-    this.send({ type: 'cursor.delta', dx: accelerated.dx, dy: accelerated.dy, t: timestamp });
+    this.outboundDelta.dx = Math.max(-65536, Math.min(65536, this.outboundDelta.dx + accelerated.dx));
+    this.outboundDelta.dy = Math.max(-65536, Math.min(65536, this.outboundDelta.dy + accelerated.dy));
+    this.outboundDelta.t = timestamp;
+    this.#flushOutboundDelta();
     if (this.isOwner()) {
       this.pendingLocal.dx += accelerated.dx;
       this.pendingLocal.dy += accelerated.dy;
@@ -201,8 +210,15 @@ class CursorController extends EventEmitter {
     const bit = BUTTON_BITS[button];
     if (!this.linked || !bit || typeof down !== 'boolean') return false;
     this.localButtons = down ? this.localButtons | bit : this.localButtons & ~bit;
-    this.send({ type: 'cursor.button', button, down });
-    return true;
+    if (this.isOwner()) {
+      if (down) this.syntheticButtons &= ~bit;
+      else if (this.remoteButtons & bit) {
+        if (!this.#synthesizeButton(button, bit, true)) return false;
+      }
+      else this.syntheticButtons &= ~bit;
+    }
+    if (!this.linked) return false;
+    return this.#sendPeer({ type: 'cursor.button', button, down }, true);
   }
 
   receive(message, peerMachineId = null) {
@@ -226,22 +242,29 @@ class CursorController extends EventEmitter {
     if (message.type === 'cursor.button') {
       const bit = BUTTON_BITS[message.button];
       if (!bit || typeof message.down !== 'boolean') return false;
+      const wasDown = Boolean((this.localButtons | this.remoteButtons) & bit);
       this.remoteButtons = message.down ? this.remoteButtons | bit : this.remoteButtons & ~bit;
-      if (this.isOwner()) safeCall(this.native, 'synthesizeButton', message.button, message.down);
+      const isDown = Boolean((this.localButtons | this.remoteButtons) & bit);
+      if (this.isOwner()) {
+        if (!wasDown && isDown && !this.#synthesizeButton(message.button, bit, true)) return false;
+        else if (wasDown && !isDown && !this.#synthesizeButton(message.button, bit, false)) return false;
+        else if (this.localButtons & bit) this.syntheticButtons &= ~bit;
+      }
       return true;
     }
     return false;
   }
 
   flush(timestamp = this.now()) {
+    this.#flushOutboundDelta();
     if (!this.linked || !this.isOwner()) return false;
     const dx = this.pendingLocal.dx + this.pendingRemote.dx;
     const dy = this.pendingLocal.dy + this.pendingRemote.dy;
     this.pendingLocal = { dx: 0, dy: 0 };
     this.pendingRemote = { dx: 0, dy: 0 };
     if (dx || dy) this.#moveAuthoritative(dx, dy);
-    if (this.isOwner()) {
-      this.send({ type: 'cursor.position', x: this.virtualCursor.x, y: this.virtualCursor.y, t: timestamp });
+    if (this.linked && this.isOwner()) {
+      this.#sendPeer({ type: 'cursor.position', x: this.virtualCursor.x, y: this.virtualCursor.y, t: timestamp }, false);
       this.emit('position', this.state());
     }
     return true;
@@ -260,15 +283,17 @@ class CursorController extends EventEmitter {
       x: target.origin.x + relativeX * target.size.w,
       y: target.origin.y + relativeY * target.size.h,
     }, target);
-    if (this.isOwner()) this.#handoff(target, position, 'hotkey');
+    if (this.isOwner()) return this.#handoff(target, position, 'hotkey');
     else {
+      const buttons = this.localButtons | this.remoteButtons;
+      if (!this.#sendPeer({ type: 'cursor.handoff', x: position.x, y: position.y, buttons, modifiers: this.modifiers }, true)) return false;
       this.virtualCursor = position;
       this.ownerMachineId = target.machineId;
       this.edgePressure = null;
-      const buttons = this.localButtons | this.remoteButtons;
-      this.send({ type: 'cursor.handoff', x: position.x, y: position.y, buttons, modifiers: this.modifiers });
-      this.#applyPhysicalOwnership();
-      safeCall(this.native, 'assumeInputState', buttons, this.modifiers);
+      if (!this.#applyPhysicalOwnership()) return false;
+      const desiredSynthetic = this.remoteButtons & ~this.localButtons;
+      if (!this.#nativeCall('assumeInputState', desiredSynthetic, this.modifiers)) return false;
+      this.syntheticButtons = desiredSynthetic;
       this.emit('ownership', { ownerMachineId: target.machineId, reason: 'hotkey', virtualCursor: { ...position }, buttons, modifiers: this.modifiers });
     }
     return true;
@@ -276,8 +301,8 @@ class CursorController extends EventEmitter {
 
   #enableCapture() {
     if (!this.started) return;
-    safeCall(this.native, 'configureAcceleration', this.config.acceleration);
-    safeCall(this.native, 'startCursorCapture', {
+    if (!this.#nativeCall('configureAcceleration', this.config.acceleration)) return;
+    this.#nativeCall('startCursorCapture', {
       // Native capture owns the shared acceleration curve on the input hot
       // path. Mark its output so JS never applies the curve a second time.
       onDelta: (dx, dy, dt, timestamp) => this.localDelta(dx, dy, dt, timestamp, { accelerated: true }),
@@ -287,24 +312,25 @@ class CursorController extends EventEmitter {
   }
 
   #disableCapture() {
-    safeCall(this.native, 'stopCursorCapture');
-    safeCall(this.native, 'releaseInputState');
-    safeCall(this.native, 'showCursor');
-    safeCall(this.native, 'releaseCursor');
+    this.#nativeCall('stopCursorCapture');
+    this.#nativeCall('releaseInputState');
+    this.syntheticButtons = 0;
+    this.#nativeCall('showCursor');
+    this.#nativeCall('releaseCursor');
   }
 
   #applyPhysicalOwnership() {
     if (!this.linked || this.isOwner()) {
-      safeCall(this.native, 'releaseCursor');
+      if (!this.#nativeCall('releaseCursor')) return false;
       if (this.linked) {
         const placement = this.placementFor(this.machineId);
-        if (placement) safeCall(this.native, 'warpCursor', toLocal(this.virtualCursor, placement));
+        if (placement && !this.#nativeCall('warpCursor', toLocal(this.virtualCursor, placement))) return false;
       }
-      safeCall(this.native, 'showCursor');
+      if (!this.#nativeCall('showCursor')) return false;
     } else {
-      safeCall(this.native, 'hideCursor');
-      safeCall(this.native, 'parkCursor');
+      if (!this.#nativeCall('hideCursor') || !this.#nativeCall('parkCursor')) return false;
     }
+    return true;
   }
 
   #moveAuthoritative(dx, dy) {
@@ -314,14 +340,14 @@ class CursorController extends EventEmitter {
     if (containsPoint(owner, candidate)) {
       this.edgePressure = null;
       this.virtualCursor = candidate;
-      safeCall(this.native, 'warpCursor', toLocal(candidate, owner));
+      this.#nativeCall('warpCursor', toLocal(candidate, owner));
       return;
     }
     const crossing = crossingTarget(owner, candidate, this.placements);
     if (!crossing) {
       this.edgePressure = null;
       this.virtualCursor = clampToPlacement(candidate, owner);
-      safeCall(this.native, 'warpCursor', toLocal(this.virtualCursor, owner));
+      this.#nativeCall('warpCursor', toLocal(this.virtualCursor, owner));
       return;
     }
     const pressure = crossing.edge === 'right'
@@ -335,7 +361,7 @@ class CursorController extends EventEmitter {
     const resistance = this.dragging ? 0 : this.config.edgeResistanceVU;
     if (this.edgePressure.amount < resistance) {
       this.virtualCursor = clampToPlacement(candidate, owner);
-      safeCall(this.native, 'warpCursor', toLocal(this.virtualCursor, owner));
+      this.#nativeCall('warpCursor', toLocal(this.virtualCursor, owner));
       return;
     }
     const excess = Math.max(0, this.edgePressure.amount - resistance);
@@ -347,25 +373,30 @@ class CursorController extends EventEmitter {
   }
 
   #handoff(target, position, reason) {
-    safeCall(this.native, 'hideCursor');
-    safeCall(this.native, 'parkCursor');
-    this.virtualCursor = position;
-    this.ownerMachineId = target.machineId;
-    this.edgePressure = null;
     const buttons = this.localButtons | this.remoteButtons;
-    this.send({
+    if (!this.#sendPeer({
       type: 'cursor.handoff',
       x: position.x,
       y: position.y,
       buttons,
       modifiers: this.modifiers,
-    });
+    }, true)) return false;
+    this.virtualCursor = position;
+    this.ownerMachineId = target.machineId;
+    this.edgePressure = null;
+    if (!this.#nativeCall('hideCursor') || !this.#nativeCall('parkCursor')) return false;
+    // This machine is no longer authoritative. Release every injected hold;
+    // its physical device remains tracked and continues forwarding events.
+    if (!this.#nativeCall('releaseInputState')) return false;
+    this.syntheticButtons = 0;
     this.emit('ownership', { ownerMachineId: target.machineId, reason, virtualCursor: { ...position }, buttons, modifiers: this.modifiers });
+    return true;
   }
 
   #receiveHandoff(message, peerMachineId) {
     if (!finite(message.x) || !finite(message.y)
-      || !Number.isSafeInteger(message.buttons) || !Number.isSafeInteger(message.modifiers)) return false;
+      || !Number.isSafeInteger(message.buttons) || message.buttons < 0 || message.buttons > 31
+      || !Number.isSafeInteger(message.modifiers) || message.modifiers < 0 || message.modifiers > 65535) return false;
     const targetId = ownerAt({ x: message.x, y: message.y }, this.placements);
     if (!targetId || (peerMachineId && peerMachineId !== this.ownerMachineId && peerMachineId !== targetId)) return false;
     const target = this.placementFor(targetId);
@@ -375,13 +406,16 @@ class CursorController extends EventEmitter {
     this.modifiers = message.modifiers;
     this.edgePressure = null;
     if (this.isOwner()) {
-      safeCall(this.native, 'releaseCursor');
-      safeCall(this.native, 'warpCursor', toLocal(this.virtualCursor, target));
-      safeCall(this.native, 'showCursor');
-      safeCall(this.native, 'assumeInputState', message.buttons, message.modifiers);
+      const desiredSynthetic = this.remoteButtons & ~this.localButtons;
+      if (!this.#nativeCall('releaseCursor')
+        || !this.#nativeCall('warpCursor', toLocal(this.virtualCursor, target))
+        || !this.#nativeCall('showCursor')
+        || !this.#nativeCall('assumeInputState', desiredSynthetic, message.modifiers)) return false;
+      this.syntheticButtons = desiredSynthetic;
     } else {
-      safeCall(this.native, 'hideCursor');
-      safeCall(this.native, 'parkCursor');
+      if (!this.#nativeCall('hideCursor') || !this.#nativeCall('parkCursor')
+        || !this.#nativeCall('releaseInputState')) return false;
+      this.syntheticButtons = 0;
     }
     this.emit('ownership', {
       ownerMachineId: targetId,
@@ -392,11 +426,78 @@ class CursorController extends EventEmitter {
     });
     return true;
   }
+
+  #flushOutboundDelta() {
+    if (!this.linked || (!this.outboundDelta.dx && !this.outboundDelta.dy)) return false;
+    const now = this.now();
+    if (now - this.lastDeltaSentAt < DELTA_SEND_INTERVAL_MS) return false;
+    const dx = Math.max(-65536, Math.min(65536, this.outboundDelta.dx));
+    const dy = Math.max(-65536, Math.min(65536, this.outboundDelta.dy));
+    this.outboundDelta.dx -= dx;
+    this.outboundDelta.dy -= dy;
+    const message = { type: 'cursor.delta', dx, dy, t: this.outboundDelta.t };
+    this.lastDeltaSentAt = now;
+    this.#sendPeer(message, false);
+    return true;
+  }
+
+  #sendPeer(message, reliable) {
+    try {
+      const sent = this.send(message);
+      if (reliable && sent === false) {
+        this.#fail(`${message.type}-send-failed`, new Error(`Reliable ${message.type} delivery failed.`));
+        return false;
+      }
+      return sent !== false;
+    } catch (error) {
+      this.#fail(`${message.type}-send-failed`, error);
+      return false;
+    }
+  }
+
+  #synthesizeButton(button, bit, down) {
+    if (!this.#nativeCall('synthesizeButton', button, down)) return false;
+    this.syntheticButtons = down ? this.syntheticButtons | bit : this.syntheticButtons & ~bit;
+    return true;
+  }
+
+  #nativeCall(method, ...args) {
+    if (typeof this.native?.[method] !== 'function') return true;
+    try {
+      this.native[method](...args);
+      return true;
+    } catch (error) {
+      this.#fail(`native-${method}-failed`, error);
+      return false;
+    }
+  }
+
+  #fail(reason, error) {
+    if (this.failureRaised) return;
+    this.failureRaised = true;
+    this.linked = false;
+    // Fail closed even when no external watchdog has been supplied. These are
+    // best-effort raw calls to avoid recursively invoking the failed method.
+    for (const [method, args] of [
+      ['setLinked', [false]],
+      ['showCursor', []],
+      ['releaseCursor', []],
+      ['stopCursorCapture', []],
+      ['releaseInputState', []],
+    ]) {
+      try { this.native?.[method]?.(...args); } catch { /* Continue recovery. */ }
+    }
+    this.syntheticButtons = 0;
+    try { this.onFailure?.(reason, error); } catch { /* Recovery callbacks cannot escape. */ }
+    this.emit('failure', { reason, error });
+  }
 }
 
 module.exports = {
   DEFAULT_ACCELERATION,
   DEFAULT_FRAME_MS,
+  MAX_DELTA_RATE_HZ,
+  DELTA_SEND_INTERVAL_MS,
   BUTTON_BITS,
   normalizeAcceleration,
   accelerateDelta,

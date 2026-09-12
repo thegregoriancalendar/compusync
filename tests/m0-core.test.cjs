@@ -185,7 +185,7 @@ test('the owner sums local and remote deltas and edge resistance delays handoff'
   assert.equal(handoff.type, 'cursor.handoff');
   assert.ok(Math.abs(handoff.x - 107) < 1e-5);
   assert.deepEqual({ y: handoff.y, buttons: handoff.buttons, modifiers: handoff.modifiers }, { y: 20, buttons: 1, modifiers: 3 });
-  assert.deepEqual(aNative.calls.slice(-2), [['hide'], ['park']]);
+  assert.deepEqual(aNative.calls.slice(-3), [['hide'], ['park'], ['release-input']]);
 });
 
 test('a drag disables resistance and the destination assumes held input state', () => {
@@ -226,7 +226,10 @@ test('top movement clamps, non-owner follows authority, and ownership hotkey pre
   cursor.virtualCursor = { x: 25, y: 25 };
   assert.equal(cursor.toggleOwnership(), true);
   assert.deepEqual(cursor.virtualCursor, { x: 150, y: 12.5 });
-  const follower = new CursorController({ machineId: 'a', placements: spaces, initialPosition: { x: 150, y: 12.5 }, ownerMachineId: 'b' });
+  const follower = new CursorController({
+    machineId: 'a', placements: spaces, initialPosition: { x: 150, y: 12.5 },
+    ownerMachineId: 'b', send: () => true,
+  });
   assert.equal(follower.receive({ type: 'cursor.position', x: 250, y: 40, t: 1 }, 'b'), true);
   assert.deepEqual(follower.virtualCursor, { x: 250, y: 40 });
   assert.equal(follower.receive({ type: 'cursor.position', x: 1, y: 1, t: 2 }, 'stranger'), false);
@@ -251,7 +254,100 @@ test('ownership hotkey on the non-owner updates both peers without split brain',
   assert.equal(oldOwner.receive(claim, 'b'), true);
   assert.equal(oldOwner.ownerMachineId, 'b');
   assert.equal(oldOwner.isOwner(), false);
-  assert.deepEqual(oldOwnerNative.calls.slice(-2), [['hide'], ['park']]);
+  assert.deepEqual(oldOwnerNative.calls.slice(-3), [['hide'], ['park'], ['release-input']]);
+});
+
+test('failed reliable handoff keeps ownership and invokes fail-closed recovery', () => {
+  const native = mockNative();
+  const failures = [];
+  const cursor = new CursorController({
+    machineId: 'a', placements: [placement('a', 0, 0, 100, 100), placement('b', 100, 0, 100, 100)],
+    initialPosition: { x: 99, y: 50 }, ownerMachineId: 'a', native,
+    acceleration: { base: 1, threshold: 1000, slope: 0 }, send: () => false,
+    onFailure: (reason, error) => failures.push([reason, error.message]),
+  });
+  cursor.localDelta(2, 0, 1);
+  cursor.flush();
+  assert.equal(cursor.ownerMachineId, 'a');
+  assert.deepEqual(cursor.virtualCursor, { x: 99, y: 50 });
+  assert.equal(cursor.linked, false);
+  assert.equal(native.calls.some(([name]) => name === 'hide' || name === 'park'), false);
+  assert.match(failures[0][0], /handoff-send-failed/);
+});
+
+test('native exceptions invoke recovery without escaping the input loop', () => {
+  const calls = [], failures = [];
+  const native = {
+    warpCursor: () => { throw new Error('warp failed'); },
+    setLinked: (value) => calls.push(['linked', value]),
+    showCursor: () => calls.push(['show']), releaseCursor: () => calls.push(['release']),
+    stopCursorCapture: () => calls.push(['stop']), releaseInputState: () => calls.push(['release-input']),
+  };
+  const cursor = new CursorController({
+    machineId: 'a', placements: [placement('a', 0, 0, 100, 100)],
+    initialPosition: { x: 10, y: 10 }, native, send: () => true,
+    acceleration: { base: 1, threshold: 1000, slope: 0 },
+    onFailure: (reason) => failures.push(reason),
+  });
+  cursor.localDelta(1, 0, 1);
+  assert.doesNotThrow(() => cursor.flush());
+  assert.equal(cursor.linked, false);
+  assert.deepEqual(failures, ['native-warpCursor-failed']);
+  assert.deepEqual(calls, [['linked', false], ['show'], ['release'], ['stop'], ['release-input']]);
+});
+
+test('button reconciliation synthesizes only aggregate transitions and releases on handoff', () => {
+  const native = mockNative();
+  const sent = [];
+  const cursor = new CursorController({
+    machineId: 'a', placements: [placement('a', 0, 0, 100, 100), placement('b', 100, 0, 100, 100)],
+    initialPosition: { x: 99, y: 50 }, ownerMachineId: 'a', native,
+    acceleration: { base: 1, threshold: 1000, slope: 0 }, send: (message) => { sent.push(message); return true; },
+  });
+  cursor.localButton('left', true);
+  cursor.receive({ type: 'cursor.button', button: 'left', down: true }, 'b');
+  assert.equal(native.calls.some((call) => call[0] === 'button'), false);
+  cursor.localButton('left', false);
+  assert.deepEqual(native.calls.at(-1), ['button', 'left', true]);
+  cursor.receive({ type: 'cursor.button', button: 'left', down: false }, 'b');
+  assert.deepEqual(native.calls.at(-1), ['button', 'left', false]);
+  cursor.receive({ type: 'cursor.button', button: 'right', down: true }, 'b');
+  cursor.localDelta(2, 0, 1);
+  cursor.flush();
+  assert.equal(cursor.ownerMachineId, 'b');
+  assert.deepEqual(native.calls.slice(-3), [['hide'], ['park'], ['release-input']]);
+});
+
+test('handoff into a locally held button synthesizes only the remote remainder', () => {
+  const native = mockNative();
+  const cursor = new CursorController({
+    machineId: 'b', placements: [placement('a', 0, 0, 100, 100), placement('b', 100, 0, 100, 100)],
+    initialPosition: { x: 50, y: 50 }, ownerMachineId: 'a', native, send: () => true,
+  });
+  cursor.localButton('left', true);
+  cursor.receive({ type: 'cursor.button', button: 'right', down: true }, 'a');
+  assert.equal(cursor.receive({ type: 'cursor.handoff', x: 110, y: 50, buttons: 3, modifiers: 0 }, 'a'), true);
+  assert.deepEqual(native.calls.at(-1), ['assume', 2, 0]);
+});
+
+test('cursor deltas are coalesced below 250 messages per second', () => {
+  let now = 0;
+  const deltas = [];
+  const cursor = new CursorController({
+    machineId: 'a', placements: [placement('a', 0, 0, 1000, 1000)],
+    initialPosition: { x: 100, y: 100 }, ownerMachineId: 'a', now: () => now,
+    acceleration: { base: 1, threshold: 1000, slope: 0 },
+    send: (message) => { if (message.type === 'cursor.delta') deltas.push(message); return true; },
+  });
+  for (let index = 0; index < 100; index += 1) cursor.localDelta(1, 0, 1, index);
+  assert.equal(deltas.length, 1);
+  now = 4.9;
+  cursor.flush(now);
+  assert.equal(deltas.length, 1);
+  now = 5;
+  cursor.flush(now);
+  assert.equal(deltas.length, 2);
+  assert.equal(deltas[1].dx, 99);
 });
 
 test('native capture deltas are not accelerated twice', () => {
