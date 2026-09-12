@@ -45,6 +45,7 @@ function Read-State {
   }
 }
 
+$baseline = Read-State
 $start = New-Object Diagnostics.ProcessStartInfo
 $start.FileName = (Get-Command node).Source
 $start.Arguments = '"' + $childPath + '" "' + $addonPath + '" "' + $guardPath + '"'
@@ -61,13 +62,21 @@ try {
   [void]$child.WaitForExit(2000)
   Start-Sleep -Milliseconds 500
   $recovered = Read-State
+  $cursorVisibilityObservable = $baseline.CursorVisible
+  $cursorHideObserved = (-not $cursorVisibilityObservable) -or (-not $armed.CursorVisible)
+  $cursorVisibilityRecovered = (-not $cursorVisibilityObservable) -or $recovered.CursorVisible
   [pscustomobject]@{
     ChildPid = $child.Id
+    BaselineCursorVisible = $baseline.CursorVisible
     ArmedClipReleased = $armed.ClipReleased
     ArmedCursorVisible = $armed.CursorVisible
     RecoveredClipReleased = $recovered.ClipReleased
     RecoveredCursorVisible = $recovered.CursorVisible
-    Passed = (-not $armed.ClipReleased) -and $recovered.ClipReleased -and $recovered.CursorVisible
+    CursorVisibilityObservable = $cursorVisibilityObservable
+    CursorHideObserved = $cursorHideObserved
+    CursorVisibilityRecovered = $cursorVisibilityRecovered
+    Passed = (-not $armed.ClipReleased) -and $recovered.ClipReleased -and
+      $cursorHideObserved -and $cursorVisibilityRecovered
   }
 } finally {
   if (-not $child.HasExited) { $child.Kill(); [void]$child.WaitForExit(2000) }
