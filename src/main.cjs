@@ -388,6 +388,7 @@ function ensureInputRuntime() {
       layouts: sync.state.layouts,
       globalShortcut,
       powerMonitor,
+      logger: applicationLogger,
       onLayoutNeeded: scheduleLayoutUpdate,
       onNotice: addNotice,
       onModeChange: (linked, reason) => {

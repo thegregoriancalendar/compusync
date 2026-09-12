@@ -95,3 +95,20 @@ test('production native owns fail-safe hotkeys without Electron registration con
   assert.deepEqual(registered, []);
   runtime.stop();
 });
+
+test('overlapping peer placements are repaired with a runtime warning', () => {
+  const session = new FakeSession(), native = new FakeNative(), warnings = [];
+  const runtime = new SharedInputRuntime({
+    session, native, machineId: 'win', hostId: 'win', peerId: 'mac', settings,
+    layouts: { win: layout(100, 100, 1), mac: layout(100, 100, 1) },
+    logger: { warn: (message) => warnings.push(message) },
+  });
+  runtime.start();
+  assert.equal(runtime.receive({ type: 'layout.update', placements: [
+    { machineId: 'win', origin: { x: 0, y: 0 }, size: { w: 100, h: 100 }, scale: 1 },
+    { machineId: 'mac', origin: { x: 50, y: 0 }, size: { w: 100, h: 100 }, scale: 1 },
+  ] }, 'mac'), true);
+  assert.match(warnings[0], /overlapped/);
+  assert.equal(runtime.cursor.placementFor('mac').origin.x, 100);
+  runtime.stop();
+});

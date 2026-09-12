@@ -61,6 +61,7 @@ class SharedInputRuntime extends EventEmitter {
     this.onNotice = typeof options.onNotice === 'function' ? options.onNotice : () => {};
     this.onModeChange = typeof options.onModeChange === 'function' ? options.onModeChange : () => {};
     this.onLayoutNeeded = typeof options.onLayoutNeeded === 'function' ? options.onLayoutNeeded : () => {};
+    this.logger = options.logger || null;
     this.started = false;
     this.peerConnected = false;
     this.desiredLinked = this.settings.linked !== false;
@@ -146,14 +147,14 @@ class SharedInputRuntime extends EventEmitter {
   }
 
   send(message) {
-    const clean = sanitizePeerMessage(message);
+    const clean = sanitizePeerMessage(message, { logger: this.logger });
     if (!clean) return false;
     const policy = policyForMessage(clean.type);
     return this.session.sendPeer(clean, { lossTolerant: policy?.reliable === false });
   }
 
   receive(message, peerMachineId) {
-    const clean = sanitizePeerMessage(message);
+    const clean = sanitizePeerMessage(message, { logger: this.logger });
     if (!clean || peerMachineId !== this.peerId) return false;
     if (clean.type.startsWith('window.')) return this.windowController?.receive(clean) || false;
     const handled = routePeerInput({ cursor: this.cursor, keyboard: this.keyboard, watchdog: this.watchdog }, clean, peerMachineId);
