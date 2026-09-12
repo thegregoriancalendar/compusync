@@ -10,6 +10,7 @@ const {
   DATA_BACKPRESSURE_MAX,
   PEER_PLAINTEXT_MAX,
   PEER_LOSSY_BACKPRESSURE_MAX,
+  PEER_CONTROL_CHANNEL_MAX,
 } = require('../src/core/session.cjs');
 const { DRAG_LEASE_MS } = require('../src/core/state.cjs');
 const { viewportsForActor } = require('../src/core/geometry.cjs');
@@ -199,6 +200,17 @@ test('peer message bounds and lossy backpressure fail closed without dropping th
   assert.equal(peer.sendPeer({ type: 'cursor.position', x: 1, y: 2, t: 3 }, { lossTolerant: true }), false);
   delete peer.socket.bufferedAmount;
   assert.equal(peer.phase, 'connected');
+});
+
+test('large reliable peer control uses the authenticated bulk channel without reaching file consumers', async (t) => {
+  const { host, peer } = await pair(t);
+  let bulkDelivered = false;
+  host.once('data', () => { bulkDelivered = true; });
+  const message = { type: 'window.offer', descriptor: { payload: 'x'.repeat(PEER_CONTROL_CHANNEL_MAX + 1024) } };
+  const received = new Promise((resolve) => host.once('peer-message', resolve));
+  assert.equal(peer.sendPeer(message), true);
+  assert.deepEqual(await received, message);
+  assert.equal(bulkDelivered, false);
 });
 
 test('bulk limits and backpressure return false without disturbing control', async (t) => {

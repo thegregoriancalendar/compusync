@@ -12,10 +12,11 @@ const PROTOCOL_VERSION = 2;
 const DRAG_TOKEN = /^[A-Za-z0-9_-]{8,80}$/;
 const DATA_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const CONTROL_WIRE_MAX = 65536;
-const DATA_PLAINTEXT_MAX = 1024 * 1024;
-const DATA_WIRE_MAX = 1500000;
-const DATA_BACKPRESSURE_MAX = 2 * 1024 * 1024;
-const PEER_PLAINTEXT_MAX = 48 * 1024;
+const DATA_PLAINTEXT_MAX = 5 * 1024 * 1024;
+const DATA_WIRE_MAX = 8 * 1024 * 1024;
+const DATA_BACKPRESSURE_MAX = 8 * 1024 * 1024;
+const PEER_PLAINTEXT_MAX = 4 * 1024 * 1024;
+const PEER_CONTROL_CHANNEL_MAX = 48 * 1024;
 const PEER_LOSSY_BACKPRESSURE_MAX = 16 * 1024;
 
 const validMember = (member) => member && /^[a-zA-Z0-9-]{1,80}$/.test(member.id) && typeof member.name === 'string' && member.name.length > 0 && member.name.length <= 80;
@@ -279,7 +280,11 @@ class Session extends EventEmitter {
             if (message?.type !== 'data-message') throw new Error('Unknown data message.');
             const clean = sanitizeDataMessage(message.message);
             if (!clean) throw new Error('Invalid data message.');
-            this.emit('data', clean, dataMemberId);
+            if (clean.type === 'compusync-peer-control') {
+              const peerMessage = sanitizePeerMessage(clean.message);
+              if (!peerMessage) throw new Error('Invalid peer control message.');
+              this.emit('peer-message', peerMessage, dataMemberId);
+            } else this.emit('data', clean, dataMemberId);
           }
           return;
         }
@@ -473,7 +478,12 @@ class Session extends EventEmitter {
         if (packet?.type !== 'data-message') throw new Error('Unknown data message.');
         const clean = sanitizeDataMessage(packet.message);
         if (!clean) throw new Error('Invalid data message.');
-        this.emit('data', clean, this.members.find((member) => member.id !== this.self.id)?.id || null);
+        const memberId = this.members.find((member) => member.id !== this.self.id)?.id || null;
+        if (clean.type === 'compusync-peer-control') {
+          const peerMessage = sanitizePeerMessage(clean.message);
+          if (!peerMessage) throw new Error('Invalid peer control message.');
+          this.emit('peer-message', peerMessage, memberId);
+        } else this.emit('data', clean, memberId);
       } catch {
         socket.close(1008, 'Invalid data message');
       }
@@ -525,6 +535,11 @@ class Session extends EventEmitter {
     if (this.stopped) return false;
     const clean = sanitizePeerMessage(message);
     if (!clean) return false;
+    const byteLength = Buffer.byteLength(JSON.stringify(clean));
+    if (byteLength > PEER_CONTROL_CHANNEL_MAX) {
+      if (lossTolerant) return false;
+      return this.sendData({ type: 'compusync-peer-control', message: clean });
+    }
     let socket, channel;
     if (this.config.role === 'host') {
       const connection = this.connections.values().next().value;
@@ -622,6 +637,7 @@ module.exports = {
   DATA_WIRE_MAX,
   DATA_BACKPRESSURE_MAX,
   PEER_PLAINTEXT_MAX,
+  PEER_CONTROL_CHANNEL_MAX,
   PEER_LOSSY_BACKPRESSURE_MAX,
   sanitizePeerMessage,
 };
