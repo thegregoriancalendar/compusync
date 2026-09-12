@@ -1,0 +1,216 @@
+'use strict';
+
+const { EventEmitter } = require('node:events');
+const { CursorController } = require('./cursor.cjs');
+const { KeyboardRouter } = require('./keyboard.cjs');
+const { RecoveryWatchdog } = require('./watchdog.cjs');
+const { registerCursorHotkeys } = require('./hotkeys.cjs');
+const { sanitizePeerMessage, policyForMessage } = require('./messages.cjs');
+const { routePeerInput } = require('./input-runtime.cjs');
+const { placementFromDisplays, layoutPair } = require('./virtualspace.cjs');
+
+function placementForLayout(machineId, layout) {
+  if (!layout?.displays?.length) return null;
+  try { return placementFromDisplays(machineId, layout.displays); }
+  catch { return null; }
+}
+
+function derivePairPlacements(layouts, hostId, peerId, settings) {
+  const host = placementForLayout(hostId, layouts?.[hostId]);
+  const peer = placementForLayout(peerId, layouts?.[peerId]);
+  if (!host || !peer) return host ? [host] : peer ? [peer] : [];
+  const peerSide = settings?.screenSide === 'right' ? 'left' : 'right';
+  return layoutPair(host, peer, {
+    secondSide: peerSide,
+    verticalOffsetVU: Number(settings?.verticalOffsetVU) || 0,
+  });
+}
+
+function centerOf(placement) {
+  return {
+    x: placement.origin.x + placement.size.w / 2,
+    y: placement.origin.y + placement.size.h / 2,
+  };
+}
+
+class SharedInputRuntime extends EventEmitter {
+  constructor(options = {}) {
+    super();
+    if (!options.session || !options.machineId || !options.hostId || !options.peerId) {
+      throw new TypeError('session, machineId, hostId and peerId are required.');
+    }
+    this.session = options.session;
+    this.machineId = options.machineId;
+    this.hostId = options.hostId;
+    this.peerId = options.peerId;
+    this.isHost = this.machineId === this.hostId;
+    this.settings = options.settings || {};
+    this.native = options.native || {};
+    this.globalShortcut = options.globalShortcut;
+    this.powerMonitor = options.powerMonitor;
+    this.processLike = options.processLike || process;
+    this.layouts = options.layouts || {};
+    this.onNotice = typeof options.onNotice === 'function' ? options.onNotice : () => {};
+    this.onModeChange = typeof options.onModeChange === 'function' ? options.onModeChange : () => {};
+    this.onLayoutNeeded = typeof options.onLayoutNeeded === 'function' ? options.onLayoutNeeded : () => {};
+    this.started = false;
+    this.peerConnected = false;
+    this.desiredLinked = this.settings.linked !== false;
+
+    const placements = derivePairPlacements(this.layouts, this.hostId, this.peerId, this.settings);
+    const ownerPlacement = placements.find((placement) => placement.machineId === this.hostId) || placements[0];
+    this.cursor = new CursorController({
+      machineId: this.machineId,
+      native: this.native,
+      placements,
+      ownerMachineId: this.hostId,
+      initialPosition: ownerPlacement ? centerOf(ownerPlacement) : { x: 0, y: 0 },
+      acceleration: this.settings.acceleration,
+      edgeResistanceVU: this.settings.edgeResistanceVU,
+      linked: false,
+      send: (message) => this.send(message),
+      onFailure: (reason, error) => this.watchdog?.trigger?.(reason, error),
+    });
+    this.keyboard = new KeyboardRouter({
+      cursor: this.cursor,
+      native: this.native,
+      send: (message) => this.send(message),
+      notice: (message) => this.onNotice({
+        id: 'elevated-window', kind: 'warning', title: 'Administrator window', message,
+        dismissible: true,
+      }),
+    });
+    this.watchdog = new RecoveryWatchdog({
+      native: this.native,
+      cursor: this.cursor,
+      keyboard: this.keyboard,
+      send: (message) => this.send(message),
+      onUnlinked: (reason) => {
+        this.desiredLinked = false;
+        this.onModeChange(false, reason);
+        this.emit('mode', { linked: false, reason });
+      },
+    });
+
+    this._peerMessage = (message, peerMachineId) => this.receive(message, peerMachineId);
+    this._status = (status) => this.setPeerConnected(status?.phase === 'connected');
+    this._state = (state) => this.updateLayouts(state?.layouts || {});
+    this._key = (event) => this.keyboard.localKey(event?.code, event?.down, event?.modifiers || 0);
+    this._displayChanged = () => this.onLayoutNeeded();
+    this._nativeUnlink = () => this.watchdog.trigger('user-hotkey');
+    this._nativeOwnership = () => this.cursor.toggleOwnership();
+  }
+
+  start() {
+    if (this.started) return;
+    this.started = true;
+    this.cursor.start();
+    this.watchdog.start();
+    this.watchdog.bindProcess(this.processLike);
+    this.watchdog.bindPowerMonitor(this.powerMonitor);
+    this.session.on('peer-message', this._peerMessage);
+    this.session.on('status', this._status);
+    this.session.on('state', this._state);
+    this.native.on?.('key', this._key);
+    this.native.on?.('displayChanged', this._displayChanged);
+    this.native.on?.('unlinkHotkey', this._nativeUnlink);
+    this.native.on?.('toggleOwnershipHotkey', this._nativeOwnership);
+    if (this.globalShortcut) {
+      const cursorProxy = {
+        get linked() { return this.runtime.cursor.linked; },
+        runtime: this,
+        setLinked: (linked, reason) => this.setLinked(linked, reason),
+        toggleOwnership: () => this.cursor.toggleOwnership(),
+        get ownerMachineId() { return this.runtime.cursor.ownerMachineId; },
+      };
+      this.hotkeys = registerCursorHotkeys(this.globalShortcut, {
+        cursor: cursorProxy,
+        watchdog: this.watchdog,
+        onModeChange: (linked) => this.onModeChange(linked, 'hotkey'),
+      });
+    }
+    this.setPeerConnected(this.session.phase === 'connected');
+  }
+
+  send(message) {
+    const clean = sanitizePeerMessage(message);
+    if (!clean) return false;
+    const policy = policyForMessage(clean.type);
+    return this.session.sendPeer(clean, { lossTolerant: policy?.reliable === false });
+  }
+
+  receive(message, peerMachineId) {
+    const clean = sanitizePeerMessage(message);
+    if (!clean || peerMachineId !== this.peerId) return false;
+    const handled = routePeerInput({ cursor: this.cursor, keyboard: this.keyboard, watchdog: this.watchdog }, clean, peerMachineId);
+    if (clean.type === 'layout.update' && handled) this.#applyDesiredLink();
+    return handled;
+  }
+
+  setPeerConnected(connected) {
+    this.peerConnected = Boolean(connected);
+    this.watchdog.setPeerConnected(this.peerConnected);
+    if (!this.peerConnected) return;
+    if (this.isHost) this.broadcastLayout();
+    this.#applyDesiredLink();
+  }
+
+  updateLayouts(layouts) {
+    this.layouts = layouts || {};
+    if (this.isHost && this.peerConnected) this.broadcastLayout();
+  }
+
+  broadcastLayout() {
+    const placements = derivePairPlacements(this.layouts, this.hostId, this.peerId, this.settings);
+    if (placements.length !== 2) return false;
+    this.cursor.setPlacements(placements);
+    return this.send({ type: 'layout.update', placements });
+  }
+
+  updateSettings(settings) {
+    this.settings = settings;
+    this.desiredLinked = settings.linked !== false;
+    this.cursor.setConfig(settings);
+    if (this.isHost && this.peerConnected) this.broadcastLayout();
+    this.#applyDesiredLink();
+  }
+
+  setLinked(linked, reason = 'user') {
+    this.desiredLinked = Boolean(linked);
+    if (linked && (!this.peerConnected || !this.native.available || this.cursor.placements.length !== 2)) {
+      if (!this.native.available) this.onNotice({
+        id: 'native-unavailable', kind: 'warning', title: 'Native input support unavailable',
+        message: 'Install the platform build of Compusync to link cursors.', dismissible: false,
+      });
+      return false;
+    }
+    if (linked) this.watchdog.arm();
+    this.cursor.setLinked(Boolean(linked), reason);
+    this.onModeChange(this.cursor.linked, reason);
+    return this.cursor.linked === Boolean(linked);
+  }
+
+  setDragging(dragging) { this.cursor.setDragging(dragging); }
+
+  stop(reason = 'stop') {
+    if (!this.started) return;
+    this.started = false;
+    this.hotkeys?.dispose?.();
+    this.session.off?.('peer-message', this._peerMessage);
+    this.session.off?.('status', this._status);
+    this.session.off?.('state', this._state);
+    this.native.off?.('key', this._key);
+    this.native.off?.('displayChanged', this._displayChanged);
+    this.native.off?.('unlinkHotkey', this._nativeUnlink);
+    this.native.off?.('toggleOwnershipHotkey', this._nativeOwnership);
+    this.watchdog.stop({ reason });
+    this.cursor.stop(reason);
+  }
+
+  #applyDesiredLink() {
+    if (!this.desiredLinked || !this.peerConnected || this.cursor.placements.length !== 2 || !this.native.available) return;
+    this.setLinked(true, 'connected');
+  }
+}
+
+module.exports = { SharedInputRuntime, placementForLayout, derivePairPlacements };
