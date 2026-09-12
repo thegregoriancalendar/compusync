@@ -32,6 +32,19 @@ uses a `SendInput` left-up tagged with Compusync's injection marker at edge
 contact. macOS has no corresponding foreign-window modal move loop; its AX
 positioning path intentionally makes `terminateMoveLoop` a no-op.
 
+## Windows hard-kill recovery
+
+After building/copying the release addon, run:
+
+```powershell
+./windows-crash-recovery.ps1 -Addon ../compusync-native.win32-x64.node
+```
+
+The child hides and clips the cursor, and the parent terminates it without a
+graceful exit. The probe checks OS recovery with `GetClipCursor` and
+`GetCursorInfo`, then unconditionally releases the clip and increments the show
+counter as a final safety cleanup.
+
 ## macOS
 
 On a signed build with Accessibility and Input Monitoring granted:

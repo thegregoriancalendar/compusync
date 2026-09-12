@@ -101,6 +101,7 @@ pub struct WindowInfo {
 
 #[napi(object)]
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NativeEvent {
     pub kind: String,
     pub timestamp: f64,
@@ -165,6 +166,7 @@ struct Inner {
     recovery_requested: AtomicBool,
     last_heartbeat_ms: AtomicU64,
     guarded_windows: Mutex<HashMap<String, Rect>>,
+    guard_installed: AtomicBool,
 }
 
 impl Inner {
@@ -260,6 +262,7 @@ impl NativeSubstrate {
             recovery_requested: AtomicBool::new(false),
             last_heartbeat_ms: AtomicU64::new(monotonic_ms()),
             guarded_windows: Mutex::new(HashMap::new()),
+            guard_installed: AtomicBool::new(false),
         });
         install_recovery_hooks(&inner);
 
@@ -420,6 +423,37 @@ impl NativeSubstrate {
     pub fn recover(&self, reason: Option<String>) {
         self.inner
             .recover(reason.as_deref().unwrap_or("requested by main process"));
+    }
+
+    /// Starts a tiny independent process which releases OS-global cursor state
+    /// after an uncatchable hard termination (TerminateProcess/SIGKILL).
+    #[napi]
+    pub fn install_recovery_guard(&self, executable: String) -> Result<()> {
+        if self.inner.guard_installed.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        let path = std::path::Path::new(&executable);
+        if !path.is_file() {
+            self.inner.guard_installed.store(false, Ordering::Release);
+            return Err(napi_error("recovery guard executable does not exist"));
+        }
+        let mut command = std::process::Command::new(path);
+        command.arg(std::process::id().to_string());
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|error| {
+                self.inner.guard_installed.store(false, Ordering::Release);
+                napi_error(format!("failed to start recovery guard: {error}"))
+            })?;
+        Ok(())
     }
 
     #[napi]

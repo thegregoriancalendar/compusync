@@ -71,24 +71,26 @@ class NativeAdapter extends EventEmitter {
     this.platformName = this.substrate.platformName;
     this.handlers = {};
     this.callbackInstalled = false;
+    this.guardPath = path.join(path.dirname(bindingPath), `compusync-recovery-guard${process.platform === 'win32' ? '.exe' : ''}`);
   }
 
   _installCallback() {
     if (this.callbackInstalled) return;
     this.substrate.setEventCallback((json) => {
-      let event;
-      try { event = JSON.parse(json); } catch (error) { this.emit('panic', error); return; }
-      this.emit('nativeEvent', event);
-      if (event.kind === 'cursorDelta') this.handlers.onDelta?.(event.dx, event.dy, event.dt, event.timestamp);
-      else if (event.kind === 'cursorButton') this.handlers.onButton?.(event.button, event.down);
-      else if (event.kind === 'keyEvent') {
-        this.handlers.onModifiers?.(event.modifiers || 0);
-        this.emit('key', event);
-      } else if (event.kind === 'recovered') this.emit('recovered', event);
-      else if (event.kind === 'unlinkHotkey') this.emit('unlinkHotkey');
-      else if (event.kind === 'toggleOwnershipHotkey') this.emit('toggleOwnershipHotkey');
-      else if (event.kind === 'displayChanged') this.emit('displayChanged');
-      else if (event.kind === 'moveSizeStart' || event.kind === 'moveSizeEnd') this.emit(event.kind, event.windowId);
+      try {
+        const event = JSON.parse(json);
+        this.emit('nativeEvent', event);
+        if (event.kind === 'cursorDelta') this.handlers.onDelta?.(event.dx, event.dy, event.dt, event.timestamp);
+        else if (event.kind === 'cursorButton') this.handlers.onButton?.(event.button, event.down);
+        else if (event.kind === 'keyEvent') {
+          this.handlers.onModifiers?.(event.modifiers || 0);
+          this.emit('key', event);
+        } else if (event.kind === 'recovered') this.emit('recovered', event);
+        else if (event.kind === 'unlinkHotkey') this.emit('unlinkHotkey');
+        else if (event.kind === 'toggleOwnershipHotkey') this.emit('toggleOwnershipHotkey');
+        else if (event.kind === 'displayChanged') this.emit('displayChanged');
+        else if (event.kind === 'moveSizeStart' || event.kind === 'moveSizeEnd') this.emit(event.kind, event.windowId);
+      } catch (error) { this.emit('panic', error); }
     });
     this.callbackInstalled = true;
   }
@@ -107,7 +109,7 @@ class NativeAdapter extends EventEmitter {
   synthesizeKey(code, down, modifiers = 0) { return this.substrate.synthesizeKey(code >>> 0, Boolean(down), modifiers >>> 0); }
   isForegroundElevated() { return this.substrate.foregroundIsElevated(); }
   releaseInputState() { return this.substrate.releaseInputState(); }
-  installRecoveryGuard() { /* Installed by the Rust constructor. setLinked(true) arms its 2s heartbeat. */ }
+  installRecoveryGuard() { return this.substrate.installRecoveryGuard(this.guardPath); }
   removeRecoveryGuard() { return this.substrate.setLinked(false); }
   emergencyRecover(reason = 'requested by JavaScript watchdog') { return this.substrate.recover(reason); }
   removeAllHooks() { return this.substrate.stopCapture(); }
