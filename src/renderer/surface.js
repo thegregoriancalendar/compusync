@@ -12,6 +12,7 @@ const cursor = document.getElementById('cursor');
 const ripple = document.getElementById('ripple');
 const settingsButton = document.getElementById('open-settings');
 const closeButton = document.getElementById('close-window');
+const handoffBusy = document.getElementById('handoff-busy');
 
 let state;
 let geometry;
@@ -28,6 +29,8 @@ let dragDx = 0;
 let dragDy = 0;
 let dragFrame;
 let dragAckTimer;
+
+api.onHandoffBusy?.((busy) => { handoffBusy.hidden = !busy; });
 
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));

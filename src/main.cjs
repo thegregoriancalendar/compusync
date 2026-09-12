@@ -13,6 +13,8 @@ const { EDGES } = require('./core/state.cjs');
 const { DesktopService } = require('./desktop-service.cjs');
 const { cursorSettingsFromSaved, validateCursorSettings } = require('./core/cursor-preferences.cjs');
 const { SharedInputRuntime } = require('./main/runtime.cjs');
+const { WindowHandoffRuntime } = require('./main/window-runtime.cjs');
+const { ChromeAdapterRuntime } = require('./main/adapters/chrome/runtime.cjs');
 const { createNativeAdapter } = require('../native/index.cjs');
 
 if (process.env.COMPUSYNC_PROFILE) {
@@ -24,7 +26,7 @@ app.setName('CompuSync');
 const hasLock = app.requestSingleInstanceLock();
 if (!hasLock) app.quit();
 
-let surface, settings, tray, sync, desktopService, inputRuntime, nativeInput, config;
+let surface, settings, tray, sync, desktopService, inputRuntime, windowRuntime, nativeInput, config;
 let quitting = false;
 let changingSession = false;
 let applyingBounds = false;
@@ -365,7 +367,45 @@ function ensureInputRuntime() {
       },
     });
     inputRuntime.start();
+    const chrome = new ChromeAdapterRuntime({
+      native: nativeInput,
+      machineId: config.id,
+      getPlacement: () => inputRuntime?.cursor.placementFor(config.id),
+      store: {
+        get: (key) => config[key],
+        set: async (key, value) => { config[key] = value; saveConfig(); },
+      },
+      requestAutomation: async () => {
+        const result = await dialog.showMessageBox(settings || surface, {
+          type: 'info', buttons: ['Continue', 'Cancel'], defaultId: 0, cancelId: 1,
+          title: 'Allow Chrome Automation',
+          message: 'Compusync needs macOS Automation access for this Chrome handoff.',
+          detail: 'macOS will ask you to allow Compusync to read and recreate this window’s tabs.',
+        });
+        return result.response === 0;
+      },
+      requestRelaunch: async (offer) => {
+        if (!offer) return false;
+        const result = await dialog.showMessageBox(settings || surface, {
+          type: 'question', buttons: [offer.confirmLabel || 'Restart Chrome', offer.cancelLabel || 'Not now'],
+          defaultId: 0, cancelId: 1, title: offer.title,
+          message: offer.message, detail: offer.detail || '',
+        });
+        return result.response === 0;
+      },
+      onNotice: addNotice,
+    });
+    windowRuntime = new WindowHandoffRuntime({
+      input: inputRuntime,
+      native: nativeInput,
+      chrome,
+      onNotice: addNotice,
+      setBusy: (busy) => send(surface, 'sync:handoff-busy', Boolean(busy)),
+    });
+    windowRuntime.start();
   } catch (error) {
+    void windowRuntime?.stop('runtime-startup-failed');
+    windowRuntime = null;
     nativeInput?.emergencyRecover?.('runtime startup failed');
     inputRuntime = null;
     config.cursorSettings.linked = false;
@@ -378,6 +418,9 @@ function ensureInputRuntime() {
 }
 
 function stopInputRuntime(reason = 'session-stop') {
+  const windows = windowRuntime;
+  windowRuntime = null;
+  void windows?.stop(reason);
   const runtime = inputRuntime;
   inputRuntime = null;
   runtime?.stop(reason);
