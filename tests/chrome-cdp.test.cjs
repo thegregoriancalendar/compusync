@@ -14,9 +14,13 @@ const {
 } = require('../src/main/adapters/chrome/detect.cjs');
 const { ChromeCdp } = require('../src/main/adapters/chrome/cdp.cjs');
 const {
+  SESSION_RESTORE_LIMITATION,
   WindowsChromeRelaunch,
+  chromeIsRunning,
   createSecureProfile,
   relaunchArguments,
+  requestChromeClose,
+  waitForChromeExit,
 } = require('../src/main/adapters/chrome/windows.cjs');
 
 function response(json, ok = true) {
@@ -156,6 +160,8 @@ test('Windows helper offers only on a crossing, remembers declines, and gates la
   await fs.promises.writeFile(chrome, 'test');
   const store = new Map();
   const launches = [];
+  const restartEvents = [];
+  let runningChecks = 0;
   const helper = new WindowsChromeRelaunch({
     platform: 'win32', store, chromeExecutable: chrome, localAppData: root,
     username: 'Tester', userDomain: 'MACHINE',
@@ -164,22 +170,61 @@ test('Windows helper offers only on a crossing, remembers declines, and gates la
       callback(null, '', '');
     },
     spawn: (executable, args, options) => {
+      restartEvents.push('launch');
       launches.push({ executable, args, options });
       return { unref() {} };
     },
+    closeChrome: async () => { restartEvents.push('close'); },
+    isChromeRunning: async () => {
+      restartEvents.push('check');
+      runningChecks += 1;
+      return runningChecks === 1;
+    },
+    delay: async () => { restartEvents.push('wait'); },
   });
   assert.equal(launches.length, 0);
+  assert.deepEqual(restartEvents, []);
   assert.equal(helper.offer({ crossingAttempt: false, chromeRunning: true, cdpAvailable: false }), null);
-  assert.match(helper.offer({ crossingAttempt: true, chromeRunning: true, cdpAvailable: false }).message, /one-time restart/);
+  const offer = helper.offer({ crossingAttempt: true, chromeRunning: true, cdpAvailable: false });
+  assert.match(offer.message, /one-time restart/);
+  assert.equal(offer.detail, SESSION_RESTORE_LIMITATION);
+  assert.deepEqual(restartEvents, []);
   await helper.rememberDecision(false);
   assert.equal(helper.offer({ crossingAttempt: true, chromeRunning: true, cdpAvailable: false }), null);
+  assert.deepEqual(restartEvents, []);
   await assert.rejects(() => helper.launchAccepted({ crossingAttempt: true, accepted: false }), { code: 'CHROME_RELAUNCH_NOT_ACCEPTED' });
   assert.equal(launches.length, 0);
+  assert.deepEqual(restartEvents, []);
   await helper.launchAccepted({ crossingAttempt: true, accepted: true });
   assert.equal(launches.length, 1);
+  assert.deepEqual(restartEvents, ['close', 'check', 'wait', 'check', 'launch']);
   assert.ok(launches[0].args.includes('--remote-debugging-address=127.0.0.1'));
   assert.ok(launches[0].args.some((arg) => arg.startsWith('--user-data-dir=')));
   assert.equal(launches[0].options.shell, false);
+});
+
+test('default restart helpers request non-forced taskkill and verify a bounded Chrome exit', async () => {
+  const calls = [];
+  const execFile = (file, args, _options, callback) => {
+    calls.push({ file, args });
+    const stdout = file === 'tasklist.exe' ? '"chrome.exe","123","Console","1","10,000 K"' : '';
+    callback(null, stdout, '');
+  };
+  await requestChromeClose({ execFile });
+  assert.deepEqual(calls[0], { file: 'taskkill.exe', args: ['/IM', 'chrome.exe', '/T'] });
+  assert.equal(calls[0].args.includes('/F'), false);
+  assert.equal(await chromeIsRunning({ execFile }), true);
+
+  let checks = 0;
+  const waits = [];
+  await waitForChromeExit(async () => ++checks < 3, {
+    timeoutMs: 100, pollMs: 50, delay: async (ms) => waits.push(ms),
+  });
+  assert.equal(checks, 3);
+  assert.deepEqual(waits, [50, 50]);
+  await assert.rejects(() => waitForChromeExit(async () => true, {
+    timeoutMs: 100, pollMs: 50, delay: async () => {},
+  }), { code: 'CHROME_EXIT_TIMEOUT' });
 });
 
 test('profile helpers constrain debug ports and enforce private directory setup', async (t) => {

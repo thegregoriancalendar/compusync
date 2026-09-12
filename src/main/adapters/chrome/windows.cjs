@@ -9,6 +9,9 @@ const { DEBUG_PORT_MIN, DEBUG_PORT_MAX } = require('./detect.cjs');
 const DECISION_KEY = 'chromeWindowsRelaunchDecision';
 const SIGNED_OUT_NOTICE_KEY = 'chromeIsolatedProfileNoticeShown';
 const OFFER_MESSAGE = 'Chrome needs a one-time restart to enable window handoff. Your tabs will be restored.';
+const SESSION_RESTORE_LIMITATION = '--restore-last-session restores sessions from the isolated handoff profile, but Chrome cannot import the normal profile session on that profile\'s first run.';
+const DEFAULT_CLOSE_TIMEOUT_MS = 5_000;
+const DEFAULT_CLOSE_POLL_MS = 100;
 
 function standardChromePaths(env = process.env) {
   return [
@@ -74,6 +77,57 @@ function execFilePromise(execFile, executable, args, options) {
   });
 }
 
+async function requestChromeClose(options = {}) {
+  const execFile = options.execFile || execFileCallback;
+  try {
+    await execFilePromise(execFile, 'taskkill.exe', ['/IM', 'chrome.exe', '/T'], {
+      windowsHide: true, timeout: Math.min(Number(options.timeoutMs) || DEFAULT_CLOSE_TIMEOUT_MS, 10_000),
+    });
+    return true;
+  } catch (error) {
+    const wrapped = new Error('Chrome did not accept the graceful restart request.');
+    wrapped.code = 'CHROME_CLOSE_FAILED';
+    wrapped.cause = error;
+    throw wrapped;
+  }
+}
+
+async function chromeIsRunning(options = {}) {
+  const execFile = options.execFile || execFileCallback;
+  let result;
+  try {
+    result = await execFilePromise(execFile, 'tasklist.exe', ['/FI', 'IMAGENAME eq chrome.exe', '/FO', 'CSV', '/NH'], {
+      windowsHide: true, timeout: 2_000, maxBuffer: 64 * 1024,
+    });
+  } catch (error) {
+    const wrapped = new Error('Could not verify that Chrome exited.');
+    wrapped.code = 'CHROME_EXIT_CHECK_FAILED';
+    wrapped.cause = error;
+    throw wrapped;
+  }
+  const output = typeof result === 'string' ? result : String(result?.stdout || '');
+  return /^\s*"chrome\.exe"\s*,/im.test(output);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForChromeExit(checkRunning, options = {}) {
+  if (typeof checkRunning !== 'function') throw new TypeError('A Chrome process check is required.');
+  const timeoutMs = Math.min(Math.max(Number(options.timeoutMs) || DEFAULT_CLOSE_TIMEOUT_MS, 100), 10_000);
+  const pollMs = Math.min(Math.max(Number(options.pollMs) || DEFAULT_CLOSE_POLL_MS, 10), timeoutMs);
+  const wait = options.delay || delay;
+  const checks = Math.ceil(timeoutMs / pollMs) + 1;
+  for (let index = 0; index < checks; index += 1) {
+    if (!await checkRunning()) return true;
+    if (index < checks - 1) await wait(pollMs);
+  }
+  const error = new Error('Chrome did not exit before the restart timeout.');
+  error.code = 'CHROME_EXIT_TIMEOUT';
+  throw error;
+}
+
 async function createSecureProfile(directory, options = {}) {
   const fsLike = options.fs || fs;
   const platform = options.platform || process.platform;
@@ -126,6 +180,11 @@ class WindowsChromeRelaunch {
     this.chromeExecutable = options.chromeExecutable;
     this.username = options.username;
     this.userDomain = options.userDomain;
+    this.closeChrome = options.closeChrome || (() => requestChromeClose({ execFile: this.execFile, timeoutMs: this.closeTimeoutMs }));
+    this.checkChromeRunning = options.isChromeRunning || (() => chromeIsRunning({ execFile: this.execFile }));
+    this.closeTimeoutMs = Math.min(Math.max(Number(options.closeTimeoutMs) || DEFAULT_CLOSE_TIMEOUT_MS, 100), 10_000);
+    this.closePollMs = Math.min(Math.max(Number(options.closePollMs) || DEFAULT_CLOSE_POLL_MS, 10), this.closeTimeoutMs);
+    this.delay = options.delay || delay;
   }
 
   decision() {
@@ -147,6 +206,7 @@ class WindowsChromeRelaunch {
       id: 'chrome-windows-relaunch',
       title: 'Restart Chrome for window handoff',
       message: OFFER_MESSAGE,
+      detail: SESSION_RESTORE_LIMITATION,
       confirmLabel: 'Restart Chrome',
       cancelLabel: 'Not now',
     };
@@ -162,7 +222,7 @@ class WindowsChromeRelaunch {
     return {
       id: 'chrome-isolated-profile-signed-out',
       title: 'Chrome profile for handoff',
-      message: 'The isolated Chrome profile starts signed out. Sign in there if you want synced bookmarks and credentials.',
+      message: `The isolated Chrome profile starts signed out. Sign in there if you want synced bookmarks and credentials. ${SESSION_RESTORE_LIMITATION}`,
     };
   }
 
@@ -202,23 +262,38 @@ class WindowsChromeRelaunch {
 
   async launchAccepted(options = {}) {
     const plan = await this.prepareAcceptedRelaunch(options);
+    try {
+      await this.closeChrome();
+    } catch (error) {
+      // A process may exit between the request and taskkill. Only ignore the
+      // taskkill error when the bounded process check confirms Chrome is gone.
+      if (await this.checkChromeRunning()) throw error;
+    }
+    await waitForChromeExit(this.checkChromeRunning, {
+      timeoutMs: this.closeTimeoutMs, pollMs: this.closePollMs, delay: this.delay,
+    });
     const child = this.spawn(plan.executable, plan.args, {
       detached: true, stdio: 'ignore', windowsHide: true, shell: false,
     });
     child?.unref?.();
-    return { port: plan.port, userDataDir: plan.userDataDir };
+    return { port: plan.port, userDataDir: plan.userDataDir, restarted: true };
   }
 }
 
 module.exports = {
   DECISION_KEY,
+  DEFAULT_CLOSE_TIMEOUT_MS,
   OFFER_MESSAGE,
+  SESSION_RESTORE_LIMITATION,
   SIGNED_OUT_NOTICE_KEY,
   WindowsChromeRelaunch,
   createWindowsChromeRelaunch: (options) => new WindowsChromeRelaunch(options),
   createSecureProfile,
+  chromeIsRunning,
   findChromeExecutable,
   profileDirectory,
+  requestChromeClose,
   relaunchArguments,
   standardChromePaths,
+  waitForChromeExit,
 };
