@@ -226,6 +226,26 @@ test('top movement clamps, non-owner follows authority, and ownership hotkey pre
   assert.equal(follower.ownerMachineId, 'a');
 });
 
+test('ownership hotkey on the non-owner updates both peers without split brain', () => {
+  const spaces = [placement('a', 0, 0, 100, 100), placement('b', 100, 0, 100, 100)];
+  let claim;
+  const oldOwnerNative = mockNative();
+  const oldOwner = new CursorController({
+    machineId: 'a', placements: spaces, initialPosition: { x: 25, y: 40 },
+    ownerMachineId: 'a', native: oldOwnerNative,
+  });
+  const claimant = new CursorController({
+    machineId: 'b', placements: spaces, initialPosition: { x: 25, y: 40 },
+    ownerMachineId: 'a', send: (message) => { claim = message; },
+  });
+  assert.equal(claimant.toggleOwnership(), true);
+  assert.equal(claimant.ownerMachineId, 'b');
+  assert.equal(oldOwner.receive(claim, 'b'), true);
+  assert.equal(oldOwner.ownerMachineId, 'b');
+  assert.equal(oldOwner.isOwner(), false);
+  assert.deepEqual(oldOwnerNative.calls.slice(-2), [['hide'], ['park']]);
+});
+
 test('native capture deltas are not accelerated twice', () => {
   let capture, message;
   const native = mockNative();
@@ -352,4 +372,9 @@ test('input runtime routes only M0 messages and can be detached', () => {
   unbind();
   emitter.emit('peer-message', { type: 'cursor.button' }, 'b');
   assert.deepEqual(received.at(-1), ['cursor', 'cursor.button', 'b']);
+  assert.doesNotThrow(() => routePeerInput(components, { type: null }, 'peer'));
+  assert.equal(routePeerInput(components, { type: null }, 'peer'), false);
+  components.cursor.setPlacements = () => { throw new TypeError('bad layout'); };
+  assert.doesNotThrow(() => routePeerInput(components, { type: 'layout.update', placements: null }, 'peer'));
+  assert.equal(routePeerInput(components, { type: 'layout.update', placements: null }, 'peer'), false);
 });
