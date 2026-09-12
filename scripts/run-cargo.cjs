@@ -13,5 +13,9 @@ const result = spawnSync(cargo, process.argv.slice(2), {
   stdio: 'inherit',
 });
 
+if (result.error?.code === 'ENOENT') {
+  console.error('Rust Cargo was not found. Install the Rust toolchain from https://rustup.rs and try again.');
+  process.exit(1);
+}
 if (result.error) throw result.error;
 process.exit(result.status ?? 1);

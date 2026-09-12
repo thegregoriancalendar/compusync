@@ -5,16 +5,18 @@ CompuSync runs locally on both computers. The Mac application presents its crop 
 ## Run from source
 
 1. Copy or clone the complete repository onto the Mac.
-2. Install Node.js 22.12 or newer if it is not already installed.
+2. Install Node.js 22.12 or newer, Xcode Command Line Tools (`xcode-select --install`), and the stable Rust toolchain from [rustup.rs](https://rustup.rs) if they are not already installed.
 3. Open Terminal in the repository directory containing `package.json`.
 4. Install the Mac-specific dependencies and start CompuSync:
 
    ```sh
    npm ci
+   npm run native:build
+   npm run native:smoke
    npm start
    ```
 
-Install dependencies on the Mac. Do not copy the Windows `node_modules` directory. Electron supports Apple Silicon and Intel, and `npm ci` selects the runtime for the current Mac architecture.
+Install dependencies and build the native addon on the Mac. Do not copy the Windows `node_modules` directory or native build output. Electron and the Rust build select the current Mac architecture.
 
 ## Connect to Windows
 

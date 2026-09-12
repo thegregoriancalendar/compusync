@@ -21,6 +21,20 @@ test('Chrome runtime never relaunches at startup and ignores non-Chrome windows'
   runtime.stop();
 });
 
+test('macOS runtime never constructs the Windows Chrome relaunch helper', () => {
+  const adapter = { cdp: null };
+  const runtime = new ChromeAdapterRuntime({
+    platform: 'darwin',
+    machineId: 'mac',
+    detector: new Detector({ detected: false, endpoint: null }),
+    createAdapter: () => adapter,
+    env: {},
+  });
+  assert.equal(runtime.relaunch, null);
+  assert.equal(runtime.adapterForId('chrome'), adapter);
+  runtime.stop();
+});
+
 test('first Windows capture requests consent then connects only to detected loopback CDP', async () => {
   const detector = new Detector({ detected: true, endpoint: null });
   const events = [];

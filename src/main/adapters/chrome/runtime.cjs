@@ -27,9 +27,10 @@ class ChromeAdapterRuntime extends EventEmitter {
     this.startupTimeoutMs = options.startupTimeoutMs || STARTUP_TIMEOUT_MS;
     this.createAdapter = options.createAdapter || createChromeHandoffAdapter;
     this.detector = options.detector || new ChromeDetector({ native: this.native, fetch: options.fetch, timeoutMs: options.detectionTimeoutMs });
-    this.relaunch = options.relaunch || new WindowsChromeRelaunch({
-      store: options.store, localAppData: options.localAppData, normalUserDataDir: options.normalUserDataDir,
-    });
+    this.relaunch = options.relaunch || (this.platform === 'win32' ? new WindowsChromeRelaunch({
+      platform: this.platform, store: options.store, env: options.env,
+      localAppData: options.localAppData, normalUserDataDir: options.normalUserDataDir,
+    }) : null);
     this.adapter = this.platform === 'darwin' ? this.createAdapter({
       ...options, platform: 'darwin', native: this.native, machineId: this.machineId, getPlacement: this.getPlacement,
     }) : null;

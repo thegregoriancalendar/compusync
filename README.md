@@ -6,10 +6,12 @@ The existing shared surface remains available with its interactive grid, persist
 
 ## Run on both laptops
 
-CompuSync must run on both computers on the same local network. Install Node.js 22.12 or newer, copy or clone this repository onto each computer, and install dependencies separately on each operating system:
+CompuSync must run on both computers on the same local network. To run from source, install Node.js 22.12 or newer, the stable Rust toolchain, and the platform compiler tools (Xcode Command Line Tools on macOS or Visual Studio Build Tools with the C++ workload on Windows). Copy or clone this repository onto each computer, then install and build separately on each operating system:
 
 ```sh
 npm ci
+npm run native:build
+npm run native:smoke
 npm start
 ```
 

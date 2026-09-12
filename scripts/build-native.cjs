@@ -23,6 +23,15 @@ if (!libraryName) {
 const cargoExecutable = process.platform === 'win32' ? 'cargo.exe' : 'cargo';
 const rustupCargo = path.join(os.homedir(), '.cargo', 'bin', cargoExecutable);
 const cargo = process.env.COMPUSYNC_CARGO || (fs.existsSync(rustupCargo) ? rustupCargo : cargoExecutable);
+
+function handleSpawnError(error) {
+  if (error?.code === 'ENOENT') {
+    console.error('Rust Cargo was not found. Install the Rust toolchain from https://rustup.rs and run npm run native:build again.');
+    process.exit(1);
+  }
+  throw error;
+}
+
 const result = spawnSync(cargo, [
   'build',
   '--locked',
@@ -36,7 +45,7 @@ const result = spawnSync(cargo, [
   stdio: 'inherit',
 });
 
-if (result.error) throw result.error;
+if (result.error) handleSpawnError(result.error);
 if (result.status !== 0) process.exit(result.status ?? 1);
 
 const source = path.join(targetRoot, 'release', libraryName);
@@ -60,7 +69,7 @@ const guardBuild = spawnSync(cargo, [
   stdio: 'inherit',
 });
 
-if (guardBuild.error) throw guardBuild.error;
+if (guardBuild.error) handleSpawnError(guardBuild.error);
 if (guardBuild.status !== 0) process.exit(guardBuild.status ?? 1);
 
 const guardName = `compusync-recovery-guard${process.platform === 'win32' ? '.exe' : ''}`;
