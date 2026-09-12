@@ -56,6 +56,7 @@ class SharedInputRuntime extends EventEmitter {
     this.started = false;
     this.peerConnected = false;
     this.desiredLinked = this.settings.linked !== false;
+    this.windowController = null;
 
     const placements = derivePairPlacements(this.layouts, this.hostId, this.peerId, this.settings);
     const ownerPlacement = placements.find((placement) => placement.machineId === this.hostId) || placements[0];
@@ -145,6 +146,7 @@ class SharedInputRuntime extends EventEmitter {
   receive(message, peerMachineId) {
     const clean = sanitizePeerMessage(message);
     if (!clean || peerMachineId !== this.peerId) return false;
+    if (clean.type.startsWith('window.')) return this.windowController?.receive(clean) || false;
     const handled = routePeerInput({ cursor: this.cursor, keyboard: this.keyboard, watchdog: this.watchdog }, clean, peerMachineId);
     if (clean.type === 'layout.update' && handled) this.#applyDesiredLink();
     return handled;
@@ -190,10 +192,16 @@ class SharedInputRuntime extends EventEmitter {
     if (linked) this.watchdog.arm();
     this.cursor.setLinked(Boolean(linked), reason);
     this.onModeChange(this.cursor.linked, reason);
+    this.emit('mode', { linked: this.cursor.linked, reason });
     return this.cursor.linked === Boolean(linked);
   }
 
   setDragging(dragging) { this.cursor.setDragging(dragging); }
+
+  setWindowController(controller) {
+    this.windowController = controller || null;
+    this.watchdog.drag = this.windowController;
+  }
 
   stop(reason = 'stop') {
     if (!this.started) return;
