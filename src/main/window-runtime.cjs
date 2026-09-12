@@ -25,6 +25,18 @@ function geometryToVU(window, placement) {
   };
 }
 
+function cursorAtSharedEdge(cursor, source, target) {
+  if (!cursor || !source || !target) return false;
+  if (target.origin.x >= source.origin.x + source.size.w) {
+    return cursor.x >= source.origin.x + source.size.w;
+  }
+  if (target.origin.x + target.size.w <= source.origin.x) return cursor.x <= source.origin.x;
+  if (target.origin.y >= source.origin.y + source.size.h) {
+    return cursor.y >= source.origin.y + source.size.h;
+  }
+  return cursor.y <= source.origin.y;
+}
+
 class WindowHandoffRuntime extends EventEmitter {
   constructor(options = {}) {
     super();
@@ -39,6 +51,10 @@ class WindowHandoffRuntime extends EventEmitter {
     this.polling = false;
     this.pollTimer = null;
     this.sourceWindowId = null;
+    this.sourceStartBounds = null;
+    this.nativeLoopTerminated = false;
+    this.guardedWindowId = null;
+    this.isWindows = (this.native.platformName || (process.platform === 'win32' ? 'windows' : process.platform)) === 'windows';
     this.drag = new DragController({
       machineId: this.input.machineId,
       send: (message) => this.input.send(message),
@@ -50,15 +66,27 @@ class WindowHandoffRuntime extends EventEmitter {
     });
     this._moveStart = (id) => { void this.handleMoveStart(id); };
     this._moveEnd = (id) => { void this.handleMoveEnd(id); };
-    this._mode = ({ linked }) => this.chrome.setLinked(linked);
+    this._nativeEvent = (event) => {
+      if (this.isWindows && this.nativeLoopTerminated && event?.kind === 'cursorButton'
+        && event.button === 'left' && event.down === false) void this.handleMoveEnd(this.sourceWindowId, { physical: true });
+    };
+    this._mode = ({ linked, reason }) => {
+      this.chrome.setLinked(linked);
+      if (!linked && this.drag.active) void this.#restoreSafely(reason || 'unlinked');
+    };
+    this._displayChanged = () => {
+      if (this.drag.active) void this.#restoreSafely('display-changed');
+    };
     this._serviceError = (error) => this.#noticeError(error);
     this.drag.on('hint', () => this.onNotice({
       id: 'non-crossing-window', kind: 'info', title: 'This window stays here',
       message: 'Only Chrome windows with available handoff access can cross between laptops.', dismissible: true,
     }));
     this.drag.on('abort', ({ reason }) => {
+      this.#settleSource();
       if (!['peer-abort', 'late-ready'].includes(reason)) this.#noticeError(Object.assign(new Error('The source Chrome window was kept in place.'), { code: reason }));
     });
+    this.drag.on('committed', () => this.#settleSource());
   }
 
   start() {
@@ -67,6 +95,8 @@ class WindowHandoffRuntime extends EventEmitter {
     this.input.setWindowController(this.drag);
     this.native.on?.('moveSizeStart', this._moveStart);
     this.native.on?.('moveSizeEnd', this._moveEnd);
+    this.native.on?.('nativeEvent', this._nativeEvent);
+    this.native.on?.('displayChanged', this._displayChanged);
     this.input.on?.('mode', this._mode);
     this.chrome.on?.('error', this._serviceError);
     this.chrome.setLinked(this.input.cursor.linked);
@@ -93,6 +123,8 @@ class WindowHandoffRuntime extends EventEmitter {
     const began = this.drag.begin({ window, geometryVU, cursorVU: this.input.cursor.virtualCursor });
     if (!began) return false;
     this.sourceWindowId = String(id);
+    this.sourceStartBounds = boundsOf(window);
+    this.nativeLoopTerminated = false;
     this.pollTimer = setInterval(() => { void this.poll(); }, this.frameMs);
     this.pollTimer.unref?.();
     return true;
@@ -104,23 +136,35 @@ class WindowHandoffRuntime extends EventEmitter {
     try {
       const windows = await this.windows();
       const window = windows.find((candidate) => String(candidate.id) === this.sourceWindowId);
-      if (!window) { await this.drag.abort('chrome-quit'); return false; }
+      if (!window) {
+        try { await this.drag.abort('chrome-quit'); } catch { /* The vanished source cannot be restored locally. */ }
+        return false;
+      }
       const geometryVU = geometryToVU(window, this.localPlacement());
       if (!geometryVU) return false;
-      await this.drag.frame({ geometryVU, cursorVU: this.input.cursor.virtualCursor });
+      const cursorVU = this.input.cursor.virtualCursor;
+      if (!this.nativeLoopTerminated && this.drag.active?.adapter
+        && cursorAtSharedEdge(cursorVU, this.drag.active.source, this.drag.active.target)) {
+        if (!await this.#enterProgrammaticMove()) return false;
+      }
+      await this.drag.frame({ geometryVU, cursorVU });
       return true;
     } finally { this.polling = false; }
   }
 
-  async handleMoveEnd(id) {
+  async handleMoveEnd(id, options = {}) {
     if (!this.drag.active || this.drag.active.role !== 'source'
       || (id != null && String(id) !== this.sourceWindowId)) return false;
+    // terminateMoveLoop causes MOVESIZEEND on Windows, but the user's true
+    // physical left button is still held and raw deltas must keep driving.
+    if (this.isWindows && this.nativeLoopTerminated && !options.physical) return false;
     clearInterval(this.pollTimer);
     this.pollTimer = null;
     await this.poll();
     const geometryVU = this.drag.active?.geometry;
-    this.sourceWindowId = null;
-    return this.drag.end({ geometryVU });
+    const ended = await this.drag.end({ geometryVU });
+    if (!this.drag.active) this.#settleSource();
+    return ended;
   }
 
   async stop(reason = 'window-runtime-stop') {
@@ -130,11 +174,50 @@ class WindowHandoffRuntime extends EventEmitter {
     this.pollTimer = null;
     this.native.off?.('moveSizeStart', this._moveStart);
     this.native.off?.('moveSizeEnd', this._moveEnd);
+    this.native.off?.('nativeEvent', this._nativeEvent);
+    this.native.off?.('displayChanged', this._displayChanged);
     this.input.off?.('mode', this._mode);
     this.chrome.off?.('error', this._serviceError);
     this.input.setWindowController(null);
     await this.drag.abort(reason);
+    this.#settleSource();
     this.chrome.stop();
+  }
+
+  async #enterProgrammaticMove() {
+    const id = this.sourceWindowId;
+    if (!id || this.nativeLoopTerminated) return true;
+    try {
+      await this.native.guardWindow?.(id, this.sourceStartBounds);
+      this.guardedWindowId = id;
+      await this.native.terminateMoveLoop?.(id);
+      this.nativeLoopTerminated = true;
+      return true;
+    } catch (error) {
+      try { await this.drag.abort(error?.code || 'native-move-loop-failed'); } catch { /* abort still clears its state */ }
+      return false;
+    }
+  }
+
+  #settleSource() {
+    clearInterval(this.pollTimer);
+    this.pollTimer = null;
+    const guarded = this.guardedWindowId;
+    this.guardedWindowId = null;
+    if (guarded != null) {
+      try {
+        const released = this.native.releaseWindowGuard?.(guarded);
+        released?.catch?.((error) => this.input.watchdog.trigger('window-guard-release-failed', error));
+      } catch (error) { this.input.watchdog.trigger('window-guard-release-failed', error); }
+    }
+    this.sourceWindowId = null;
+    this.sourceStartBounds = null;
+    this.nativeLoopTerminated = false;
+  }
+
+  async #restoreSafely(reason) {
+    try { await this.drag.restoreOnScreen(reason); }
+    catch { /* DragController still clears and emits abort if native restoration fails. */ }
   }
 
   #noticeError(error) {
@@ -150,4 +233,4 @@ class WindowHandoffRuntime extends EventEmitter {
   }
 }
 
-module.exports = { WINDOW_FRAME_MS, boundsOf, geometryToVU, WindowHandoffRuntime };
+module.exports = { WINDOW_FRAME_MS, boundsOf, geometryToVU, cursorAtSharedEdge, WindowHandoffRuntime };
