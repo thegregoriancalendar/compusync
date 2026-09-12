@@ -14,10 +14,11 @@ const {
 } = require('../src/main/adapters/chrome/detect.cjs');
 const { ChromeCdp } = require('../src/main/adapters/chrome/cdp.cjs');
 const {
-  SESSION_RESTORE_LIMITATION,
+  SESSION_MIGRATION_DETAIL,
   WindowsChromeRelaunch,
   chromeIsRunning,
   createSecureProfile,
+  migrateChromeSession,
   relaunchArguments,
   requestChromeClose,
   waitForChromeExit,
@@ -181,13 +182,19 @@ test('Windows helper offers only on a crossing, remembers declines, and gates la
       return runningChecks === 1;
     },
     delay: async () => { restartEvents.push('wait'); },
+    migrateSession: async (source, target) => {
+      restartEvents.push('migrate');
+      assert.equal(source, path.join(root, 'Google', 'Chrome', 'User Data'));
+      assert.equal(target, path.join(root, 'Compusync', 'browser-profile'));
+      return { migrated: true, files: 2, bytes: 20, copied: ['Sessions'] };
+    },
   });
   assert.equal(launches.length, 0);
   assert.deepEqual(restartEvents, []);
   assert.equal(helper.offer({ crossingAttempt: false, chromeRunning: true, cdpAvailable: false }), null);
   const offer = helper.offer({ crossingAttempt: true, chromeRunning: true, cdpAvailable: false });
   assert.match(offer.message, /one-time restart/);
-  assert.equal(offer.detail, SESSION_RESTORE_LIMITATION);
+  assert.equal(offer.detail, SESSION_MIGRATION_DETAIL);
   assert.deepEqual(restartEvents, []);
   await helper.rememberDecision(false);
   assert.equal(helper.offer({ crossingAttempt: true, chromeRunning: true, cdpAvailable: false }), null);
@@ -197,10 +204,59 @@ test('Windows helper offers only on a crossing, remembers declines, and gates la
   assert.deepEqual(restartEvents, []);
   await helper.launchAccepted({ crossingAttempt: true, accepted: true });
   assert.equal(launches.length, 1);
-  assert.deepEqual(restartEvents, ['close', 'check', 'wait', 'check', 'launch']);
+  assert.deepEqual(restartEvents, ['close', 'check', 'wait', 'check', 'migrate', 'launch']);
   assert.ok(launches[0].args.includes('--remote-debugging-address=127.0.0.1'));
   assert.ok(launches[0].args.some((arg) => arg.startsWith('--user-data-dir=')));
   assert.equal(launches[0].options.shell, false);
+
+  const failedLaunches = [];
+  const missingSession = new WindowsChromeRelaunch({
+    platform: 'win32', chromeExecutable: chrome, localAppData: root,
+    username: 'Tester', userDomain: 'MACHINE',
+    execFile: (_file, _args, _options, callback) => callback(null, '', ''),
+    closeChrome: async () => {}, isChromeRunning: async () => false,
+    migrateSession: async () => ({ migrated: false, files: 0, bytes: 0 }),
+    spawn: (...args) => { failedLaunches.push(args); return { unref() {} }; },
+  });
+  await assert.rejects(() => missingSession.launchAccepted({ crossingAttempt: true, accepted: true }), {
+    code: 'CHROME_SESSION_NOT_FOUND',
+  });
+  assert.equal(failedLaunches.length, 0);
+});
+
+test('session migration copies only current tab state into the isolated Default profile', async (t) => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'compusync-session-migrate-'));
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }));
+  const normal = path.join(root, 'normal-user-data');
+  const isolated = path.join(root, 'isolated-user-data');
+  const normalDefault = path.join(normal, 'Default');
+  await fs.promises.mkdir(path.join(normalDefault, 'Sessions'), { recursive: true });
+  await fs.promises.writeFile(path.join(normalDefault, 'Sessions', 'Session_123'), 'window and tab state');
+  await fs.promises.writeFile(path.join(normalDefault, 'Sessions', 'Tabs_123'), 'tab state');
+  await fs.promises.writeFile(path.join(normalDefault, 'Last Session'), 'legacy session');
+  await fs.promises.writeFile(path.join(normalDefault, 'Cookies'), 'must not migrate');
+  await fs.promises.mkdir(path.join(normalDefault, 'Login Data'), { recursive: true });
+  await fs.promises.writeFile(path.join(normalDefault, 'Login Data', 'password'), 'must not migrate');
+  await fs.promises.mkdir(path.join(isolated, 'Default'), { recursive: true });
+  await fs.promises.writeFile(path.join(isolated, 'Default', 'Cookies'), 'isolated cookies stay');
+  await fs.promises.writeFile(path.join(isolated, 'Default', 'Last Tabs'), 'stale session is removed');
+
+  const result = await migrateChromeSession({ sourceUserDataDir: normal, targetUserDataDir: isolated });
+  assert.equal(result.migrated, true);
+  assert.deepEqual(result.copied, ['Sessions', 'Last Session']);
+  assert.equal(await fs.promises.readFile(path.join(isolated, 'Default', 'Sessions', 'Tabs_123'), 'utf8'), 'tab state');
+  assert.equal(await fs.promises.readFile(path.join(isolated, 'Default', 'Last Session'), 'utf8'), 'legacy session');
+  assert.equal(await fs.promises.readFile(path.join(isolated, 'Default', 'Cookies'), 'utf8'), 'isolated cookies stay');
+  await assert.rejects(() => fs.promises.access(path.join(isolated, 'Default', 'Login Data')));
+  await assert.rejects(() => fs.promises.access(path.join(isolated, 'Default', 'Last Tabs')));
+
+  const absent = path.join(root, 'absent');
+  assert.deepEqual(await migrateChromeSession({
+    sourceUserDataDir: absent, targetUserDataDir: path.join(root, 'unused-target'), required: false,
+  }), { migrated: false, files: 0, bytes: 0 });
+  await assert.rejects(() => migrateChromeSession({
+    sourceUserDataDir: absent, targetUserDataDir: path.join(root, 'required-target'),
+  }), { code: 'CHROME_SESSION_NOT_FOUND' });
 });
 
 test('default restart helpers request non-forced taskkill and verify a bounded Chrome exit', async () => {

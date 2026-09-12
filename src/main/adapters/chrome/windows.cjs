@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('node:fs');
+const { randomUUID } = require('node:crypto');
 const os = require('node:os');
 const path = require('node:path');
 const { execFile: execFileCallback, spawn: spawnProcess } = require('node:child_process');
@@ -9,9 +10,12 @@ const { DEBUG_PORT_MIN, DEBUG_PORT_MAX } = require('./detect.cjs');
 const DECISION_KEY = 'chromeWindowsRelaunchDecision';
 const SIGNED_OUT_NOTICE_KEY = 'chromeIsolatedProfileNoticeShown';
 const OFFER_MESSAGE = 'Chrome needs a one-time restart to enable window handoff. Your tabs will be restored.';
-const SESSION_RESTORE_LIMITATION = '--restore-last-session restores sessions from the isolated handoff profile, but Chrome cannot import the normal profile session on that profile\'s first run.';
+const SESSION_MIGRATION_DETAIL = 'Compusync copies only Chrome session files. Cookies, credentials, extensions, preferences, and sign-in data stay in your normal profile.';
 const DEFAULT_CLOSE_TIMEOUT_MS = 5_000;
 const DEFAULT_CLOSE_POLL_MS = 100;
+const MAX_SESSION_FILES = 512;
+const MAX_SESSION_BYTES = 512 * 1024 * 1024;
+const SESSION_ENTRY_NAMES = ['Sessions', 'Last Session', 'Last Tabs'];
 
 function standardChromePaths(env = process.env) {
   return [
@@ -35,6 +39,12 @@ function profileDirectory(options = {}) {
   const localAppData = options.localAppData || options.env?.LOCALAPPDATA || process.env.LOCALAPPDATA;
   if (!localAppData || typeof localAppData !== 'string') throw new Error('LOCALAPPDATA is unavailable.');
   return path.resolve(localAppData, 'Compusync', 'browser-profile');
+}
+
+function normalUserDataDirectory(options = {}) {
+  const localAppData = options.localAppData || options.env?.LOCALAPPDATA || process.env.LOCALAPPDATA;
+  if (!localAppData || typeof localAppData !== 'string') throw new Error('LOCALAPPDATA is unavailable.');
+  return path.resolve(localAppData, 'Google', 'Chrome', 'User Data');
 }
 
 function validatePort(port) {
@@ -128,6 +138,116 @@ async function waitForChromeExit(checkRunning, options = {}) {
   throw error;
 }
 
+function migrationError(code, message, cause) {
+  const error = new Error(message);
+  error.code = code;
+  if (cause) error.cause = cause;
+  return error;
+}
+
+function assertMigrationPath(value, name) {
+  if (typeof value !== 'string' || !path.isAbsolute(value) || value.length > 1_024) {
+    throw migrationError('CHROME_SESSION_PATH_INVALID', `${name} must be an absolute path.`);
+  }
+  return path.resolve(value);
+}
+
+function containedBy(parent, child) {
+  const relative = path.relative(parent, child);
+  return relative !== '' && !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative);
+}
+
+async function existingRealEntry(fsLike, entryPath) {
+  try {
+    const info = await fsLike.promises.lstat(entryPath);
+    if (info.isSymbolicLink()) throw migrationError('CHROME_SESSION_UNSAFE_ENTRY', 'Chrome session data contains a symbolic link or junction.');
+    return info;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+async function copySessionEntry(source, destination, state, fsLike) {
+  const info = await existingRealEntry(fsLike, source);
+  if (!info) return false;
+  state.files += 1;
+  if (state.files > MAX_SESSION_FILES) throw migrationError('CHROME_SESSION_TOO_LARGE', 'Chrome session contains too many files.');
+  if (info.isDirectory()) {
+    await fsLike.promises.mkdir(destination, { recursive: true, mode: 0o700 });
+    const entries = await fsLike.promises.readdir(source, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) throw migrationError('CHROME_SESSION_UNSAFE_ENTRY', 'Chrome session data contains a symbolic link or junction.');
+      await copySessionEntry(path.join(source, entry.name), path.join(destination, entry.name), state, fsLike);
+    }
+    return true;
+  }
+  if (!info.isFile()) throw migrationError('CHROME_SESSION_UNSAFE_ENTRY', 'Chrome session data contains an unsupported entry.');
+  state.bytes += info.size;
+  if (state.bytes > MAX_SESSION_BYTES) throw migrationError('CHROME_SESSION_TOO_LARGE', 'Chrome session data exceeds the safe migration limit.');
+  await fsLike.promises.copyFile(source, destination, fs.constants.COPYFILE_EXCL);
+  await fsLike.promises.chmod(destination, 0o600);
+  return true;
+}
+
+async function migrateChromeSession(options = {}) {
+  const fsLike = options.fs || fs;
+  const sourceUserDataDir = assertMigrationPath(options.sourceUserDataDir, 'Normal Chrome user-data directory');
+  const targetUserDataDir = assertMigrationPath(options.targetUserDataDir, 'Isolated Chrome user-data directory');
+  if (sourceUserDataDir === targetUserDataDir || containedBy(sourceUserDataDir, targetUserDataDir) || containedBy(targetUserDataDir, sourceUserDataDir)) {
+    throw migrationError('CHROME_SESSION_PATH_INVALID', 'Normal and isolated Chrome profiles must be separate.');
+  }
+  const sourceDefault = path.join(sourceUserDataDir, 'Default');
+  const targetDefault = path.join(targetUserDataDir, 'Default');
+  const sourceRootInfo = await existingRealEntry(fsLike, sourceUserDataDir);
+  if (!sourceRootInfo?.isDirectory()) {
+    if (options.required === false) return { migrated: false, files: 0, bytes: 0 };
+    throw migrationError('CHROME_SESSION_NOT_FOUND', 'Chrome did not produce session data to restore.');
+  }
+  await fsLike.promises.mkdir(targetUserDataDir, { recursive: true, mode: 0o700 });
+  const targetRootInfo = await existingRealEntry(fsLike, targetUserDataDir);
+  if (!targetRootInfo?.isDirectory()) throw migrationError('CHROME_SESSION_PATH_INVALID', 'Isolated Chrome profile is not a real directory.');
+  const sourceInfo = await existingRealEntry(fsLike, sourceDefault);
+  if (!sourceInfo?.isDirectory()) {
+    if (options.required === false) return { migrated: false, files: 0, bytes: 0 };
+    throw migrationError('CHROME_SESSION_NOT_FOUND', 'Chrome did not produce session data to restore.');
+  }
+  await fsLike.promises.mkdir(targetDefault, { recursive: true, mode: 0o700 });
+  const targetInfo = await existingRealEntry(fsLike, targetDefault);
+  if (!targetInfo?.isDirectory()) throw migrationError('CHROME_SESSION_PATH_INVALID', 'Isolated Chrome Default profile is not a real directory.');
+
+  const staging = path.join(targetDefault, `.compusync-session-${randomUUID()}`);
+  if (!containedBy(targetDefault, staging)) throw migrationError('CHROME_SESSION_PATH_INVALID', 'Invalid session staging directory.');
+  const state = { files: 0, bytes: 0 };
+  const copied = [];
+  await fsLike.promises.mkdir(staging, { mode: 0o700 });
+  try {
+    const sessionsSource = path.join(sourceDefault, 'Sessions');
+    if (await copySessionEntry(sessionsSource, path.join(staging, 'Sessions'), state, fsLike)) copied.push('Sessions');
+    for (const legacyName of SESSION_ENTRY_NAMES.slice(1)) {
+      if (await copySessionEntry(path.join(sourceDefault, legacyName), path.join(staging, legacyName), state, fsLike)) copied.push(legacyName);
+    }
+    if (copied.length === 0 || state.bytes === 0) {
+      if (options.required === false) return { migrated: false, files: 0, bytes: 0 };
+      throw migrationError('CHROME_SESSION_NOT_FOUND', 'Chrome did not produce session data to restore.');
+    }
+    // Replace only session state. All other isolated-profile data remains
+    // untouched, so credentials and cookies are never imported.
+    for (const name of SESSION_ENTRY_NAMES) {
+      const destination = path.join(targetDefault, name);
+      if (!containedBy(targetDefault, destination)) throw migrationError('CHROME_SESSION_PATH_INVALID', 'Invalid session destination.');
+      await fsLike.promises.rm(destination, { recursive: true, force: true });
+      if (copied.includes(name)) await fsLike.promises.rename(path.join(staging, name), destination);
+    }
+    return { migrated: true, files: state.files, bytes: state.bytes, copied };
+  } catch (error) {
+    if (error?.code?.startsWith?.('CHROME_SESSION_')) throw error;
+    throw migrationError('CHROME_SESSION_MIGRATION_FAILED', 'Chrome session data could not be migrated safely.', error);
+  } finally {
+    await fsLike.promises.rm(staging, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 async function createSecureProfile(directory, options = {}) {
   const fsLike = options.fs || fs;
   const platform = options.platform || process.platform;
@@ -145,6 +265,7 @@ async function createSecureProfile(directory, options = {}) {
       await execFilePromise(execFile, 'icacls.exe', [
         directory, '/inheritance:r', '/grant:r', `${account}:(OI)(CI)F`,
         '/remove:g', '*S-1-1-0', '*S-1-5-11', '*S-1-5-32-545',
+        '/T', '/C', '/Q',
       ], {
         windowsHide: true, timeout: 5_000,
       });
@@ -185,6 +306,10 @@ class WindowsChromeRelaunch {
     this.closeTimeoutMs = Math.min(Math.max(Number(options.closeTimeoutMs) || DEFAULT_CLOSE_TIMEOUT_MS, 100), 10_000);
     this.closePollMs = Math.min(Math.max(Number(options.closePollMs) || DEFAULT_CLOSE_POLL_MS, 10), this.closeTimeoutMs);
     this.delay = options.delay || delay;
+    this.normalUserDataDir = options.normalUserDataDir || normalUserDataDirectory({ env: this.env, localAppData: this.localAppData });
+    this.migrateSession = options.migrateSession || ((sourceUserDataDir, targetUserDataDir) => migrateChromeSession({
+      fs: this.fs, sourceUserDataDir, targetUserDataDir, required: true,
+    }));
   }
 
   decision() {
@@ -206,7 +331,7 @@ class WindowsChromeRelaunch {
       id: 'chrome-windows-relaunch',
       title: 'Restart Chrome for window handoff',
       message: OFFER_MESSAGE,
-      detail: SESSION_RESTORE_LIMITATION,
+      detail: SESSION_MIGRATION_DETAIL,
       confirmLabel: 'Restart Chrome',
       cancelLabel: 'Not now',
     };
@@ -222,7 +347,7 @@ class WindowsChromeRelaunch {
     return {
       id: 'chrome-isolated-profile-signed-out',
       title: 'Chrome profile for handoff',
-      message: `The isolated Chrome profile starts signed out. Sign in there if you want synced bookmarks and credentials. ${SESSION_RESTORE_LIMITATION}`,
+      message: 'Your tabs were restored without copying cookies or credentials. The isolated Chrome profile starts signed out; sign in there if you want synced bookmarks and credentials.',
     };
   }
 
@@ -272,11 +397,20 @@ class WindowsChromeRelaunch {
     await waitForChromeExit(this.checkChromeRunning, {
       timeoutMs: this.closeTimeoutMs, pollMs: this.closePollMs, delay: this.delay,
     });
+    let migration;
+    try { migration = await this.migrateSession(this.normalUserDataDir, plan.userDataDir); }
+    catch (error) {
+      if (error?.code?.startsWith?.('CHROME_SESSION_')) throw error;
+      throw migrationError('CHROME_SESSION_MIGRATION_FAILED', 'Chrome session data could not be migrated safely.', error);
+    }
+    if (migration?.migrated !== true) {
+      throw migrationError('CHROME_SESSION_NOT_FOUND', 'Chrome did not produce session data to restore.');
+    }
     const child = this.spawn(plan.executable, plan.args, {
       detached: true, stdio: 'ignore', windowsHide: true, shell: false,
     });
     child?.unref?.();
-    return { port: plan.port, userDataDir: plan.userDataDir, restarted: true };
+    return { port: plan.port, userDataDir: plan.userDataDir, restarted: true, session: migration };
   }
 }
 
@@ -284,13 +418,15 @@ module.exports = {
   DECISION_KEY,
   DEFAULT_CLOSE_TIMEOUT_MS,
   OFFER_MESSAGE,
-  SESSION_RESTORE_LIMITATION,
+  SESSION_MIGRATION_DETAIL,
   SIGNED_OUT_NOTICE_KEY,
   WindowsChromeRelaunch,
   createWindowsChromeRelaunch: (options) => new WindowsChromeRelaunch(options),
   createSecureProfile,
   chromeIsRunning,
   findChromeExecutable,
+  migrateChromeSession,
+  normalUserDataDirectory,
   profileDirectory,
   requestChromeClose,
   relaunchArguments,
