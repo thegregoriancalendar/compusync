@@ -93,6 +93,24 @@ test('native move events poll at the drag boundary and emit one Chrome offer', a
   await runtime.stop();
 });
 
+test('a vanished source window commits the destination survivor instead of aborting it', async () => {
+  const fixture = runtimeFixture();
+  assert.equal(await fixture.runtime.handleMoveStart('hwnd'), true);
+  fixture.input.cursor.virtualCursor = { x: 1010, y: 150 };
+  await fixture.runtime.poll();
+  assert.equal(fixture.sent.some(({ type }) => type === 'window.offer'), true);
+
+  fixture.setWindow(null);
+  assert.equal(await fixture.runtime.poll(), false);
+  assert.deepEqual(fixture.sent.at(-1), {
+    type: 'window.commit', id: 'window-stable', winner: 'destination',
+  });
+  assert.equal(fixture.sent.some(({ type }) => type === 'window.abort'), false);
+  assert.equal(fixture.runtime.drag.active.phase, 'committing');
+  assert.equal(fixture.nativeCalls.some(([type]) => type === 'release'), true);
+  await fixture.runtime.stop();
+});
+
 test('source edge contact terminates the Windows native move loop exactly once and keeps polling', async () => {
   const fixture = runtimeFixture({ window: {
     id: 'hwnd', processName: 'chrome.exe',
@@ -156,7 +174,8 @@ test('recovery guard remains armed through straddle and is released only after s
 
   setWindow(null);
   assert.equal(await runtime.poll(), false);
-  assert.equal(runtime.drag.active, null);
+  assert.equal(runtime.drag.active.phase, 'committing');
+  assert.equal(runtime.drag.active.winner, 'destination');
   assert.deepEqual(nativeCalls.at(-1), ['release', 'hwnd']);
   await runtime.stop();
 });

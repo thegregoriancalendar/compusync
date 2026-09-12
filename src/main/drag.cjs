@@ -162,6 +162,22 @@ class DragController extends EventEmitter {
     return this.#sendCommit(state);
   }
 
+  // Once the source native window is gone, aborting would destroy the only
+  // surviving copy. A reliable destination-winning commit is ordered after
+  // the offer and may be queued by the peer while preparation is still in
+  // flight, so it is also safe when Chrome exits before window.ready.
+  async sourceDisappeared(reason = 'source-quit') {
+    const state = this.active;
+    if (!state || state.role !== 'source') return false;
+    if (!state.descriptor) return this.abort(reason);
+    if (state.phase === 'committing' && state.winner === 'destination') return true;
+    state.sourceMissing = true;
+    state.winner = 'destination';
+    this.setBusy(false);
+    this.#setPhase(state, 'dropping', 'source-disappeared', { reason, winner: state.winner });
+    return this.#sendCommit(state);
+  }
+
   async receive(message) {
     if (!message || typeof message.type !== 'string') return false;
     if (message.type === 'window.offer') return this.#receiveOffer(message.descriptor);
@@ -199,7 +215,7 @@ class DragController extends EventEmitter {
       return this.#receiveCommit(message.winner);
     }
     if (message.type === 'window.committed' && state.role === 'source') {
-      if (state.winner === 'destination') {
+      if (state.winner === 'destination' && !state.sourceMissing) {
         try { await state.adapter.close(state.window); }
         catch (error) { this.#lifecycle(state, 'loser-close-failed', { reason: this.#reason(error, 'close-failed') }); }
       }

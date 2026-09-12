@@ -229,6 +229,69 @@ test('prepare and mid-straddle Chrome failures abort so the peer can restore its
   assert.deepEqual(source.log.filter(([type]) => type === 'position').at(-1), ['position', 'source', { x: 700, y: 100 }]);
 });
 
+test('source Chrome exit promotes the prepared destination, including before ready', async () => {
+  const gate = deferred(), destinationLog = [], destinationSent = [];
+  const destinationAdapter = adapter(destinationLog, { prepare: () => gate.promise });
+  const destination = new DragController({ machineId: 'b', getPlacements: () => placements,
+    adapterForId: () => destinationAdapter,
+    send: (message) => { destinationSent.push(message); return true; } });
+  const source = sourceController();
+  await armSource(source);
+  const offer = source.sent.find(({ type }) => type === 'window.offer');
+  const preparing = destination.receive(offer);
+  await Promise.resolve();
+  for (const position of source.sent.filter(({ type }) => type === 'window.position')) {
+    await destination.receive(position);
+  }
+
+  assert.equal(await source.drag.sourceDisappeared('chrome-quit'), true);
+  const commit = source.sent.at(-1);
+  assert.deepEqual(commit, { type: 'window.commit', id: 'stable-window-id', winner: 'destination' });
+  assert.equal(await destination.receive(commit), true);
+  assert.equal(destination.active.pendingWinner, 'destination');
+
+  gate.resolve({ id: 'only-survivor' });
+  assert.equal(await preparing, true);
+  assert.equal(destination.active, null);
+  assert.equal(destinationLog.some(([type]) => type === 'close'), false);
+  assert.deepEqual(destinationLog.filter(([type]) => type === 'position').at(-1),
+    ['position', 'only-survivor', { x: 1000, y: 100 }]);
+  assert.deepEqual(destinationLog.at(-1), ['focus', 'only-survivor']);
+
+  for (const message of destinationSent) await source.drag.receive(message);
+  assert.equal(source.drag.active, null);
+  assert.equal(source.log.some(([type]) => type === 'close'), false);
+});
+
+test('destination Chrome exit aborts and restores the surviving source', async () => {
+  const destinationLog = [], destinationSent = [];
+  let failPosition = false;
+  const destinationAdapter = adapter(destinationLog);
+  const originalPosition = destinationAdapter.position;
+  destinationAdapter.position = async (...args) => {
+    if (failPosition) throw Object.assign(new Error('destination Chrome exited'), { code: 'CHROME_QUIT' });
+    return originalPosition(...args);
+  };
+  const destination = new DragController({ machineId: 'b', getPlacements: () => placements,
+    adapterForId: () => destinationAdapter,
+    send: (message) => { destinationSent.push(message); return true; } });
+  const source = sourceController();
+  await armSource(source);
+  await destination.receive(source.sent.find(({ type }) => type === 'window.offer'));
+  await source.drag.receive(destinationSent.find(({ type }) => type === 'window.ready'));
+  await source.drag.frame({ geometryVU: { x: 0, y: 0, w: 400, h: 300 }, cursorVU: { x: 950, y: 180 } });
+  failPosition = true;
+  assert.equal(await destination.receive(source.sent.filter(({ type }) => type === 'window.position').at(-1)), true);
+  assert.equal(destination.active, null);
+  const abort = destinationSent.at(-1);
+  assert.deepEqual(abort, { type: 'window.abort', id: 'stable-window-id', reason: 'CHROME_QUIT' });
+  await source.drag.receive(abort);
+  assert.equal(source.drag.active, null);
+  assert.deepEqual(source.log.filter(([type]) => type === 'position').at(-1),
+    ['position', 'source', { x: 700, y: 100 }]);
+  assert.equal(source.log.some(([type]) => type === 'close'), false);
+});
+
 test('a source-winning commit may arrive before prepare and is applied once ready', async () => {
   const gate = deferred(), log = [], sent = [], chrome = adapter(log, { prepare: () => gate.promise });
   const drag = new DragController({ machineId: 'b', getPlacements: () => placements,

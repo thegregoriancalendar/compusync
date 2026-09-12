@@ -173,7 +173,13 @@ class WindowHandoffRuntime extends EventEmitter {
       const windows = await this.windows();
       const window = windows.find((candidate) => String(candidate.id) === this.sourceWindowId);
       if (!window) {
-        try { await this.drag.abort('chrome-quit'); } catch { /* The vanished source cannot be restored locally. */ }
+        // The prepared peer window is now the only survivor. Commit it even if
+        // preparation is still running; reliable control ordering lets the
+        // destination queue this behind the offer instead of aborting it.
+        try { await this.drag.sourceDisappeared('chrome-quit'); }
+        catch { /* The watchdog will settle an unreachable peer. */ }
+        this.setSeam(null);
+        this.#settleSource();
         return false;
       }
       const geometryVU = geometryToVU(window, this.localPlacement());
