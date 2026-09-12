@@ -8,6 +8,8 @@ const {
   DATA_PLAINTEXT_MAX,
   DATA_WIRE_MAX,
   DATA_BACKPRESSURE_MAX,
+  PEER_PLAINTEXT_MAX,
+  PEER_LOSSY_BACKPRESSURE_MAX,
 } = require('../src/core/session.cjs');
 const { DRAG_LEASE_MS } = require('../src/core/state.cjs');
 const { viewportsForActor } = require('../src/core/geometry.cjs');
@@ -176,6 +178,27 @@ test('bulk data moves large messages both ways while control actions stay respon
   assert.equal(fromHost.memberId, 'windows');
   assert.equal(fromHost.message.type, 'test-host-bulk');
   assert.equal(fromHost.message.payload.length, hostPayload.length);
+});
+
+test('authenticated peer messages travel both ways outside the bulk queue', async (t) => {
+  const { host, peer } = await pair(t);
+  const atHost = new Promise((resolve) => host.once('peer-message', (message, memberId) => resolve({ message, memberId })));
+  assert.equal(peer.sendPeer({ type: 'cursor.delta', dx: 3, dy: -2, t: 10 }, { lossTolerant: true }), true);
+  assert.deepEqual(await atHost, { message: { type: 'cursor.delta', dx: 3, dy: -2, t: 10 }, memberId: 'mac' });
+
+  const atPeer = new Promise((resolve) => peer.once('peer-message', (message, memberId) => resolve({ message, memberId })));
+  assert.equal(host.sendPeer({ type: 'window.abort', id: 'handoff-123', reason: 'test' }), true);
+  assert.deepEqual(await atPeer, { message: { type: 'window.abort', id: 'handoff-123', reason: 'test' }, memberId: 'windows' });
+});
+
+test('peer message bounds and lossy backpressure fail closed without dropping the session', async (t) => {
+  const { host, peer } = await pair(t);
+  assert.equal(peer.sendPeer(null), false);
+  assert.equal(peer.sendPeer({ payload: 'x'.repeat(PEER_PLAINTEXT_MAX) }), false);
+  Object.defineProperty(peer.socket, 'bufferedAmount', { value: PEER_LOSSY_BACKPRESSURE_MAX + 1, configurable: true });
+  assert.equal(peer.sendPeer({ type: 'cursor.position', x: 1, y: 2, t: 3 }, { lossTolerant: true }), false);
+  delete peer.socket.bufferedAmount;
+  assert.equal(peer.phase, 'connected');
 });
 
 test('bulk limits and backpressure return false without disturbing control', async (t) => {

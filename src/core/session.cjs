@@ -15,6 +15,8 @@ const CONTROL_WIRE_MAX = 65536;
 const DATA_PLAINTEXT_MAX = 1024 * 1024;
 const DATA_WIRE_MAX = 1500000;
 const DATA_BACKPRESSURE_MAX = 2 * 1024 * 1024;
+const PEER_PLAINTEXT_MAX = 48 * 1024;
+const PEER_LOSSY_BACKPRESSURE_MAX = 16 * 1024;
 
 const validMember = (member) => member && /^[a-zA-Z0-9-]{1,80}$/.test(member.id) && typeof member.name === 'string' && member.name.length > 0 && member.name.length <= 80;
 
@@ -23,6 +25,18 @@ function sanitizeDataMessage(value) {
   try {
     const serialized = JSON.stringify(value);
     if (!serialized || Buffer.byteLength(serialized) > DATA_PLAINTEXT_MAX) return null;
+    const clean = JSON.parse(serialized);
+    return clean && typeof clean === 'object' && !Array.isArray(clean) ? clean : null;
+  } catch {
+    return null;
+  }
+}
+
+function sanitizePeerMessage(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  try {
+    const serialized = JSON.stringify(value);
+    if (!serialized || Buffer.byteLength(serialized) > PEER_PLAINTEXT_MAX) return null;
     const clean = JSON.parse(serialized);
     return clean && typeof clean === 'object' && !Array.isArray(clean) ? clean : null;
   } catch {
@@ -286,6 +300,10 @@ class Session extends EventEmitter {
           this.publish();
         } else if (message.type === 'action') {
           this.apply(member.id, message.action);
+        } else if (message.type === 'peer-message') {
+          const clean = sanitizePeerMessage(message.message);
+          if (!clean) throw new Error('Invalid peer message.');
+          this.emit('peer-message', clean, member.id);
         } else {
           throw new Error('Unknown message.');
         }
@@ -344,6 +362,13 @@ class Session extends EventEmitter {
           return;
         }
         const message = this.channel.open(raw);
+        if (authenticated && message.type === 'peer-message') {
+          const clean = sanitizePeerMessage(message.message);
+          if (!clean) throw new Error('Invalid peer message.');
+          const memberId = this.members.find((member) => member.id !== this.self.id)?.id || null;
+          this.emit('peer-message', clean, memberId);
+          return;
+        }
         if (message.type === 'rejected') { failure = message.message; socket.close(); return; }
         if (!['welcome', 'snapshot'].includes(message.type) || !Array.isArray(message.members) || message.members.length !== 2 || !message.members.every(validMember) || !message.members.some((m) => m.id === this.self.id)) throw new Error('Invalid state.');
         if (!authenticated && message.type !== 'welcome') throw new Error('Missing welcome.');
@@ -493,6 +518,36 @@ class Session extends EventEmitter {
     }
   }
 
+  // V3 cursor/window traffic rides the already-authenticated control channel.
+  // Loss-tolerant samples are dropped under backpressure; lifecycle messages
+  // retain ordered/reliable WebSocket delivery and never share the bulk queue.
+  sendPeer(message, { lossTolerant = false } = {}) {
+    if (this.stopped) return false;
+    const clean = sanitizePeerMessage(message);
+    if (!clean) return false;
+    let socket, channel;
+    if (this.config.role === 'host') {
+      const connection = this.connections.values().next().value;
+      socket = connection?.socket;
+      channel = connection?.channel;
+    } else {
+      socket = this.socket;
+      channel = this.channel;
+    }
+    if (!socket || !channel || socket.readyState !== WebSocket.OPEN) return false;
+    if (lossTolerant && socket.bufferedAmount > PEER_LOSSY_BACKPRESSURE_MAX) return false;
+    if (socket.bufferedAmount > CONTROL_WIRE_MAX) {
+      socket.terminate();
+      return false;
+    }
+    try {
+      socket.send(channel.seal({ type: 'peer-message', message: clean }));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   action(action) {
     if (this.stopped) return false;
     if (this.config.role === 'host') return this.apply(this.self.id, action);
@@ -566,4 +621,7 @@ module.exports = {
   DATA_PLAINTEXT_MAX,
   DATA_WIRE_MAX,
   DATA_BACKPRESSURE_MAX,
+  PEER_PLAINTEXT_MAX,
+  PEER_LOSSY_BACKPRESSURE_MAX,
+  sanitizePeerMessage,
 };
