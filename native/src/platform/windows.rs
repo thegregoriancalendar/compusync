@@ -39,6 +39,9 @@ const SWP_NOZORDER: u32 = 0x0004;
 const SWP_NOACTIVATE: u32 = 0x0010;
 const SW_RESTORE: i32 = 9;
 const MONITORINFOF_PRIMARY: u32 = 1;
+const MONITOR_DEFAULTTONEAREST: u32 = 2;
+const GWL_STYLE: i32 = -16;
+const WS_CAPTION: u32 = 0x00C0_0000;
 const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
 const TOKEN_QUERY: u32 = 0x0008;
 const TOKEN_ELEVATION_CLASS: u32 = 20;
@@ -210,11 +213,13 @@ unsafe extern "system" {
         data: Lparam,
     ) -> Bool;
     fn GetMonitorInfoW(monitor: Hmonitor, info: *mut MonitorInfo) -> Bool;
+    fn MonitorFromWindow(window: Hwnd, flags: u32) -> Hmonitor;
     fn EnumWindows(callback: unsafe extern "system" fn(Hwnd, Lparam) -> Bool, data: Lparam)
         -> Bool;
     fn IsWindowVisible(window: Hwnd) -> Bool;
     fn IsIconic(window: Hwnd) -> Bool;
     fn IsZoomed(window: Hwnd) -> Bool;
+    fn GetWindowLongW(window: Hwnd, index: i32) -> i32;
     fn GetWindowRect(window: Hwnd, rect: *mut WinRect) -> Bool;
     fn GetWindowTextLengthW(window: Hwnd) -> i32;
     fn GetWindowTextW(window: Hwnd, text: *mut u16, length: i32) -> i32;
@@ -282,6 +287,42 @@ unsafe extern "system" {
         flags: u32,
     ) -> Hwineventhook;
     fn UnhookWinEvent(hook: Hwineventhook) -> Bool;
+}
+
+fn fullscreen_from_window_state(
+    window: WinRect,
+    monitor: WinRect,
+    minimized: bool,
+    maximized: bool,
+    style: u32,
+) -> bool {
+    const EDGE_TOLERANCE: i32 = 2;
+    let same_edge = |left: i32, right: i32| left.abs_diff(right) <= EDGE_TOLERANCE as u32;
+    !minimized
+        && !maximized
+        && style & WS_CAPTION == 0
+        && same_edge(window.left, monitor.left)
+        && same_edge(window.top, monitor.top)
+        && same_edge(window.right, monitor.right)
+        && same_edge(window.bottom, monitor.bottom)
+}
+
+fn is_fullscreen_window(hwnd: Hwnd, bounds: WinRect, minimized: bool, maximized: bool) -> bool {
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    if monitor.is_null() {
+        return false;
+    }
+    let mut monitor_info = MonitorInfo {
+        size: size_of::<MonitorInfo>() as u32,
+        monitor: WinRect::default(),
+        work: WinRect::default(),
+        flags: 0,
+    };
+    if unsafe { GetMonitorInfoW(monitor, &mut monitor_info) } == 0 {
+        return false;
+    }
+    let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32;
+    fullscreen_from_window_state(bounds, monitor_info.monitor, minimized, maximized, style)
 }
 #[link(name = "kernel32")]
 unsafe extern "system" {
@@ -819,6 +860,8 @@ impl Platform for HostPlatform {
             if unsafe { GetWindowRect(hwnd, &mut bounds) } == 0 {
                 return 1;
             }
+            let minimized = unsafe { IsIconic(hwnd) } != 0;
+            let maximized = unsafe { IsZoomed(hwnd) } != 0;
             unsafe { &mut *(data as *mut Vec<WindowInfo>) }.push(WindowInfo {
                 id: hwnd_string(hwnd),
                 pid,
@@ -831,8 +874,9 @@ impl Platform for HostPlatform {
                     height: (bounds.bottom - bounds.top) as f64,
                 },
                 visible: true,
-                minimized: unsafe { IsIconic(hwnd) } != 0,
-                maximized: unsafe { IsZoomed(hwnd) } != 0,
+                minimized,
+                maximized,
+                fullscreen: is_fullscreen_window(hwnd, bounds, minimized, maximized),
             });
             1
         }
@@ -1132,7 +1176,54 @@ impl Drop for HostPlatform {
 
 #[cfg(test)]
 mod tests {
-    use super::{hid_to_vk, vk_to_hid};
+    use super::{fullscreen_from_window_state, hid_to_vk, vk_to_hid, WinRect, WS_CAPTION};
+
+    #[test]
+    fn fullscreen_requires_a_borderless_window_covering_the_monitor() {
+        let monitor = WinRect {
+            left: -1920,
+            top: 0,
+            right: 0,
+            bottom: 1080,
+        };
+        assert!(fullscreen_from_window_state(
+            monitor, monitor, false, false, 0
+        ));
+        assert!(!fullscreen_from_window_state(
+            monitor, monitor, false, false, WS_CAPTION
+        ));
+        assert!(!fullscreen_from_window_state(
+            monitor, monitor, false, true, 0
+        ));
+    }
+
+    #[test]
+    fn fullscreen_geometry_allows_rounding_but_rejects_work_area_windows() {
+        let monitor = WinRect {
+            left: 0,
+            top: 0,
+            right: 3840,
+            bottom: 2160,
+        };
+        let rounded = WinRect {
+            left: -1,
+            top: 0,
+            right: 3841,
+            bottom: 2160,
+        };
+        let work_area = WinRect {
+            left: 0,
+            top: 0,
+            right: 3840,
+            bottom: 2120,
+        };
+        assert!(fullscreen_from_window_state(
+            rounded, monitor, false, false, 0
+        ));
+        assert!(!fullscreen_from_window_state(
+            work_area, monitor, false, false, 0
+        ));
+    }
 
     #[test]
     fn canonical_hid_mapping_round_trips_common_keys() {

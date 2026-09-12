@@ -82,6 +82,7 @@ unsafe extern "C" {
     static kAXPositionAttribute: CfString;
     static kAXSizeAttribute: CfString;
     static kAXTitleAttribute: CfString;
+    static kAXFullScreenAttribute: CfString;
     static kAXFocusedAttribute: CfString;
     static kAXRaiseAction: CfString;
     static kAXCloseAction: CfString;
@@ -197,6 +198,16 @@ fn cf_i64(dictionary: CfType, key: CfString) -> i64 {
         }
     }
     output
+}
+fn ax_bool(element: AxElement, attribute: CfString) -> Option<bool> {
+    let mut value = null();
+    if unsafe { AXUIElementCopyAttributeValue(element, attribute, &mut value) } != 0
+        || value.is_null()
+    {
+        return None;
+    }
+    let value = OwnedCf(value);
+    Some(unsafe { CFEqual(value.0, kCFBooleanTrue) })
 }
 fn ax_error(code: i32, action: &str) -> Result<(), String> {
     if code == 0 {
@@ -805,6 +816,7 @@ impl Platform for HostPlatform {
                     visible: visible.contains(&(pid, title)),
                     minimized: false,
                     maximized: false,
+                    fullscreen: ax_bool(window, unsafe { kAXFullScreenAttribute }).unwrap_or(false),
                 });
             }
         }

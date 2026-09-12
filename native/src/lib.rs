@@ -97,6 +97,7 @@ pub struct WindowInfo {
     pub visible: bool,
     pub minimized: bool,
     pub maximized: bool,
+    pub fullscreen: bool,
 }
 
 #[napi(object)]
