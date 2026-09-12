@@ -11,6 +11,7 @@ const {
   PEER_PLAINTEXT_MAX,
   PEER_LOSSY_BACKPRESSURE_MAX,
   PEER_CONTROL_CHANNEL_MAX,
+  CONTROL_MESSAGES_PER_SECOND,
 } = require('../src/core/session.cjs');
 const { DRAG_LEASE_MS } = require('../src/core/state.cjs');
 const { viewportsForActor } = require('../src/core/geometry.cjs');
@@ -211,6 +212,18 @@ test('large reliable peer control uses the authenticated bulk channel without re
   assert.equal(peer.sendPeer(message), true);
   assert.deepEqual(await received, message);
   assert.equal(bulkDelivered, false);
+});
+
+test('authenticated realtime budget covers cursor and straddle traffic without disconnecting', async (t) => {
+  const { host, peer } = await pair(t);
+  const count = Math.min(400, CONTROL_MESSAGES_PER_SECOND - 1);
+  let received = 0;
+  host.on('peer-message', () => { received += 1; });
+  for (let index = 0; index < count; index += 1) {
+    assert.equal(peer.sendPeer({ type: 'cursor.delta', dx: 1, dy: 0, t: index }, { lossTolerant: true }), true);
+  }
+  await until(() => received === count);
+  assert.equal(peer.phase, 'connected');
 });
 
 test('bulk limits and backpressure return false without disturbing control', async (t) => {

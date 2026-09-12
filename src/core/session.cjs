@@ -18,6 +18,7 @@ const DATA_BACKPRESSURE_MAX = 8 * 1024 * 1024;
 const PEER_PLAINTEXT_MAX = 4 * 1024 * 1024;
 const PEER_CONTROL_CHANNEL_MAX = 48 * 1024;
 const PEER_LOSSY_BACKPRESSURE_MAX = 16 * 1024;
+const CONTROL_MESSAGES_PER_SECOND = 1200;
 
 const validMember = (member) => member && /^[a-zA-Z0-9-]{1,80}$/.test(member.id) && typeof member.name === 'string' && member.name.length > 0 && member.name.length <= 80;
 
@@ -223,7 +224,7 @@ class Session extends EventEmitter {
       try {
         if (deriving || mode === 'done') throw new Error('Unexpected message.');
         if (Date.now() - rateStart > 1000) { rateStart = Date.now(); messages = 0; }
-        if (++messages > 300) throw new Error('Too many messages.');
+        if (++messages > CONTROL_MESSAGES_PER_SECOND) throw new Error('Too many messages.');
         if (!channel) {
           if (raw.length > CONTROL_WIRE_MAX) throw new Error('Handshake too large.');
           const keyMessage = JSON.parse(raw.toString());
@@ -640,4 +641,5 @@ module.exports = {
   PEER_CONTROL_CHANNEL_MAX,
   PEER_LOSSY_BACKPRESSURE_MAX,
   sanitizePeerMessage,
+  CONTROL_MESSAGES_PER_SECOND,
 };
