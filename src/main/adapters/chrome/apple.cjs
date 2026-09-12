@@ -370,7 +370,9 @@ function createAppleChromeAdapter(options = {}) {
       origin: machineId,
       capturedAt: now(),
       geometryVU: geometry,
-      state: nativeWindow?.maximized ? 'maximized' : 'normal',
+      // The wire schema has no separate fullscreen state; both states use the
+      // required non-straddling/instant-commit path.
+      state: nativeWindow?.maximized || nativeWindow?.fullscreen ? 'maximized' : 'normal',
       payload: { activeIdx, tabs },
     };
   }

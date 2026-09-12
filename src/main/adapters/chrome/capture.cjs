@@ -236,7 +236,9 @@ class ChromeCapture {
       origin: this.machineId,
       capturedAt: this.now(),
       geometryVU: geometry,
-      state: window?.maximized === true || group.bounds?.windowState === 'maximized' ? 'maximized' : 'normal',
+      state: window?.maximized === true || window?.fullscreen === true
+        || group.nativeWindow?.fullscreen === true || group.bounds?.windowState === 'maximized'
+        || group.bounds?.windowState === 'fullscreen' ? 'maximized' : 'normal',
       payload: { activeIdx, tabs },
     };
     const nativeId = nativeWindowId(group.nativeWindow);

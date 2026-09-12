@@ -94,6 +94,24 @@ test('CDP capture emits ordered/pinned tabs, every tab history, VU geometry, and
   assert.doesNotMatch(JSON.stringify(logs), /do-not-log|credential|\/watch|\/two/);
 });
 
+test('native fullscreen Chrome is serialized onto the non-straddling state path', async () => {
+  const nativeWindow = { id: 'fullscreen', processName: 'chrome.exe', visible: true, fullscreen: true };
+  const capture = new ChromeCapture({
+    machineId: 'win-b', native: { enumerateWindows: () => [nativeWindow] },
+    cdp: {
+      async connect() {},
+      async windows() { return [{ windowId: 1, nativeWindow, tabs: [
+        { id: 'tab', type: 'page', title: '', url: 'https://example.com', active: true },
+      ], bounds: { windowState: 'normal' } }]; },
+      async withPage(_id, callback) { return callback(async (method) => method === 'Page.getNavigationHistory'
+        ? { currentIndex: 0, entries: [{ id: 1, url: 'https://example.com' }] }
+        : { result: { value: 'visible' } }); },
+    },
+  });
+  const result = await capture.capture(nativeWindow, { x: 0, y: 0, w: 800, h: 600 });
+  assert.equal(result.state, 'maximized');
+});
+
 test('history capture never exceeds four concurrent CDP pages', async () => {
   let active = 0;
   let peak = 0;
