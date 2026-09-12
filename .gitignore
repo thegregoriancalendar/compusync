@@ -1,5 +1,7 @@
 node_modules/
 dist/
+native/target/
+native/*.node
 test-results/
 playwright-report/
 .demo/

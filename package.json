@@ -1,6 +1,6 @@
 {
   "name": "compusync",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "One logical window, shared workspace, and host editor across two laptops.",
   "private": true,
   "main": "src/main.cjs",
@@ -11,10 +11,13 @@
     "dev": "electron .",
     "test": "node --test tests/*.test.cjs",
     "test:e2e": "playwright test",
+    "test:native": "node scripts/run-cargo.cjs test --locked --manifest-path native/Cargo.toml && node --test native/index.test.cjs",
     "check": "node scripts/check.cjs",
-    "build": "electron-builder --dir",
-    "dist:win": "electron-builder --win portable --publish never",
-    "dist:mac": "electron-builder --mac dmg zip --publish never",
+    "native:build": "node scripts/build-native.cjs",
+    "native:smoke": "node scripts/smoke-native.cjs",
+    "build": "npm run native:build && npm run native:smoke && electron-builder --dir",
+    "dist:win": "npm run native:build && npm run native:smoke && electron-builder --win portable --publish never",
+    "dist:mac": "npm run native:build && npm run native:smoke && electron-builder --mac dmg zip --publish never",
     "demo": "node scripts/demo.cjs"
   },
   "dependencies": {
@@ -29,13 +32,31 @@
     "appId": "app.compusync.desktop",
     "productName": "CompuSync",
     "directories": { "output": "dist" },
-    "files": ["src/**/*", "package.json"],
+    "files": [
+      "src/**/*",
+      "package.json",
+      "native/index.cjs",
+      "native/compusync-native.*-${arch}.node"
+    ],
     "asar": true,
+    "asarUnpack": ["native/*.node"],
+    "extraResources": [
+      {
+        "from": "native",
+        "to": "native",
+        "filter": ["compusync-native.*-${arch}.node"]
+      }
+    ],
     "win": { "target": ["portable"], "signAndEditExecutable": false },
     "mac": {
       "target": ["dmg", "zip"],
       "category": "public.app-category.utilities",
-      "extendInfo": { "NSLocalNetworkUsageDescription": "CompuSync connects to your other laptop to share its window and cursor." }
+      "extendInfo": {
+        "NSLocalNetworkUsageDescription": "CompuSync connects to your other laptop to share its window and cursor.",
+        "NSAccessibilityUsageDescription": "CompuSync needs Accessibility access to move the shared cursor and position Chrome windows during handoff.",
+        "NSInputMonitoringUsageDescription": "CompuSync needs Input Monitoring access so your mouse and keyboard can follow the shared cursor.",
+        "NSAppleEventsUsageDescription": "CompuSync needs Automation access to read and recreate your Chrome tabs during window handoff."
+      }
     }
   }
 }
