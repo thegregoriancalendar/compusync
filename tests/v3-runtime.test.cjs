@@ -66,3 +66,15 @@ test('runtime sanitizes traffic, agrees layout, links only with peer and native 
   assert.deepEqual(modes.at(-1), [false, 'test-failure']);
   runtime.stop();
 });
+
+test('production native owns fail-safe hotkeys without Electron registration conflicts', () => {
+  const session = new FakeSession(), native = new FakeNative(), registered = [];
+  const runtime = new SharedInputRuntime({
+    session, native, machineId: 'win', hostId: 'win', peerId: 'mac', settings,
+    layouts: { win: layout(1920, 1080, 1), mac: layout(1440, 900, 2) },
+    globalShortcut: { register: (key) => { registered.push(key); return true; }, unregister() {} },
+  });
+  runtime.start();
+  assert.deepEqual(registered, []);
+  runtime.stop();
+});

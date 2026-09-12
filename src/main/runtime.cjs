@@ -115,7 +115,10 @@ class SharedInputRuntime extends EventEmitter {
     this.native.on?.('displayChanged', this._displayChanged);
     this.native.on?.('unlinkHotkey', this._nativeUnlink);
     this.native.on?.('toggleOwnershipHotkey', this._nativeOwnership);
-    if (this.globalShortcut) {
+    // The native hook owns these fail-safe hotkeys in production so unlink
+    // still works if JS is wedged. Electron registers them only for fallback
+    // development adapters; registering both would make RegisterHotKey fail.
+    if (this.globalShortcut && !this.native.available) {
       const cursorProxy = {
         get linked() { return this.runtime.cursor.linked; },
         runtime: this,
