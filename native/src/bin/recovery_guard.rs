@@ -4,6 +4,7 @@
 //! owns only a process-liveness handle and performs idempotent recovery after an
 //! exit which cannot run Rust destructors or `atexit` handlers.
 
+use compusync_native::{recover_external_state, RecoveryGuardState};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -13,12 +14,32 @@ fn main() -> ExitCode {
     else {
         return ExitCode::from(2);
     };
+    let state_path = std::env::args().nth(2);
     if wait_for_exit(pid) {
-        recover_cursor();
+        let state = state_path
+            .as_deref()
+            .and_then(read_state)
+            .unwrap_or_default();
+        recover_external_state(&state);
+        if let Some(path) = state_path {
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(std::path::Path::new(&path).with_extension("next"));
+        }
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
     }
+}
+
+fn read_state(path: &str) -> Option<RecoveryGuardState> {
+    let path = std::path::Path::new(path);
+    [path.with_extension("next"), path.to_path_buf()]
+        .into_iter()
+        .find_map(|candidate| {
+            std::fs::read(candidate)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        })
 }
 
 #[cfg(target_os = "windows")]
@@ -40,30 +61,6 @@ fn wait_for_exit(pid: u32) -> bool {
     result == 0
 }
 
-#[cfg(target_os = "windows")]
-fn recover_cursor() {
-    #[repr(C)]
-    struct Rect {
-        left: i32,
-        top: i32,
-        right: i32,
-        bottom: i32,
-    }
-    #[link(name = "user32")]
-    unsafe extern "system" {
-        fn ClipCursor(rect: *const Rect) -> i32;
-        fn ShowCursor(show: i32) -> i32;
-    }
-    unsafe {
-        ClipCursor(std::ptr::null());
-        for _ in 0..32 {
-            if ShowCursor(1) >= 0 {
-                break;
-            }
-        }
-    }
-}
-
 #[cfg(target_os = "macos")]
 fn wait_for_exit(pid: u32) -> bool {
     unsafe extern "C" {
@@ -78,27 +75,56 @@ fn wait_for_exit(pid: u32) -> bool {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn recover_cursor() {
-    unsafe extern "C" {
-        fn CGMainDisplayID() -> u32;
-        fn CGDisplayShowCursor(display: u32) -> i32;
-        fn CGAssociateMouseAndMouseCursorPosition(connected: bool) -> i32;
-    }
-    unsafe {
-        CGAssociateMouseAndMouseCursorPosition(true);
-        // Balance a bounded number of nested hide calls. Compusync itself uses
-        // idempotent hiding, but this also handles a panic during transition.
-        for _ in 0..4 {
-            CGDisplayShowCursor(CGMainDisplayID());
-        }
-    }
-}
-
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn wait_for_exit(_: u32) -> bool {
     false
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn recover_cursor() {}
+#[cfg(test)]
+mod tests {
+    use super::read_state;
+    use compusync_native::{GuardedWindowState, RecoveryGuardState, Rect};
+
+    #[test]
+    fn recovery_state_prefers_complete_journal_and_falls_back_after_torn_write() {
+        let path = std::env::temp_dir().join(format!(
+            "compusync-guard-test-{}-{:?}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let committed = RecoveryGuardState {
+            windows: vec![GuardedWindowState {
+                id: "0x123".into(),
+                bounds: Rect {
+                    x: -10.0,
+                    y: 20.0,
+                    width: 800.0,
+                    height: 600.0,
+                },
+            }],
+            buttons: 1,
+            modifiers: 2,
+        };
+        std::fs::write(&path, serde_json::to_vec(&committed).unwrap()).unwrap();
+        let journal = RecoveryGuardState {
+            buttons: 3,
+            ..committed.clone()
+        };
+        std::fs::write(
+            path.with_extension("next"),
+            serde_json::to_vec(&journal).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(read_state(path.to_str().unwrap()).unwrap().buttons, 3);
+        std::fs::write(path.with_extension("next"), b"{").unwrap();
+        let fallback = read_state(path.to_str().unwrap()).unwrap();
+        assert_eq!(fallback.buttons, 1);
+        assert_eq!(fallback.modifiers, 2);
+        assert_eq!(fallback.windows[0].id, "0x123");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("next"));
+    }
+}

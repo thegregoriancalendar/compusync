@@ -15,8 +15,9 @@ use platform::{EventSink, HostPlatform, Platform};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
+    path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Arc, Weak,
     },
     thread,
@@ -33,6 +34,27 @@ static RECOVERY_HOOKS_INSTALLED: OnceCell<()> = OnceCell::new();
 const EVENT_QUEUE_CAPACITY: usize = 8192;
 // USB HID keyboard usages; platform backends translate these to native codes.
 const SYNTHETIC_MODIFIERS: [u32; 8] = [0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7];
+
+fn button_bit(button: &str) -> Option<u32> {
+    Some(match button {
+        "left" => 1,
+        "right" => 2,
+        "middle" => 4,
+        "x1" | "back" => 8,
+        "x2" | "forward" => 16,
+        _ => return None,
+    })
+}
+
+fn modifier_bit(code: u32) -> Option<u32> {
+    Some(match code {
+        0xE1 | 0xE5 => 1,
+        0xE0 | 0xE4 => 2,
+        0xE2 | 0xE6 => 4,
+        0xE3 | 0xE7 => 8,
+        _ => return None,
+    })
+}
 
 fn monotonic_ms() -> u64 {
     PROCESS_STARTED.elapsed().as_millis().min(u64::MAX as u128) as u64
@@ -52,6 +74,19 @@ pub struct Rect {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GuardedWindowState {
+    pub id: String,
+    pub bounds: Rect,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct RecoveryGuardState {
+    pub windows: Vec<GuardedWindowState>,
+    pub buttons: u32,
+    pub modifiers: u32,
 }
 
 impl Rect {
@@ -167,10 +202,43 @@ struct Inner {
     recovery_requested: AtomicBool,
     last_heartbeat_ms: AtomicU64,
     guarded_windows: Mutex<HashMap<String, Rect>>,
+    synthetic_buttons: AtomicU32,
+    synthetic_modifiers: AtomicU32,
+    guard_state_path: Mutex<Option<PathBuf>>,
     guard_installed: AtomicBool,
 }
 
 impl Inner {
+    fn guard_state(&self) -> RecoveryGuardState {
+        RecoveryGuardState {
+            windows: self
+                .guarded_windows
+                .lock()
+                .iter()
+                .map(|(id, bounds)| GuardedWindowState {
+                    id: id.clone(),
+                    bounds: *bounds,
+                })
+                .collect(),
+            buttons: self.synthetic_buttons.load(Ordering::Acquire),
+            modifiers: self.synthetic_modifiers.load(Ordering::Acquire),
+        }
+    }
+
+    fn persist_guard_state(&self) -> std::io::Result<()> {
+        let Some(path) = self.guard_state_path.lock().clone() else {
+            return Ok(());
+        };
+        let json = serde_json::to_vec(&self.guard_state()).map_err(std::io::Error::other)?;
+        let next = path.with_extension("next");
+        std::fs::write(&next, json)?;
+        // The guard prefers a complete `.next` journal entry, then falls back
+        // to the last committed file. Thus every crash point retains one valid
+        // recovery snapshot even on Windows where rename cannot replace.
+        let _ = std::fs::remove_file(&path);
+        std::fs::rename(next, path)
+    }
+
     fn recover(&self, reason: &str) {
         if self.recovering.swap(true, Ordering::AcqRel) {
             return;
@@ -193,12 +261,41 @@ impl Inner {
         let _ = platform.release_cursor();
         let _ = platform.show_cursor();
         drop(platform);
+        self.synthetic_buttons.store(0, Ordering::Release);
+        self.synthetic_modifiers.store(0, Ordering::Release);
+        let _ = self.persist_guard_state();
 
         let mut event = NativeEvent::simple("recovered");
         event.message = Some(reason.into());
         self.events.emit(event);
         self.recovering.store(false, Ordering::Release);
     }
+}
+
+pub fn recover_external_state(state: &RecoveryGuardState) {
+    let mut platform = HostPlatform::new();
+    platform.stop_capture();
+    for (bit, button) in [
+        (1, "left"),
+        (2, "right"),
+        (4, "middle"),
+        (8, "x1"),
+        (16, "x2"),
+    ] {
+        if state.buttons & bit != 0 {
+            let _ = platform.synthesize_button(button, false);
+        }
+    }
+    if state.modifiers != 0 {
+        for code in SYNTHETIC_MODIFIERS {
+            let _ = platform.synthesize_key(code, false, 0);
+        }
+    }
+    for window in &state.windows {
+        let _ = platform.set_window_bounds(&window.id, window.bounds);
+    }
+    let _ = platform.release_cursor();
+    let _ = platform.show_cursor();
 }
 
 impl Drop for Inner {
@@ -243,6 +340,10 @@ fn napi_error(message: impl Into<String>) -> napi::Error {
     napi::Error::from_reason(message.into())
 }
 
+fn io_napi(error: std::io::Error) -> napi::Error {
+    napi_error(error.to_string())
+}
+
 #[napi]
 pub struct NativeSubstrate {
     inner: Arc<Inner>,
@@ -263,6 +364,9 @@ impl NativeSubstrate {
             recovery_requested: AtomicBool::new(false),
             last_heartbeat_ms: AtomicU64::new(monotonic_ms()),
             guarded_windows: Mutex::new(HashMap::new()),
+            synthetic_buttons: AtomicU32::new(0),
+            synthetic_modifiers: AtomicU32::new(0),
+            guard_state_path: Mutex::new(None),
             guard_installed: AtomicBool::new(false),
         });
         install_recovery_hooks(&inner);
@@ -440,6 +544,20 @@ impl NativeSubstrate {
         }
         let mut command = std::process::Command::new(path);
         command.arg(std::process::id().to_string());
+        let state_path = std::env::temp_dir().join(format!(
+            "compusync-recovery-{}-{}.json",
+            std::process::id(),
+            monotonic_ms()
+        ));
+        *self.inner.guard_state_path.lock() = Some(state_path.clone());
+        if let Err(error) = self.inner.persist_guard_state() {
+            *self.inner.guard_state_path.lock() = None;
+            self.inner.guard_installed.store(false, Ordering::Release);
+            return Err(napi_error(format!(
+                "failed to initialize recovery state: {error}"
+            )));
+        }
+        command.arg(&state_path);
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;
@@ -451,6 +569,9 @@ impl NativeSubstrate {
             .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(|error| {
+                let _ = std::fs::remove_file(&state_path);
+                let _ = std::fs::remove_file(state_path.with_extension("next"));
+                *self.inner.guard_state_path.lock() = None;
                 self.inner.guard_installed.store(false, Ordering::Release);
                 napi_error(format!("failed to start recovery guard: {error}"))
             })?;
@@ -561,34 +682,84 @@ impl NativeSubstrate {
             .guarded_windows
             .lock()
             .insert(id, restore_bounds.validate().map_err(napi_error)?);
+        self.inner.persist_guard_state().map_err(io_napi)?;
         Ok(())
     }
 
     #[napi]
     pub fn release_window_guard(&self, id: String) {
         self.inner.guarded_windows.lock().remove(&id);
+        let _ = self.inner.persist_guard_state();
     }
 
     #[napi]
     pub fn synthesize_button(&self, button: String, down: bool) -> Result<()> {
-        self.inner
-            .platform
-            .lock()
-            .synthesize_button(&button, down)
-            .map_err(napi_error)
+        let bit = button_bit(&button);
+        if down && bit.is_some() {
+            self.inner
+                .synthetic_buttons
+                .fetch_or(bit.unwrap(), Ordering::AcqRel);
+            self.inner.persist_guard_state().map_err(io_napi)?;
+        }
+        if let Err(error) = self.inner.platform.lock().synthesize_button(&button, down) {
+            if down && bit.is_some() {
+                self.inner
+                    .synthetic_buttons
+                    .fetch_and(!bit.unwrap(), Ordering::AcqRel);
+                let _ = self.inner.persist_guard_state();
+            }
+            return Err(napi_error(error));
+        }
+        if !down && bit.is_some() {
+            self.inner
+                .synthetic_buttons
+                .fetch_and(!bit.unwrap(), Ordering::AcqRel);
+            self.inner.persist_guard_state().map_err(io_napi)?;
+        }
+        Ok(())
     }
 
     #[napi]
     pub fn synthesize_key(&self, code: u32, down: bool, modifiers: u32) -> Result<()> {
-        self.inner
+        let bit = modifier_bit(code);
+        if down && bit.is_some() {
+            self.inner
+                .synthetic_modifiers
+                .fetch_or(bit.unwrap(), Ordering::AcqRel);
+            self.inner.persist_guard_state().map_err(io_napi)?;
+        }
+        if let Err(error) = self
+            .inner
             .platform
             .lock()
             .synthesize_key(code, down, modifiers)
-            .map_err(napi_error)
+        {
+            if down && bit.is_some() {
+                self.inner
+                    .synthetic_modifiers
+                    .fetch_and(!bit.unwrap(), Ordering::AcqRel);
+                let _ = self.inner.persist_guard_state();
+            }
+            return Err(napi_error(error));
+        }
+        if !down && bit.is_some() {
+            self.inner
+                .synthetic_modifiers
+                .fetch_and(!bit.unwrap(), Ordering::AcqRel);
+            self.inner.persist_guard_state().map_err(io_napi)?;
+        }
+        Ok(())
     }
 
     #[napi]
     pub fn assume_input_state(&self, buttons: u32, modifiers: u32) -> Result<()> {
+        self.inner
+            .synthetic_buttons
+            .store(buttons & 31, Ordering::Release);
+        self.inner
+            .synthetic_modifiers
+            .store(modifiers & 15, Ordering::Release);
+        self.inner.persist_guard_state().map_err(io_napi)?;
         let mut platform = self.inner.platform.lock();
         for (bit, button) in [
             (1, "left"),
@@ -622,6 +793,10 @@ impl NativeSubstrate {
         for code in SYNTHETIC_MODIFIERS {
             let _ = platform.synthesize_key(code, false, 0);
         }
+        self.inner.synthetic_buttons.store(0, Ordering::Release);
+        self.inner.synthetic_modifiers.store(0, Ordering::Release);
+        drop(platform);
+        let _ = self.inner.persist_guard_state();
     }
 
     #[napi]

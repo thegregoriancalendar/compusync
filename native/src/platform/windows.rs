@@ -476,10 +476,31 @@ struct HookContext {
     linked: AtomicBool,
     owner: AtomicBool,
     modifiers: AtomicU32,
+    suppress_move_loop_up: AtomicBool,
+    suppress_physical_left_up: AtomicBool,
 }
 static HOOK_CONTEXT: OnceCell<Mutex<Option<Arc<HookContext>>>> = OnceCell::new();
 fn hook_context() -> Option<Arc<HookContext>> {
     HOOK_CONTEXT.get()?.lock().clone()
+}
+
+fn should_suppress_left_up(
+    message: u32,
+    extra_info: usize,
+    suppress_move_loop_up: &AtomicBool,
+    suppress_physical_left_up: &AtomicBool,
+) -> bool {
+    if message != 0x0202 {
+        return false;
+    }
+    if extra_info == COMPUSYNC_EXTRA_INFO {
+        if suppress_move_loop_up.swap(false, Ordering::AcqRel) {
+            suppress_physical_left_up.store(true, Ordering::Release);
+            return true;
+        }
+        return false;
+    }
+    suppress_physical_left_up.swap(false, Ordering::AcqRel)
 }
 
 unsafe extern "system" fn window_proc(
@@ -533,27 +554,33 @@ unsafe extern "system" fn window_proc(
                             }
                         }
                         let flags = mouse.buttons as u16;
-                        for (flag, button, down) in [
-                            (RI_MOUSE_LEFT_BUTTON_DOWN, "left", true),
-                            (RI_MOUSE_LEFT_BUTTON_UP, "left", false),
-                            (RI_MOUSE_RIGHT_BUTTON_DOWN, "right", true),
-                            (RI_MOUSE_RIGHT_BUTTON_UP, "right", false),
-                            (RI_MOUSE_MIDDLE_BUTTON_DOWN, "middle", true),
-                            (RI_MOUSE_MIDDLE_BUTTON_UP, "middle", false),
-                            (RI_MOUSE_BUTTON_4_DOWN, "x1", true),
-                            (RI_MOUSE_BUTTON_4_UP, "x1", false),
-                            (RI_MOUSE_BUTTON_5_DOWN, "x2", true),
-                            (RI_MOUSE_BUTTON_5_UP, "x2", false),
-                        ] {
-                            if flags & flag != 0 {
-                                if let Some(context) = hook_context() {
-                                    let mut event = NativeEvent::simple("cursorButton");
-                                    event.timestamp = event_time();
-                                    event.button = Some(button.into());
-                                    event.down = Some(down);
-                                    event.modifiers =
-                                        Some(context.modifiers.load(Ordering::Relaxed));
-                                    (context.sink)(event);
+                        // Tagged SendInput transitions are logical output, not
+                        // physical device state. In particular, the move-loop
+                        // left-up must not make JS believe the held button was
+                        // released before the hardware-up arrives.
+                        if mouse.extra_information as usize != COMPUSYNC_EXTRA_INFO {
+                            for (flag, button, down) in [
+                                (RI_MOUSE_LEFT_BUTTON_DOWN, "left", true),
+                                (RI_MOUSE_LEFT_BUTTON_UP, "left", false),
+                                (RI_MOUSE_RIGHT_BUTTON_DOWN, "right", true),
+                                (RI_MOUSE_RIGHT_BUTTON_UP, "right", false),
+                                (RI_MOUSE_MIDDLE_BUTTON_DOWN, "middle", true),
+                                (RI_MOUSE_MIDDLE_BUTTON_UP, "middle", false),
+                                (RI_MOUSE_BUTTON_4_DOWN, "x1", true),
+                                (RI_MOUSE_BUTTON_4_UP, "x1", false),
+                                (RI_MOUSE_BUTTON_5_DOWN, "x2", true),
+                                (RI_MOUSE_BUTTON_5_UP, "x2", false),
+                            ] {
+                                if flags & flag != 0 {
+                                    if let Some(context) = hook_context() {
+                                        let mut event = NativeEvent::simple("cursorButton");
+                                        event.timestamp = event_time();
+                                        event.button = Some(button.into());
+                                        event.down = Some(down);
+                                        event.modifiers =
+                                            Some(context.modifiers.load(Ordering::Relaxed));
+                                        (context.sink)(event);
+                                    }
                                 }
                             }
                         }
@@ -631,8 +658,16 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: Wparam, lparam: Lparam) 
         )
     {
         let mouse = unsafe { &*(lparam as *const MouseHook) };
-        if mouse.extra_info != COMPUSYNC_EXTRA_INFO {
-            if let Some(context) = hook_context() {
+        if let Some(context) = hook_context() {
+            if should_suppress_left_up(
+                wparam as u32,
+                mouse.extra_info,
+                &context.suppress_move_loop_up,
+                &context.suppress_physical_left_up,
+            ) {
+                return 1;
+            }
+            if mouse.extra_info != COMPUSYNC_EXTRA_INFO {
                 if context.linked.load(Ordering::Acquire) && !context.owner.load(Ordering::Acquire)
                 {
                     return 1;
@@ -1028,6 +1063,8 @@ impl Platform for HostPlatform {
             linked: AtomicBool::new(false),
             owner: AtomicBool::new(true),
             modifiers: AtomicU32::new(0),
+            suppress_move_loop_up: AtomicBool::new(false),
+            suppress_physical_left_up: AtomicBool::new(false),
         });
         *HOOK_CONTEXT.get_or_init(|| Mutex::new(None)).lock() = Some(context.clone());
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
@@ -1162,7 +1199,15 @@ impl Platform for HostPlatform {
         }
     }
     fn terminate_move_loop(&mut self, _: &str) -> Result<(), String> {
-        self.synthesize_button("left", false)
+        let context = hook_context().ok_or_else(|| "input hook is not active".to_string())?;
+        context.suppress_move_loop_up.store(true, Ordering::Release);
+        if let Err(error) = self.synthesize_button("left", false) {
+            context
+                .suppress_move_loop_up
+                .store(false, Ordering::Release);
+            return Err(error);
+        }
+        Ok(())
     }
 }
 
@@ -1176,7 +1221,46 @@ impl Drop for HostPlatform {
 
 #[cfg(test)]
 mod tests {
-    use super::{fullscreen_from_window_state, hid_to_vk, vk_to_hid, WinRect, WS_CAPTION};
+    use super::{
+        fullscreen_from_window_state, hid_to_vk, should_suppress_left_up, vk_to_hid, WinRect,
+        COMPUSYNC_EXTRA_INFO, WS_CAPTION,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn move_loop_up_and_later_physical_up_are_each_suppressed_once() {
+        let injected = AtomicBool::new(true);
+        let physical = AtomicBool::new(false);
+        assert!(should_suppress_left_up(
+            0x0202,
+            COMPUSYNC_EXTRA_INFO,
+            &injected,
+            &physical
+        ));
+        assert!(!injected.load(Ordering::Acquire));
+        assert!(physical.load(Ordering::Acquire));
+        assert!(should_suppress_left_up(0x0202, 0, &injected, &physical));
+        assert!(!physical.load(Ordering::Acquire));
+        assert!(!should_suppress_left_up(0x0202, 0, &injected, &physical));
+    }
+
+    #[test]
+    fn ordinary_synthetic_buttons_are_not_swallowed() {
+        let injected = AtomicBool::new(false);
+        let physical = AtomicBool::new(false);
+        assert!(!should_suppress_left_up(
+            0x0202,
+            COMPUSYNC_EXTRA_INFO,
+            &injected,
+            &physical
+        ));
+        assert!(!should_suppress_left_up(
+            0x0201,
+            COMPUSYNC_EXTRA_INFO,
+            &injected,
+            &physical
+        ));
+    }
 
     #[test]
     fn fullscreen_requires_a_borderless_window_covering_the_monitor() {
