@@ -301,12 +301,15 @@ test('default restart helpers request non-forced taskkill and verify a bounded C
 });
 
 test('profile helpers constrain debug ports and enforce private directory setup', async (t) => {
-  const args = relaunchArguments('C:\\isolated', 9250);
+  const filesystemRoot = path.parse(path.resolve('.')).root;
+  const isolatedProfile = path.join(filesystemRoot, 'isolated');
+  const args = relaunchArguments(isolatedProfile, 9250);
   assert.ok(args.includes('--remote-debugging-port=9250'));
   assert.equal(args.some((arg) => arg.startsWith('--load-extension=')), false);
-  assert.throws(() => relaunchArguments('C:\\isolated', 9251), RangeError);
-  assert.equal(unpackedExtensionDirectory('C:\\app\\resources\\app.asar\\src\\main\\adapters\\chrome\\extension'),
-    'C:\\app\\resources\\app.asar.unpacked\\src\\main\\adapters\\chrome\\extension');
+  assert.throws(() => relaunchArguments(isolatedProfile, 9251), RangeError);
+  const packedExtension = path.join(filesystemRoot, 'app', 'resources', 'app.asar', 'src', 'main', 'adapters', 'chrome', 'extension');
+  const unpackedExtension = path.join(filesystemRoot, 'app', 'resources', 'app.asar.unpacked', 'src', 'main', 'adapters', 'chrome', 'extension');
+  assert.equal(unpackedExtensionDirectory(packedExtension), unpackedExtension);
   assert.ok(path.isAbsolute(defaultExtensionDirectory()));
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'compusync-profile-'));
   t.after(() => fs.promises.rm(root, { recursive: true, force: true }));
