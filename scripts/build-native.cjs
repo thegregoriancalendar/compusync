@@ -44,3 +44,12 @@ if (!fs.existsSync(source)) throw new Error(`Cargo did not produce the expected 
 
 fs.copyFileSync(source, destination);
 console.log(`Native addon ready: ${path.relative(projectRoot, destination)}`);
+
+const guardName = `compusync-recovery-guard${process.platform === 'win32' ? '.exe' : ''}`;
+const guardSource = path.join(targetRoot, 'release', guardName);
+const guardDestination = path.join(nativeRoot, guardName);
+if (!fs.existsSync(guardSource)) throw new Error(`Cargo did not produce the recovery guard: ${guardSource}`);
+
+fs.copyFileSync(guardSource, guardDestination);
+if (process.platform !== 'win32') fs.chmodSync(guardDestination, 0o755);
+console.log(`Recovery guard ready: ${path.relative(projectRoot, guardDestination)}`);

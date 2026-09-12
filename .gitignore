@@ -2,6 +2,7 @@ node_modules/
 dist/
 native/target/
 native/*.node
+native/compusync-recovery-guard*
 test-results/
 playwright-report/
 .demo/

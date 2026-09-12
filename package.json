@@ -15,6 +15,7 @@
     "check": "node scripts/check.cjs",
     "native:build": "node scripts/build-native.cjs",
     "native:smoke": "node scripts/smoke-native.cjs",
+    "native:probe:crash": "node scripts/probe-recovery-guard.cjs",
     "build": "npm run native:build && npm run native:smoke && electron-builder --dir",
     "dist:win": "npm run native:build && npm run native:smoke && electron-builder --win portable --publish never",
     "dist:mac": "npm run native:build && npm run native:smoke && electron-builder --mac dmg zip --publish never",
@@ -44,7 +45,11 @@
       {
         "from": "native",
         "to": "native",
-        "filter": ["compusync-native.*-${arch}.node"]
+        "filter": [
+          "compusync-native.*-${arch}.node",
+          "compusync-recovery-guard",
+          "compusync-recovery-guard.exe"
+        ]
       }
     ],
     "win": { "target": ["portable"], "signAndEditExecutable": false },

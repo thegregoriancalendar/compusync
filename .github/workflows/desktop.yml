@@ -25,6 +25,8 @@ jobs:
       - run: npm ci
       - run: npm run native:build
       - run: npm run native:smoke
+      - if: runner.os == 'Windows'
+        run: npm run native:probe:crash
       - run: npm run test:native
       - run: npm run check
       - run: npm test
