@@ -56,6 +56,14 @@ test('v3 desktop metrics override the active-display DIP size for multi-monitor 
   assert.deepEqual(placements[1].size, { w: 2792, h: 1080 });
 });
 
+test('bottom layout places the peer below the host with the configured horizontal offset', () => {
+  const placements = derivePairPlacements(
+    { win: layout(1920, 1080, 1.25), mac: layout(1440, 900, 2) },
+    'win', 'mac', { ...settings, screenSide: 'bottom' },
+  );
+  assert.deepEqual(placements[1].origin, { x: 250, y: 1080 });
+});
+
 test('runtime sanitizes traffic, agrees layout, links only with peer and native support, then recovers', () => {
   const session = new FakeSession();
   const native = new FakeNative();

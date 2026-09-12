@@ -26,7 +26,8 @@ function derivePairPlacements(layouts, hostId, peerId, settings) {
   const host = placementForLayout(hostId, layouts?.[hostId]);
   const peer = placementForLayout(peerId, layouts?.[peerId]);
   if (!host || !peer) return host ? [host] : peer ? [peer] : [];
-  const peerSide = settings?.screenSide === 'right' ? 'left' : 'right';
+  const peerSide = settings?.screenSide === 'bottom'
+    ? 'bottom' : settings?.screenSide === 'right' ? 'left' : 'right';
   return layoutPair(host, peer, {
     secondSide: peerSide,
     verticalOffsetVU: Number(settings?.verticalOffsetVU) || 0,
