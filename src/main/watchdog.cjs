@@ -7,7 +7,10 @@ const HEARTBEAT_TIMEOUT_MS = 2000;
 const CHECK_INTERVAL_MS = 250;
 
 function attempt(action, errors) {
-  try { action(); } catch (error) { errors.push(error); }
+  try {
+    const result = action();
+    result?.catch?.((error) => errors.push(error));
+  } catch (error) { errors.push(error); }
 }
 
 class RecoveryWatchdog extends EventEmitter {
@@ -19,6 +22,7 @@ class RecoveryWatchdog extends EventEmitter {
     this.drag = options.drag || null;
     this.send = typeof options.send === 'function' ? options.send : () => false;
     this.onUnlinked = typeof options.onUnlinked === 'function' ? options.onUnlinked : () => {};
+    this.onResume = typeof options.onResume === 'function' ? options.onResume : () => {};
     this.now = typeof options.now === 'function' ? options.now : Date.now;
     this.heartbeatIntervalMs = options.heartbeatIntervalMs || HEARTBEAT_INTERVAL_MS;
     this.heartbeatTimeoutMs = options.heartbeatTimeoutMs || HEARTBEAT_TIMEOUT_MS;
@@ -134,8 +138,21 @@ class RecoveryWatchdog extends EventEmitter {
   bindPowerMonitor(powerMonitor) {
     if (!powerMonitor?.on) return () => {};
     const suspend = () => this.trigger('system-suspend');
+    const resume = () => {
+      const errors = [];
+      // Re-assert a safe local state after the OS restores input devices. A
+      // suspended link remains unlinked until the user deliberately enables it.
+      attempt(() => this.native.setLinked?.(false), errors);
+      attempt(() => this.native.showCursor?.(), errors);
+      attempt(() => this.native.releaseCursor?.(), errors);
+      attempt(() => this.native.releaseInputState?.(), errors);
+      attempt(() => this.onResume(), errors);
+      this.emit('resumed', { errors });
+    };
     powerMonitor.on('suspend', suspend);
+    powerMonitor.on('resume', resume);
     this.powerBindings.push([powerMonitor, 'suspend', suspend]);
+    this.powerBindings.push([powerMonitor, 'resume', resume]);
     return () => this.#unbind(this.powerBindings);
   }
 

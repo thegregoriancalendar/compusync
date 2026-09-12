@@ -454,11 +454,37 @@ test('addon panic event and suspend integration enter unlinked mode', () => {
 
   const power = new EventEmitter();
   cursor.linked = true;
-  const suspendWatchdog = new RecoveryWatchdog({ cursor });
+  const wakeCalls = [];
+  const suspendWatchdog = new RecoveryWatchdog({
+    cursor,
+    native: {
+      setLinked: (value) => wakeCalls.push(['linked', value]),
+      showCursor: () => wakeCalls.push(['show']),
+      releaseCursor: () => wakeCalls.push(['release']),
+      releaseInputState: () => wakeCalls.push(['input']),
+    },
+    onResume: () => wakeCalls.push(['layout']),
+  });
   suspendWatchdog.bindPowerMonitor(power);
   power.emit('suspend');
   assert.equal(cursor.linked, false);
+  wakeCalls.length = 0;
+  power.emit('resume');
+  assert.deepEqual(wakeCalls, [['linked', false], ['show'], ['release'], ['input'], ['layout']]);
+  assert.equal(cursor.linked, false);
   suspendWatchdog.stop({ recover: false });
+});
+
+test('async drag recovery failures are contained by the watchdog', async () => {
+  const watchdog = new RecoveryWatchdog({
+    cursor: { linked: true, setLinked() {} },
+    drag: { async restoreOnScreen() { throw new Error('Chrome quit'); } },
+  });
+  let recovered;
+  watchdog.on('recovered', (event) => { recovered = event; });
+  assert.equal(watchdog.trigger('chrome-quit'), true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(recovered.errors[0].message, 'Chrome quit');
 });
 
 test('input runtime routes only M0 messages and can be detached', () => {

@@ -91,6 +91,7 @@ class SharedInputRuntime extends EventEmitter {
         this.onModeChange(false, reason);
         this.emit('mode', { linked: false, reason });
       },
+      onResume: () => this.onLayoutNeeded(),
     });
 
     this._peerMessage = (message, peerMachineId) => this.receive(message, peerMachineId);
