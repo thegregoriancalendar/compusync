@@ -1,6 +1,28 @@
 # CompuSync design choices
 
-This document records the implementation decisions made while carrying out `HANDOFF.md`. It describes the behavior the code is intended to preserve when the implementation is changed later.
+This document records the implementation decisions made while carrying out `HANDOFF.md` and `compusync-spec-v3.md`. It describes the behavior the code is intended to preserve when the implementation is changed later.
+
+## V3 shared cursor
+
+- Each computer reports its entire native desktop as one zero-based physical-pixel rectangle plus one primary-display scale. VU is physical pixels divided by that scale. Raw OS-global window bounds remain available for Chrome/CDP joining and recovery; cursor and handoff code uses normalized bounds so negative monitor origins do not leak into shared coordinates.
+- Top-edge crossing is deliberately disabled for the macOS menu bar. Left, right, and bottom layouts are supported. The default edge resistance is zero and resistance is bypassed for an active native drag.
+- Both devices remain active. The cursor owner sums locally accelerated raw deltas with accelerated peer deltas, publishes a 60 Hz authoritative position, and owns visible cursor warping plus synthetic input. Keyboard input follows the cursor owner.
+- Ctrl/Cmd+Shift+U is the native fail-safe link toggle and Ctrl/Cmd+Shift+Y moves ownership. The native implementation owns these hotkeys so they still work if the renderer or JavaScript event loop is unhealthy.
+
+## V3 Chrome handoff
+
+- macOS uses normal Chrome plus JXA/Accessibility and asks for Automation only at the first crossing. Windows offers one explicit restart into a user-only, signed-out isolated profile because Chrome 136+ refuses remote debugging on the default profile. Only session files are migrated.
+- A descriptor UUID survives round trips. Tabs use HTTP(S)-only bounded metadata; CDP captures bounded history with at most four concurrent page sessions. Default logs contain only descriptor IDs, phases/durations, hostname, and tab count.
+- A drag arms once within 200 VU while moving toward the seam. Both native windows are driven from a fixed grab offset and the authoritative virtual cursor. A maximized/fullscreen window commits instantly; windows below 200x150 VU and non-addressable windows do not straddle.
+- Windows terminates the modal move loop at edge contact, suppresses both the tagged synthetic up and the eventual physical up from the application, and continues from raw deltas. macOS has no equivalent modal loop and uses Accessibility positioning.
+- Prepared reverse crossings stay alive for three seconds. Early destination drops wait at most two seconds. Reliable commit acknowledgement is the only event that permits source destruction. If source Chrome exits, the prepared destination becomes the survivor; other failures restore whichever copy remains.
+- The seam is a transparent, non-focusable, click-through Electron overlay. It intentionally marks native Chrome interior differences instead of attempting to make cross-OS title bars or tab strips pixel-identical.
+
+## V3 recovery
+
+- JavaScript recovery and the native in-process watchdog independently unhide/release the cursor, remove hooks, release synthetic state, restore guarded windows, and enter Unlinked mode.
+- An out-of-process guard receives an atomic recovery journal containing original raw window bounds and synthetic button/modifier masks. It performs the same OS-local cleanup after a hard process termination, without network or renderer dependencies.
+- Suspend and display changes immediately clear overlays and restore an active handoff. Wake reasserts visible, unparked, released local input and refreshes full-desktop metrics; linking remains an explicit user action after recovery.
 
 ## One logical window
 

@@ -1,8 +1,8 @@
 # CompuSync
 
-CompuSync creates one logical application window across a Windows 11 laptop and a Mac. The window can sit on either display or cross their configured seam. During a crossing, each computer renders only its adjoining crop of the same scene: there is no second full copy and the content does not resize at the seam.
+CompuSync links a Windows 11 laptop and a Mac into one cursor space and teleports supported native Chrome windows across their configured seam. During a Chrome crossing, each machine positions a real local Chrome window from the same virtual coordinates, producing a temporary aligned straddle without streaming the browser.
 
-The shared surface contains an interactive grid, a persistent host-owned workspace, and a bundled text editor that runs on the host. Files can be imported from either laptop. When the text editor is opened from the peer, its real host-rendered interface is streamed into the shared surface and mouse, keyboard, wheel, and save input is sent back to the host.
+The existing shared surface remains available with its interactive grid, persistent host-owned workspace, and bundled text editor. Files can be imported from either laptop.
 
 ## Run on both laptops
 
@@ -28,6 +28,12 @@ The host owns the authoritative session. It must remain running for the peer to 
 
 ## Move and control the shared window
 
+When linked, either laptop's mouse or trackpad moves one OS cursor. Cursor ownership crosses the configured left, right, or bottom seam; keyboard input follows the owner. The settings panel controls shared acceleration, edge resistance, layout offset, and linked mode. Ctrl/Cmd+Shift+U immediately unlinks and restores local input; Ctrl/Cmd+Shift+Y moves cursor ownership to the other laptop.
+
+Drag a normal, non-fullscreen Chrome window toward the shared edge to hand it off. CompuSync pre-warms a real offscreen Chrome window on the destination, preserves its tabs, order, pinning, active tab, geometry, and bounded history, and shows both native halves while the pointer crosses. Reversing keeps the prepared copy alive for three seconds; releasing before halfway keeps the source, while releasing after halfway commits the destination. Unsupported windows stay local and show one brief hint.
+
+On macOS, the first Chrome crossing requests Automation permission. On Windows, a normally launched Chrome cannot expose background tabs to CDP; the first crossing offers a one-time restart into CompuSync's isolated, signed-out browser profile. Declining is remembered and Chrome remains non-crossing. CompuSync never launches Chrome at startup.
+
 The frameless window has a 36-DIP shared bar at its top. Grab this bar to move the logical window. CompuSync captures relative pointer movement for the drag, so the same trackpad can continue moving after the physical OS cursor reaches a display edge.
 
 | Action | Result |
@@ -45,7 +51,7 @@ The frameless window has a 36-DIP shared bar at its top. Grab this bar to move t
 
 Either computer can start a bar drag from a visible fragment. If the source crop disappears while the button is held, CompuSync retains pointer capture in a tiny transparent local window until release. This behavior has automated Windows coverage; physical macOS and Retina validation remains in the [two-laptop checklist](docs/testing.md).
 
-Outside the CompuSync window, mouse and trackpad input behaves normally. CompuSync does not install a global input hook. A computer with no visible fragment uses **Bring window here** rather than an invisible remote drag handle.
+In Unlinked mode, CompuSync removes its global input hooks, releases any cursor parking and synthetic input, and leaves both computers fully local. A heartbeat watchdog performs the same recovery after transport loss, suspend, addon failure, or process exit.
 
 ## Use the workspace and text editor
 
@@ -102,6 +108,8 @@ Development packages are unsigned. Build and sign macOS releases on a Mac. The G
 ```sh
 npm run check       # JavaScript syntax checks
 npm test            # State, geometry, workspace, program, encryption, and network tests
+npm run test:native # Rust addon and native adapter tests
+npm run native:smoke # Load and exercise the release addon
 npm run test:e2e    # Real Electron windows and local paired-process behavior
 npm run demo        # Two isolated profiles paired over loopback
 ```
@@ -117,6 +125,9 @@ The end-to-end suite covers one-window crops and cross-seam drag transactions, P
 - `src/desktop-service.cjs` coordinates local or remote desktop requests with the host-owned services.
 - `src/programs/` contains the bundled host text editor and its offscreen program manager.
 - `src/main.cjs` integrates Electron windows, display topology, tray/menu controls, the workspace picker, and program services.
+- `src/main/cursor.cjs`, `runtime.cjs`, `drag.cjs`, and `window-runtime.cjs` own v3 cursor and native Chrome handoff state.
+- `src/main/adapters/chrome/` implements Chrome detection, CDP, Apple Automation, capture, preparation, and commit.
+- `native/` contains the napi-rs cursor/window substrate and independent crash-recovery guard.
 - `src/renderer/` renders the cropped shared world, desktop browser, streamed program interface, and settings.
 
 Implementation rationale and compatibility boundaries are recorded in [docs/DESIGN_CHOICES.md](docs/DESIGN_CHOICES.md). Current validation evidence and remaining work are in [docs/IMPLEMENTATION_REPORT.md](docs/IMPLEMENTATION_REPORT.md).
