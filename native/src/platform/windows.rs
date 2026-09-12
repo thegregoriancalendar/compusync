@@ -66,7 +66,7 @@ const MOD_NOREPEAT: u32 = 0x4000;
 const HOTKEY_UNLINK: i32 = 0x4355;
 const HOTKEY_TOGGLE_OWNER: i32 = 0x434F;
 const VK_U: u32 = 0x55;
-const VK_O: u32 = 0x4F;
+const VK_Y: u32 = 0x59;
 const COMPUSYNC_EXTRA_INFO: usize = 0x4353_594E;
 const RI_MOUSE_LEFT_BUTTON_DOWN: u16 = 0x0001;
 const RI_MOUSE_LEFT_BUTTON_UP: u16 = 0x0002;
@@ -1063,7 +1063,7 @@ impl Platform for HostPlatform {
                         hwnd,
                         HOTKEY_TOGGLE_OWNER,
                         MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT,
-                        VK_O,
+                        VK_Y,
                     ) == 0
                 {
                     let _ = sender.send(Err(os_error("RegisterHotKey")));

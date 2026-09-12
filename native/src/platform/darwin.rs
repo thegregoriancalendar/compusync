@@ -433,7 +433,7 @@ unsafe extern "C" fn event_tap(
             };
             if down
                 && flags & (CG_FLAG_COMMAND | CG_FLAG_SHIFT) == (CG_FLAG_COMMAND | CG_FLAG_SHIFT)
-                && (code == 0x18 || code == 0x12)
+                && (code == 0x18 || code == 0x1C)
             {
                 (context.sink)(NativeEvent::simple(if code == 0x18 {
                     "unlinkHotkey"
