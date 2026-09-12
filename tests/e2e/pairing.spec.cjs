@@ -16,7 +16,11 @@ test('short code pairs two laptops through automatic discovery', async () => {
     const app = await electron.launch({ args: [path.resolve('.')], env });
     apps.push(app);
     app.on('window', (page) => page.on('pageerror', (error) => errors.push(error.message)));
-    await expect.poll(() => app.windows().length, { timeout: 15_000 }).toBe(2);
+    await expect.poll(() => {
+      const urls = app.windows().map((page) => page.url());
+      return ['surface.html', 'settings.html', 'handoff-overlay.html']
+        .every((file) => urls.some((url) => url.endsWith(file)));
+    }, { timeout: 15_000 }).toBe(true);
     const settings = app.windows().find((page) => page.url().endsWith('settings.html'));
     await expect(settings.locator('#status')).toHaveText('Ready to pair');
     return { app, settings };

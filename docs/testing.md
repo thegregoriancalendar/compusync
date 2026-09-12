@@ -2,6 +2,23 @@
 
 Local Windows and hosted macOS automation cover state ordering, crop geometry, transport, workspace operations, the host text editor, and real Electron processes. They cannot prove a continuous physical Windows-to-Mac drag, Retina alignment, macOS Pointer Lock retention, firewall behavior, sleep/wake recovery, or packaged behavior on the intended Mac. Complete this checklist on the intended computers before release.
 
+## Version 3 native cursor and Chrome gate
+
+Run these checks before the earlier logical-surface checks below. Use an ordinary Chrome window with seven tabs, including two pinned tabs, duplicate URLs, and one playing video. Add two tabs after the first transfer and round-trip it again.
+
+1. Link the native cursor and cross every configured left/right/bottom seam slowly and quickly using each laptop's mouse or trackpad. Verify either device contributes motion, the owner remains authoritative, and the cursor never waits for the peer. Confirm top-edge crossing remains disabled on macOS.
+2. Cross while holding each mouse button and representative Ctrl/Alt/Shift/Meta combinations. Verify the destination sees the held state, typing follows cursor ownership, and no input remains stuck after return. Exercise Ctrl/Cmd+Shift+Y and the Ctrl/Cmd+Shift+U fail-safe while Electron's renderer is busy.
+3. Set edge resistance to zero and a nonzero value. Verify the configured push distance applies only without a drag and disappears during a native window drag.
+4. On Windows, decline the first Chrome restart offer and confirm Chrome stays local with no repeated modal. Accept on a fresh profile, confirm the isolated Chrome is signed out, and verify only its current session is restored. CompuSync must not start Chrome merely because CompuSync starts.
+5. Transfer the seven-tab window in both directions. Verify tab order, both pinned tabs, active tab, geometry, and current pages. After adding two tabs, round-trip again. Duplicate URLs must retain distinct positions. On Mac, grant Automation only when the first Chrome crossing requests it.
+6. Pause with roughly 25%, 50%, and 75% of Chrome across the seam. Frame edges must share the same VU origin while native Chrome interiors may differ. Stop, reverse before drop, cross again within three seconds, then wait beyond three seconds and verify no prepared residue remains.
+7. Confirm an unsupported or sub-200x150-VU window clamps locally while the cursor crosses and shows only the first nonblocking hint. Confirm maximized/fullscreen Chrome transfers without a live straddle.
+8. During a straddle, separately pull the network, force-quit source Chrome, force-quit destination Chrome, suspend each computer, disconnect a display, and hard-kill each CompuSync process. In every case a surviving Chrome copy must return fully on-screen, overlays and hooks must clear, held synthetic input must release, cursors must reappear within two seconds, and CompuSync must enter Unlinked mode.
+9. Repeat across multi-monitor desktops with negative/above-primary origins and mixed scale factors. Hotplug each display and verify the normalized desktop refreshes without overlap or a stranded window.
+10. On macOS, deny Accessibility, Input Monitoring, and Automation once each. Confirm every denial remains visible with the appropriate System Settings remediation path and no silent capture. On Windows, verify the elevated-window notice is nonblocking and shown once.
+
+Record default structured handoff logs for a success, reversal, and failure. They may contain descriptor ID, phase/duration, hostname, and tab count, but no full URL, title, history URL, or session token.
+
 ## Automated gate
 
 Run from a clean checkout with Node.js 22.12 or newer:
@@ -10,7 +27,9 @@ Run from a clean checkout with Node.js 22.12 or newer:
 npm ci
 npm run check
 npm test
+npm run test:native
 npm run test:e2e
+npm run build
 npm run dist:win
 # Run this on macOS:
 npm run dist:mac

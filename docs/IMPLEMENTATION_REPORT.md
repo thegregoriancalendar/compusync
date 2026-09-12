@@ -1,4 +1,36 @@
-# HANDOFF implementation report
+# CompuSync implementation report
+
+## Version 3 completion
+
+The implementation described by `compusync-spec-v3.md` is present through M0-M3. CompuSync now has a native Windows/macOS shared-cursor substrate, authenticated ownership and input routing, Chrome-only native window handoff, live straddling, race recovery, multi-monitor normalization, sleep/display recovery, native fail-safe hotkeys, edge resistance, permission remediation, bounded history handling, seam treatment, and URL-safe structured timing records.
+
+The three non-negotiable invariants are enforced independently: cursor deltas stay on the native/main-process path, a source Chrome window is not destroyed before reliable commit acknowledgement, and local recovery does not depend on the renderer, peer, or network. A redundant out-of-process recovery journal covers hard daemon termination while a window or synthetic input is guarded.
+
+### Platform paths
+
+- Windows uses explicit one-time consent to restart Chrome into a user-private, signed-out isolated profile with loopback-only CDP. A bundled fixed-ID MV3 bridge preserves exact tab order, pin state, and active state by opaque target ID, including duplicate URLs. It is loaded only into that isolated CDP session.
+- macOS controls normally launched Chrome through Apple Events and Accessibility. Chrome's public Apple Events dictionary does not expose the full navigation-entry collection; received bounded histories are therefore retained conservatively across unchanged prepared-window round trips and invalidated after navigation or reordering.
+- Normal, addressable Chrome windows can straddle. Maximized/fullscreen windows use instant transfer; undersized and unsupported windows remain local while the cursor crosses.
+
+### V3 verification
+
+- `npm run check`: passed for 74 JavaScript files.
+- `npm test`: 173/173 tests passed, including the required network-loss, Chrome-force-quit, daemon/panic, and suspend/wake recovery matrix.
+- `npm run test:native`: 9 Rust addon tests, 1 recovery-guard test, and 3 Node adapter tests passed.
+- `npm run test:e2e`: 5/5 real-Electron lifecycle, pairing, logical-surface, workspace/editor, and startup/profile scenarios passed.
+- `npm run build`: rebuilt the Windows x64 native addon and recovery guard, loaded both under Node and Electron, and produced `dist/win-unpacked`. The packaged fixed-ID Chrome bridge was verified under `app.asar.unpacked`.
+- A disposable-profile probe against installed Chrome 152 verified loopback CDP extension loading, worker activation, exact CDP target-to-tab identity, tab query/update/move, and fully offscreen window positioning without an extra tab or warning surface.
+- The Windows crash-recovery probe and native move-loop guard exercise hard termination and the tagged synthetic-button-up path. macOS uses AX moved/resized notifications rather than a polling loop.
+
+Physical two-computer acceptance remains an environment check: repeat the v3 section in `docs/testing.md` on the intended Windows and Mac hardware to validate real mixed-DPI seam alignment, held hardware input, macOS TCC prompts, and sleep/wake behavior. These paths have automated failure coverage and platform implementations; a one-machine Windows development session cannot prove their physical interaction.
+
+### V3 checkpoint commits
+
+The v3 work was committed and pushed incrementally. Major boundaries are `dac2515` (cursor core), `cd9d007` (native substrate), `cef40b4` and `456c40a` (Windows CDP and macOS Chrome), `ae51df1` (straddle/races), `78e55c9` (native move/crash recovery), `33e5c63` (mandatory failure matrix), `ddac2d7` (Mac history retention), and `b47ce71` (production Windows tab-state bridge).
+
+---
+
+## Earlier HANDOFF implementation
 
 ## Status
 
