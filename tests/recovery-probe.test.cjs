@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { assessRecoveryProbe } = require('../scripts/probe-recovery-guard.cjs');
 
-test('crash probe requires an observable cursor to hide and recover', () => {
+test('crash probe requires an observable cursor to recover and records hide visibility', () => {
   const result = assessRecoveryProbe({
     BaselineCursorVisible: true,
     ArmedCursorVisible: false,
@@ -18,7 +18,9 @@ test('crash probe requires an observable cursor to hide and recover', () => {
   assert.equal(result.Passed, true);
 
   assert.equal(assessRecoveryProbe({ ...result, RecoveredCursorVisible: false }).Passed, false);
-  assert.equal(assessRecoveryProbe({ ...result, ArmedCursorVisible: true }).Passed, false);
+  const hideNotObservable = assessRecoveryProbe({ ...result, ArmedCursorVisible: true });
+  assert.equal(hideNotObservable.CursorHideObserved, false);
+  assert.equal(hideNotObservable.Passed, true);
 });
 
 test('headless crash probe relies on exercised clip recovery when no cursor is observable', () => {

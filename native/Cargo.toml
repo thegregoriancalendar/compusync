@@ -8,10 +8,6 @@ publish = false
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-[[bin]]
-name = "compusync-recovery-guard"
-path = "src/bin/recovery_guard.rs"
-
 [dependencies]
 napi = { version = "2.16", features = ["napi8"] }
 napi-derive = "2.16"

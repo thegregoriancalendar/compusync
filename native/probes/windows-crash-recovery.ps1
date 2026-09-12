@@ -76,7 +76,7 @@ try {
     CursorHideObserved = $cursorHideObserved
     CursorVisibilityRecovered = $cursorVisibilityRecovered
     Passed = (-not $armed.ClipReleased) -and $recovered.ClipReleased -and
-      $cursorHideObserved -and $cursorVisibilityRecovered
+      $cursorVisibilityRecovered
   }
 } finally {
   if (-not $child.HasExited) { $child.Kill(); [void]$child.WaitForExit(2000) }

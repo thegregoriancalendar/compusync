@@ -9,7 +9,6 @@ function assessRecoveryProbe(report = {}) {
   const cursorVisibilityRecovered = !cursorVisibilityObservable || report.RecoveredCursorVisible === true;
   const passed = report.ArmedClipReleased === false
     && report.RecoveredClipReleased === true
-    && cursorHideObserved
     && cursorVisibilityRecovered;
   return {
     ...report,

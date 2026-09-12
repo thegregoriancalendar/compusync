@@ -27,6 +27,7 @@ const result = spawnSync(cargo, [
   'build',
   '--locked',
   '--release',
+  '--lib',
   '--manifest-path',
   path.join(nativeRoot, 'Cargo.toml'),
 ], {
@@ -45,8 +46,25 @@ if (!fs.existsSync(source)) throw new Error(`Cargo did not produce the expected 
 fs.copyFileSync(source, destination);
 console.log(`Native addon ready: ${path.relative(projectRoot, destination)}`);
 
+const guardRoot = path.join(nativeRoot, 'recovery-guard');
+const guardTargetRoot = path.join(targetRoot, 'recovery-guard');
+const guardBuild = spawnSync(cargo, [
+  'build',
+  '--locked',
+  '--release',
+  '--manifest-path',
+  path.join(guardRoot, 'Cargo.toml'),
+], {
+  cwd: projectRoot,
+  env: { ...process.env, CARGO_TARGET_DIR: guardTargetRoot },
+  stdio: 'inherit',
+});
+
+if (guardBuild.error) throw guardBuild.error;
+if (guardBuild.status !== 0) process.exit(guardBuild.status ?? 1);
+
 const guardName = `compusync-recovery-guard${process.platform === 'win32' ? '.exe' : ''}`;
-const guardSource = path.join(targetRoot, 'release', guardName);
+const guardSource = path.join(guardTargetRoot, 'release', guardName);
 const guardDestination = path.join(nativeRoot, guardName);
 if (!fs.existsSync(guardSource)) throw new Error(`Cargo did not produce the recovery guard: ${guardSource}`);
 
