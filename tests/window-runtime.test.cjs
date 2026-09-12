@@ -38,7 +38,10 @@ function runtimeFixture(options = {}) {
   chrome.adapterForId = () => adapter;
   chrome.setLinked = () => {};
   chrome.stop = () => {};
-  const runtime = new WindowHandoffRuntime({ input, native, chrome, frameMs: options.frameMs || 100000 });
+  const runtime = new WindowHandoffRuntime({
+    input, native, chrome, frameMs: options.frameMs || 100000,
+    setSeam: options.setSeam, showHint: options.showHint,
+  });
   runtime.start();
   return {
     runtime, native, nativeCalls, input, sent, positions,
@@ -159,5 +162,22 @@ test('a native display change aborts the straddle and releases its recovery guar
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(runtime.drag.active, null);
   assert.deepEqual(nativeCalls.at(-1), ['release', 'hwnd']);
+  await runtime.stop();
+});
+
+test('authoritative position drives the seam overlay and recovery clears it', async () => {
+  const seamStates = [];
+  const { runtime, input, setWindow } = runtimeFixture({ setSeam: (state) => seamStates.push(state) });
+  await runtime.handleMoveStart('hwnd');
+  input.cursor.virtualCursor = { x: 900, y: 150 };
+  await runtime.poll();
+  await runtime.drag.receive({ type: 'window.ready', id: 'window-stable' });
+  input.cursor.virtualCursor = { x: 1040, y: 180 };
+  await runtime.poll();
+  assert.equal(seamStates.at(-1).geometry.x, 940);
+
+  setWindow(null);
+  await runtime.poll();
+  assert.equal(seamStates.at(-1), null);
   await runtime.stop();
 });

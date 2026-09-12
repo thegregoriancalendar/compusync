@@ -14,6 +14,7 @@ const { DesktopService } = require('./desktop-service.cjs');
 const { cursorSettingsFromSaved, validateCursorSettings } = require('./core/cursor-preferences.cjs');
 const { SharedInputRuntime } = require('./main/runtime.cjs');
 const { WindowHandoffRuntime } = require('./main/window-runtime.cjs');
+const { SeamOverlay } = require('./main/seam-overlay.cjs');
 const { ChromeAdapterRuntime } = require('./main/adapters/chrome/runtime.cjs');
 const { createNativeAdapter } = require('../native/index.cjs');
 
@@ -26,7 +27,7 @@ app.setName('CompuSync');
 const hasLock = app.requestSingleInstanceLock();
 if (!hasLock) app.quit();
 
-let surface, settings, tray, sync, desktopService, inputRuntime, windowRuntime, nativeInput, config;
+let surface, settings, tray, sync, desktopService, inputRuntime, windowRuntime, seamOverlay, nativeInput, config;
 let quitting = false;
 let changingSession = false;
 let applyingBounds = false;
@@ -401,6 +402,8 @@ function ensureInputRuntime() {
       chrome,
       onNotice: addNotice,
       setBusy: (busy) => send(surface, 'sync:handoff-busy', Boolean(busy)),
+      setSeam: (state) => seamOverlay?.update(state, config.id),
+      showHint: (message) => seamOverlay?.showHint(message),
     });
     windowRuntime.start();
   } catch (error) {
@@ -585,6 +588,8 @@ app.on('before-quit', (event) => {
   clearTimeout(layoutTimer);
   cancelOwnedDrag();
   stopInputRuntime('process-exit');
+  seamOverlay?.destroy();
+  seamOverlay = null;
   Promise.resolve(desktopService?.stop()).finally(() => sync?.stop()).finally(() => app.quit());
   if (!sync && !desktopService) app.quit();
 });
@@ -617,6 +622,13 @@ if (hasLock) app.whenReady().then(async () => {
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
   setupIpc();
   createSurface();
+  seamOverlay = new SeamOverlay({
+    BrowserWindow, screen,
+    preloadPath: path.join(__dirname, 'preload.cjs'),
+    rendererPath: rendererPath('handoff-overlay.html'),
+    secureWindow,
+  });
+  seamOverlay.create();
   createTray();
   screen.on('display-added', scheduleLayoutUpdate);
   screen.on('display-removed', scheduleLayoutUpdate);

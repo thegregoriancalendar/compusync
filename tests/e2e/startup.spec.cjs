@@ -36,7 +36,9 @@ test('pairing reappears with a saved profile and when reopening an app left in t
     await app.evaluate(({ BrowserWindow }) => {
       for (const window of BrowserWindow.getAllWindows()) window.close();
     });
-    await expect.poll(() => app.windows().length).toBe(1);
+    // The hidden handoff treatment is a persistent, click-through renderer;
+    // closing user windows leaves it and the hidden shared surface alive.
+    await expect.poll(() => app.windows().length).toBe(2);
 
     // Launch the actual second process, exercising Electron's single-instance
     // forwarding rather than synthesizing the application event.
@@ -61,8 +63,12 @@ test('background launch stays hidden until the user activates it', async () => {
     app = await electron.launch({ args: [path.resolve('.'), '--background'], env: environment(profile) });
     const page = await app.firstWindow();
     await expect.poll(() => page.evaluate(async () => (await window.compusync.bootstrap()).status.phase), { timeout: 15_000 }).toBe('hosting');
+    await expect.poll(() => app.evaluate(({ BrowserWindow }) => {
+      const overlay = BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith('handoff-overlay.html'));
+      return overlay ? { visible: overlay.isVisible(), focusable: overlay.isFocusable() } : null;
+    })).toEqual({ visible: false, focusable: false });
     expect(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().some((window) => window.isVisible()))).toBe(false);
-    expect(app.windows().length).toBe(1);
+    expect(app.windows().length).toBe(2);
     await app.evaluate(({ app: application }) => application.emit('activate'));
     await setupWindow(app);
   } finally {

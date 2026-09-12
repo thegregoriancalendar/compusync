@@ -46,6 +46,8 @@ class WindowHandoffRuntime extends EventEmitter {
     this.chrome = options.chrome;
     this.onNotice = typeof options.onNotice === 'function' ? options.onNotice : () => {};
     this.setBusy = typeof options.setBusy === 'function' ? options.setBusy : () => {};
+    this.setSeam = typeof options.setSeam === 'function' ? options.setSeam : () => {};
+    this.showHint = typeof options.showHint === 'function' ? options.showHint : () => {};
     this.frameMs = options.frameMs || WINDOW_FRAME_MS;
     this.started = false;
     this.polling = false;
@@ -78,15 +80,17 @@ class WindowHandoffRuntime extends EventEmitter {
       if (this.drag.active) void this.#restoreSafely('display-changed');
     };
     this._serviceError = (error) => this.#noticeError(error);
-    this.drag.on('hint', () => this.onNotice({
-      id: 'non-crossing-window', kind: 'info', title: 'This window stays here',
-      message: 'Only Chrome windows with available handoff access can cross between laptops.', dismissible: true,
-    }));
+    this.drag.on('hint', () => this.showHint('This window stays here. Only supported Chrome windows can cross between laptops.'));
+    this.drag.on('position', (state) => this.setSeam(state));
     this.drag.on('abort', ({ reason }) => {
+      this.setSeam(null);
       this.#settleSource();
       if (!['peer-abort', 'late-ready'].includes(reason)) this.#noticeError(Object.assign(new Error('The source Chrome window was kept in place.'), { code: reason }));
     });
-    this.drag.on('committed', () => this.#settleSource());
+    this.drag.on('committed', () => {
+      this.setSeam(null);
+      this.#settleSource();
+    });
   }
 
   start() {
@@ -163,12 +167,13 @@ class WindowHandoffRuntime extends EventEmitter {
     await this.poll();
     const geometryVU = this.drag.active?.geometry;
     const ended = await this.drag.end({ geometryVU });
+    this.setSeam(this.drag.snapshot());
     if (!this.drag.active) this.#settleSource();
     return ended;
   }
 
   async stop(reason = 'window-runtime-stop') {
-    if (!this.started) return;
+    if (!this.started) { this.setSeam(null); return; }
     this.started = false;
     clearInterval(this.pollTimer);
     this.pollTimer = null;
@@ -180,6 +185,7 @@ class WindowHandoffRuntime extends EventEmitter {
     this.chrome.off?.('error', this._serviceError);
     this.input.setWindowController(null);
     await this.drag.abort(reason);
+    this.setSeam(null);
     this.#settleSource();
     this.chrome.stop();
   }

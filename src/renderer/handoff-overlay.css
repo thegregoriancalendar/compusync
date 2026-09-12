@@ -1,0 +1,20 @@
+:root { color-scheme: light; background: transparent; }
+* { box-sizing: border-box; }
+html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; pointer-events: none; }
+#seam { display: none; width: 100%; height: 100%; }
+body[data-mode="seam"] #seam { display: block; }
+body[data-mode="seam"][data-edge="right"] #seam {
+  background: linear-gradient(90deg, transparent 0%, #7ea3d229 30%, #d9edffb8 48%, #5f80a78a 50%, #d9edffb8 52%, #7ea3d229 70%, transparent 100%);
+}
+body[data-mode="seam"][data-edge="left"] #seam {
+  background: linear-gradient(90deg, transparent 0%, #7ea3d229 30%, #d9edffb8 48%, #5f80a78a 50%, #d9edffb8 52%, #7ea3d229 70%, transparent 100%);
+}
+body[data-mode="seam"][data-edge="bottom"] #seam {
+  background: linear-gradient(180deg, transparent 0%, #7ea3d229 30%, #d9edffb8 48%, #5f80a78a 50%, #d9edffb8 52%, #7ea3d229 70%, transparent 100%);
+}
+#hint { display: none; width: 100%; height: 100%; align-items: center; justify-content: center; padding: 10px 16px; border: 1px solid #aebdce; border-radius: 10px; color: #304057; background: #fffffff2; box-shadow: 0 8px 26px #22304738; font: 600 12px/1.35 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; text-align: center; }
+body[data-mode="hint"] #hint { display: flex; }
+@media (prefers-reduced-motion: no-preference) {
+  body[data-mode="hint"] #hint { animation: appear 140ms ease-out; }
+  @keyframes appear { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+}

@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('compusync', {
   onConnection: (callback) => subscribe('sync:connection', callback),
   onRelease: (callback) => subscribe('sync:release', callback),
   onHandoffBusy: (callback) => subscribe('sync:handoff-busy', callback),
+  onHandoffOverlay: (callback) => subscribe('sync:handoff-overlay', callback),
   desktop: {
     bootstrap: () => ipcRenderer.invoke('desktop:bootstrap'),
     list: (workspacePath = '') => ipcRenderer.invoke('desktop:command', 'list', { path: workspacePath }),
