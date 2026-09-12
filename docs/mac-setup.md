@@ -35,6 +35,18 @@ When the surface is entirely on the other computer, use **Bring window here** fr
 
 Within the desktop, moving controls the shared cursor. Click the desktop for continuous relative input and press Escape to release it. `Cmd+,` opens settings, `Cmd+W` closes the shared surface, `Cmd+Shift+O` opens it, and `Cmd+Shift+Enter` brings it to the Mac.
 
+## Chrome history limitation
+
+Chrome's public Apple Events interface exposes a tab's current URL, title, and
+loading state, but not its back/forward navigation entries or current history
+index. CompuSync does not ask you to enable Chrome's disabled-by-default
+**JavaScript from Apple Events** setting. When a history-bearing window arrives
+from Windows, CompuSync retains that bounded history metadata for a later round
+trip while each prepared tab remains at the same indexed URL. Navigating or
+rearranging a tab on the Mac discards its retained metadata instead of restoring
+a stale history. Chrome's native Back/Forward stack cannot be exactly recreated
+or inspected through Apple Events alone.
+
 ## Import and edit files
 
 - Select **Import** to choose files from the Mac, or drop files or directories into the desktop. If Windows hosts, Mac imports are copied over the encrypted data channel into the Windows profile's workspace.

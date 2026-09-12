@@ -2,7 +2,11 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { createAppleChromeAdapter } = require('../src/main/adapters/chrome/apple.cjs');
+const {
+  MAX_PREPARED_DESCRIPTORS,
+  createAppleChromeAdapter,
+  rememberPreparedDescriptor,
+} = require('../src/main/adapters/chrome/apple.cjs');
 
 function resultFor(script, values) {
   if (script.includes('compusync:chrome:capture')) return JSON.stringify(values.capture);
@@ -76,6 +80,74 @@ test('capture matches a native window, preserves tab data, and reuses prepared d
   assert.equal(permissionRequests, 1);
   assert.equal(calls[0].file, '/usr/bin/osascript');
   assert.deepEqual(calls[0].args.slice(0, 3), ['-l', 'JavaScript', '-e']);
+  assert.doesNotMatch(calls[0].args[3], /\.execute\s*\(|javascript\s*:/i);
+});
+
+test('prepared Apple window retains received all-tab history for an unchanged round trip', async () => {
+  const nativeWindow = {
+    id: 'ax:prepared', processName: 'Google Chrome', visible: true,
+    title: 'Active', bounds: { x: 10, y: 20, width: 800, height: 600 },
+  };
+  let captureValue = capturedWindow;
+  const calls = [];
+  const adapter = createAppleChromeAdapter({
+    machineId: 'mac-b', sleep: async () => {},
+    native: {
+      enumerateWindows: () => [nativeWindow],
+      setWindowBoundsNormalized() {},
+    },
+    requestAutomation: () => true,
+    execFile: (file, args, options, callback) => {
+      calls.push({ file, args, options });
+      const script = args[3];
+      callback(null, resultFor(script, {
+        capture: [captureValue],
+        prepare: { chromeWindowId: '41', chromeWindowIndex: 1, title: 'Active', bounds: [10, 20, 810, 620] },
+      }), '');
+    },
+  });
+  const histories = [
+    { currentIndex: 1, entries: ['https://before-first.example/', 'https://first.example/'] },
+    { currentIndex: 1, entries: ['https://before-active.example/', 'https://active.example/'] },
+    { currentIndex: 1, entries: ['https://before-last.example/', 'https://last.example/'] },
+  ];
+  const descriptor = {
+    schemaVersion: 1, id: 'round-trip-history', adapterId: 'chrome', origin: 'win-a', capturedAt: 1,
+    geometryVU: { x: 0, y: 0, w: 800, h: 600 }, state: 'normal',
+    payload: {
+      activeIdx: 1,
+      tabs: capturedWindow.tabs.map((tab, index) => ({ ...tab, pinned: Boolean(tab.pinned), history: histories[index] })),
+    },
+  };
+  await adapter.prepare(descriptor, { x: -900, y: 20, width: 800, height: 600 });
+  const unchanged = await adapter.capture(nativeWindow, descriptor.geometryVU);
+  assert.equal(unchanged.id, descriptor.id);
+  assert.deepEqual(unchanged.payload.tabs.map(({ history }) => history), histories);
+
+  // Matching by both canonical index and URL is intentionally conservative:
+  // navigation or pinned-tab reordering invalidates only the stale entries.
+  captureValue = {
+    ...capturedWindow,
+    tabs: capturedWindow.tabs.map((tab, index) => index === 1
+      ? { ...tab, url: 'https://navigated.example/' } : tab),
+  };
+  const navigated = await adapter.capture(nativeWindow, descriptor.geometryVU);
+  assert.equal('history' in navigated.payload.tabs[1], false);
+  assert.deepEqual(navigated.payload.tabs[0].history, histories[0]);
+});
+
+test('prepared history metadata cache evicts oldest identities at its fixed bound', () => {
+  const records = new Map();
+  for (let index = 0; index <= MAX_PREPARED_DESCRIPTORS; index += 1) {
+    rememberPreparedDescriptor(records, `window-${index}`, { id: `window-${index}` });
+  }
+  assert.equal(records.size, MAX_PREPARED_DESCRIPTORS);
+  assert.equal(records.has('window-0'), false);
+  assert.equal(records.has('window-1'), true);
+  rememberPreparedDescriptor(records, 'window-1', { id: 'window-1', refreshed: true });
+  rememberPreparedDescriptor(records, 'window-final', { id: 'window-final' });
+  assert.equal(records.has('window-2'), false);
+  assert.equal(records.get('window-1').refreshed, true);
 });
 
 test('prepare creates active URL first, finds the real native window, and moves it offscreen', async () => {

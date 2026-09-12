@@ -10,6 +10,7 @@ const CAPTURE_MARKER = '/* compusync:chrome:capture */';
 const CREATE_MARKER = '/* compusync:chrome:prepare:create */';
 const POPULATE_MARKER = '/* compusync:chrome:prepare:populate */';
 const CLOSE_MARKER = '/* compusync:chrome:close */';
+const MAX_PREPARED_DESCRIPTORS = 200;
 
 class AppleChromeError extends Error {
   constructor(code, message) {
@@ -214,6 +215,36 @@ function stableDescriptorId(value, explicit) {
   return typeof candidate === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(candidate) ? candidate : null;
 }
 
+// Chrome's public Apple Events dictionary exposes only the current URL for a
+// tab. It offers go-back/go-forward commands, but no navigation-entry list or
+// current history index. Preserve history metadata received while preparing a
+// window only while the same indexed tab remains on that exact current URL.
+// This makes a Windows -> Mac -> Windows round trip lossless without enabling
+// Chrome's disabled-by-default "JavaScript from Apple Events" preference, and
+// deliberately drops stale metadata after the user navigates or rearranges.
+function retainPreparedHistories(tabs, descriptor) {
+  if (!Array.isArray(tabs) || !Array.isArray(descriptor?.payload?.tabs)) return tabs;
+  const priorByIndex = new Map(descriptor.payload.tabs.map((tab) => [tab.index, tab]));
+  return tabs.map((tab) => {
+    const prior = priorByIndex.get(tab.index);
+    if (!prior?.history || prior.url !== tab.url) return tab;
+    return {
+      ...tab,
+      history: {
+        currentIndex: prior.history.currentIndex,
+        entries: [...prior.history.entries],
+      },
+    };
+  });
+}
+
+function rememberPreparedDescriptor(records, id, descriptor, limit = MAX_PREPARED_DESCRIPTORS) {
+  if (!(records instanceof Map) || typeof id !== 'string' || !descriptor) return;
+  records.delete(id);
+  records.set(id, descriptor);
+  while (records.size > limit) records.delete(records.keys().next().value);
+}
+
 function normalizeExecResult(stdout, stderr) {
   if (stdout && typeof stdout === 'object' && !Buffer.isBuffer(stdout)) {
     return { stdout: String(stdout.stdout ?? ''), stderr: String(stdout.stderr ?? '') };
@@ -269,6 +300,7 @@ function createAppleChromeAdapter(options = {}) {
   let automationState = 'unrequested';
   let automationRequest;
   const descriptorIds = new Map();
+  const preparedDescriptors = new Map();
 
   async function ensureAutomation() {
     if (automationState === 'denied') throw new AppleChromeError('CHROME_AUTOMATION_DENIED', AUTOMATION_HELP);
@@ -363,7 +395,7 @@ function createAppleChromeAdapter(options = {}) {
     const id = stableDescriptorId(nativeWindow, stableInput)
       || descriptorIds.get(String(nativeId(nativeWindow)))
       || makeUuid();
-    return {
+    const descriptor = {
       schemaVersion: 1,
       id,
       adapterId: 'chrome',
@@ -373,8 +405,10 @@ function createAppleChromeAdapter(options = {}) {
       // The wire schema has no separate fullscreen state; both states use the
       // required non-straddling/instant-commit path.
       state: nativeWindow?.maximized || nativeWindow?.fullscreen ? 'maximized' : 'normal',
-      payload: { activeIdx, tabs },
+      payload: { activeIdx, tabs: retainPreparedHistories(tabs, preparedDescriptors.get(id)) },
     };
+    rememberPreparedDescriptor(preparedDescriptors, id, descriptor);
+    return descriptor;
   }
 
   async function findPreparedNativeWindow(beforeIds, appleResult) {
@@ -438,6 +472,7 @@ function createAppleChromeAdapter(options = {}) {
       throw error;
     }
     descriptorIds.set(String(preparedWindow.id), descriptor.id);
+    rememberPreparedDescriptor(preparedDescriptors, descriptor.id, descriptor);
     return handle;
   }
 
@@ -457,16 +492,24 @@ function createAppleChromeAdapter(options = {}) {
   async function close(handle) {
     // Chrome's Automation identity is more stable than the AX array index and
     // lets Chrome dispose of the whole window (including every prepared tab).
+    const descriptorId = stableDescriptorId(handle);
     if (handle?.chromeWindowId || handle?.chromeWindowIndex) {
       try { await runJxa(closeScript(handle), 'CHROME_CLOSE_FAILED'); }
-      finally { descriptorIds.delete(String(nativeId(handle))); }
+      finally {
+        descriptorIds.delete(String(nativeId(handle)));
+        if (descriptorId) preparedDescriptors.delete(descriptorId);
+      }
       return;
     }
     const id = nativeId(handle);
     if (!id || typeof native.closeWindow !== 'function') {
       throw new AppleChromeError('CHROME_NATIVE_WINDOW_UNAVAILABLE', 'Compusync cannot close the Chrome handoff window.');
     }
-    try { await native.closeWindow(id); descriptorIds.delete(String(id)); }
+    try {
+      await native.closeWindow(id);
+      descriptorIds.delete(String(id));
+      if (descriptorId) preparedDescriptors.delete(descriptorId);
+    }
     catch { throw new AppleChromeError('CHROME_CLOSE_FAILED', 'Compusync could not close the Chrome handoff window.'); }
   }
 
@@ -483,6 +526,9 @@ function createAppleChromeAdapter(options = {}) {
 
 module.exports = {
   APP_NAME,
+  MAX_PREPARED_DESCRIPTORS,
   AppleChromeError,
+  rememberPreparedDescriptor,
+  retainPreparedHistories,
   createAppleChromeAdapter,
 };
