@@ -117,6 +117,7 @@ test('CDP keeps a browser socket, caches target grouping, joins native geometry,
   });
   await client.connect();
   assert.equal(MockWebSocket.instances.length, 1);
+  await client.browserCommand('Target.getTargets', {});
   const groups = await client.groupTabsByWindow();
   assert.deepEqual(groups.map(({ windowId }) => windowId), [9, 10]);
   await client.groupTabsByWindow(targets.slice(0, 2));

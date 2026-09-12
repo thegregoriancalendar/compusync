@@ -301,6 +301,10 @@ class ChromeCdp extends EventEmitter {
     return this.browser.command(method, params, options);
   }
 
+  browserCommand(method, params = {}, options) {
+    return this._command(method, params, options);
+  }
+
   async _fetchJson(path) {
     if (typeof this.fetch !== 'function') throw new TypeError('fetch is required.');
     const controller = new AbortController();
