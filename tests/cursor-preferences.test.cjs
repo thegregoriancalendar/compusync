@@ -11,6 +11,7 @@ const {
 test('cursor settings default to Mac left, Windows right, linked, and no edge resistance', () => {
   assert.equal(defaultCursorSettings('darwin').screenSide, 'left');
   assert.equal(defaultCursorSettings('win32').screenSide, 'right');
+  assert.equal(cursorSettingsFromSaved({ screenSide: 'bottom' }).screenSide, 'bottom');
   assert.equal(defaultCursorSettings('win32').edgeResistanceVU, 0);
   assert.equal(defaultCursorSettings('win32').linked, true);
 });
@@ -40,5 +41,5 @@ test('renderer cursor settings are strictly validated', () => {
   });
   assert.equal(settings.edgeResistanceVU, 50);
   assert.throws(() => validateCursorSettings({ ...settings, edgeResistanceVU: 1001 }), /between 0 and 1000/);
-  assert.throws(() => validateCursorSettings({ ...settings, screenSide: 'top' }), /left or right/);
+  assert.throws(() => validateCursorSettings({ ...settings, screenSide: 'top' }), /left, right, or bottom/);
 });

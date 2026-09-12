@@ -1,6 +1,6 @@
 'use strict';
 
-const SCREEN_SIDES = Object.freeze(['left', 'right']);
+const SCREEN_SIDES = Object.freeze(['left', 'right', 'bottom']);
 const LIMITS = Object.freeze({
   verticalOffsetVU: Object.freeze({ min: -10000, max: 10000 }),
   base: Object.freeze({ min: 0.05, max: 8 }),
@@ -49,7 +49,7 @@ function assertNumber(name, value, limits) {
 
 function validateCursorSettings(value) {
   if (!value || typeof value !== 'object' || !SCREEN_SIDES.includes(value.screenSide)) {
-    throw new Error('Choose whether this laptop is on the left or right.');
+    throw new Error('Choose whether this laptop is on the left, right, or bottom.');
   }
   if (!value.acceleration || typeof value.acceleration !== 'object') throw new Error('Enter valid pointer acceleration settings.');
   return {
