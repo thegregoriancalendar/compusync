@@ -53,6 +53,11 @@ test('native device-pixel window geometry converts to the shared VU placement', 
   assert.deepEqual(geometryToVU({ bounds: { x: 200, y: 100, width: 800, height: 600 } },
     { origin: { x: 1000, y: 50 }, size: { w: 1000, h: 800 }, scale: 2 }),
   { x: 1100, y: 100, w: 400, h: 300 });
+  assert.deepEqual(geometryToVU({
+    bounds: { x: -1800, y: 50, width: 800, height: 600 },
+    normalizedBounds: { x: 120, y: 50, width: 800, height: 600 },
+  }, { origin: { x: 0, y: 0 }, size: { w: 3584, h: 1440 }, scale: 1.25 }),
+  { x: 96, y: 40, w: 640, h: 480 });
 });
 
 test('native move events poll at the drag boundary and emit one Chrome offer', async () => {
@@ -89,7 +94,11 @@ test('native move events poll at the drag boundary and emit one Chrome offer', a
 });
 
 test('source edge contact terminates the Windows native move loop exactly once and keeps polling', async () => {
-  const fixture = runtimeFixture();
+  const fixture = runtimeFixture({ window: {
+    id: 'hwnd', processName: 'chrome.exe',
+    bounds: { x: -1220, y: -800, width: 400, height: 300 },
+    normalizedBounds: { x: 700, y: 100, width: 400, height: 300 },
+  } });
   const { runtime, input, native, nativeCalls } = fixture;
   assert.equal(await runtime.handleMoveStart('hwnd'), true);
 
@@ -98,7 +107,7 @@ test('source edge contact terminates the Windows native move loop exactly once a
   input.cursor.virtualCursor = { x: 1000, y: 150 };
   await runtime.poll();
   assert.deepEqual(nativeCalls.slice(0, 2), [
-    ['guard', 'hwnd', { x: 700, y: 100, width: 400, height: 300 }],
+    ['guard', 'hwnd', { x: -1220, y: -800, width: 400, height: 300 }],
     ['terminate', 'hwnd'],
   ]);
 

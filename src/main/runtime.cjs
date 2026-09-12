@@ -10,6 +10,13 @@ const { routePeerInput } = require('./input-runtime.cjs');
 const { placementFromDisplays, layoutPair } = require('./virtualspace.cjs');
 
 function placementForLayout(machineId, layout) {
+  if (layout?.desktop) {
+    const { widthVU, heightVU, scale } = layout.desktop;
+    if ([widthVU, heightVU, scale].every((value) => typeof value === 'number' && Number.isFinite(value))
+      && widthVU > 0 && heightVU > 0 && scale > 0) {
+      return { machineId, origin: { x: 0, y: 0 }, size: { w: widthVU, h: heightVU }, scale };
+    }
+  }
   if (!layout?.displays?.length) return null;
   try { return placementFromDisplays(machineId, layout.displays); }
   catch { return null; }

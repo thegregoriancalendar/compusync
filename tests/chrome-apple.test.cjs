@@ -92,7 +92,8 @@ test('prepare creates active URL first, finds the real native window, and moves 
         const oldAfter = { ...oldBefore, id: 'ax:2:1' };
         return enumerations === 1 ? [oldBefore] : [fresh, oldAfter];
       },
-      setWindowBounds: (id, bounds) => boundsCalls.push({ id, bounds }),
+      setWindowBounds: () => { throw new Error('raw setter must not receive VU-derived bounds'); },
+      setWindowBoundsNormalized: (id, bounds) => boundsCalls.push({ id, bounds }),
       focusWindow: (id) => boundsCalls.push({ focus: id }),
     },
     requestAutomation: () => true,

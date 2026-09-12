@@ -12,6 +12,72 @@ const CANDIDATES = [
   path.join(__dirname, 'target', 'release', 'compusync_native.node'),
 ].filter(Boolean);
 
+const finite = (value) => typeof value === 'number' && Number.isFinite(value);
+
+function coordinateSpace(displays, platformName = process.platform) {
+  if (!Array.isArray(displays) || !displays.length) throw new TypeError('At least one native display is required.');
+  let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+  for (const display of displays) {
+    const bounds = display?.bounds;
+    if (![bounds?.x, bounds?.y, bounds?.width, bounds?.height].every(finite)
+      || bounds.width <= 0 || bounds.height <= 0) throw new TypeError('Native display bounds are invalid.');
+    left = Math.min(left, bounds.x);
+    top = Math.min(top, bounds.y);
+    right = Math.max(right, bounds.x + bounds.width);
+    bottom = Math.max(bottom, bounds.y + bounds.height);
+  }
+  const primary = displays.find((display) => display.primary) || displays[0];
+  // Win32 cursor/window coordinates are physical desktop pixels in the DPI-
+  // aware addon. CoreGraphics and AX coordinates are logical points, so the
+  // native boundary is where Retina pixels must be converted.
+  const scale = platformName === 'darwin' ? Number(primary.scale) : 1;
+  if (!finite(scale) || scale <= 0 || scale > 8) throw new TypeError('Native display scale is invalid.');
+  return Object.freeze({ x: left, y: top, width: right - left, height: bottom - top, scale });
+}
+
+function validPoint(value) {
+  if (!value || !finite(value.x) || !finite(value.y)) throw new TypeError('Native point must be finite.');
+  return value;
+}
+
+function validBounds(value) {
+  validPoint(value);
+  if (!finite(value.width) || !finite(value.height) || value.width <= 0 || value.height <= 0) {
+    throw new TypeError('Native bounds must have a positive finite size.');
+  }
+  return value;
+}
+
+function validSpace(value) {
+  if (!value || !finite(value.x) || !finite(value.y) || !finite(value.scale)
+    || value.scale <= 0 || value.scale > 8) throw new TypeError('Native coordinate space is invalid.');
+  return value;
+}
+
+function toNormalizedPoint(point, space) {
+  validPoint(point);
+  validSpace(space);
+  return { x: (point.x - space.x) * space.scale, y: (point.y - space.y) * space.scale };
+}
+
+function toPlatformPoint(point, space) {
+  validPoint(point);
+  validSpace(space);
+  return { x: point.x / space.scale + space.x, y: point.y / space.scale + space.y };
+}
+
+function toNormalizedBounds(bounds, space) {
+  validBounds(bounds);
+  const origin = toNormalizedPoint(bounds, space);
+  return { ...origin, width: bounds.width * space.scale, height: bounds.height * space.scale };
+}
+
+function toPlatformBounds(bounds, space) {
+  validBounds(bounds);
+  const origin = toPlatformPoint(bounds, space);
+  return { ...origin, width: bounds.width / space.scale, height: bounds.height / space.scale };
+}
+
 function loadBinding() {
   const failures = [];
   for (const candidate of CANDIDATES) {
@@ -54,12 +120,19 @@ class FallbackNativeAdapter extends EventEmitter {
   setLinked() {}
   displayMetrics() { return []; }
   enumerateWindows() { return []; }
+  enumerateWindowsNormalized() { return []; }
   setWindowBounds() {}
+  setWindowBoundsNormalized(id, bounds) { return this.setWindowBounds(id, bounds); }
   focusWindow() {}
   closeWindow() {}
   guardWindow() {}
   releaseWindowGuard() {}
   terminateMoveLoop() {}
+  refreshCoordinateSpace() { return null; }
+  toNormalizedPoint(point) { return { ...validPoint(point) }; }
+  toPlatformPoint(point) { return { ...validPoint(point) }; }
+  toNormalizedBounds(bounds) { return { ...validBounds(bounds) }; }
+  toPlatformBounds(bounds) { return { ...validBounds(bounds) }; }
 }
 
 class NativeAdapter extends EventEmitter {
@@ -71,6 +144,7 @@ class NativeAdapter extends EventEmitter {
     this.platformName = this.substrate.platformName;
     this.handlers = {};
     this.callbackInstalled = false;
+    this._coordinateSpace = null;
     this.guardPath = path.join(path.dirname(bindingPath), `compusync-recovery-guard${process.platform === 'win32' ? '.exe' : ''}`);
   }
 
@@ -88,7 +162,10 @@ class NativeAdapter extends EventEmitter {
         } else if (event.kind === 'recovered') this.emit('recovered', event);
         else if (event.kind === 'unlinkHotkey') this.emit('unlinkHotkey');
         else if (event.kind === 'toggleOwnershipHotkey') this.emit('toggleOwnershipHotkey');
-        else if (event.kind === 'displayChanged') this.emit('displayChanged');
+        else if (event.kind === 'displayChanged') {
+          this._coordinateSpace = null;
+          this.emit('displayChanged');
+        }
       else if (event.kind === 'moveSizeStart' || event.kind === 'moveSizeEnd') {
         this.emit(event.kind, event.windowId ?? event.window_id);
       }
@@ -104,8 +181,8 @@ class NativeAdapter extends EventEmitter {
   hideCursor() { return this.substrate.hideCursor(); }
   parkCursor() { return this.substrate.parkCursor(); }
   releaseCursor() { return this.substrate.releaseCursor(); }
-  warpCursor(point) { return this.substrate.warpCursor(point); }
-  cursorPosition() { return this.substrate.cursorPosition(); }
+  warpCursor(point) { return this.substrate.warpCursor(this.toPlatformPoint(point)); }
+  cursorPosition() { return this.toNormalizedPoint(this.substrate.cursorPosition()); }
   assumeInputState(buttons, modifiers) { return this.substrate.assumeInputState(buttons >>> 0, modifiers >>> 0); }
   synthesizeButton(button, down) { return this.substrate.synthesizeButton(button, Boolean(down)); }
   synthesizeKey(code, down, modifiers = 0) { return this.substrate.synthesizeKey(code >>> 0, Boolean(down), modifiers >>> 0); }
@@ -118,8 +195,34 @@ class NativeAdapter extends EventEmitter {
   heartbeat() { return this.substrate.heartbeat(); }
   setLinked(linked) { return this.substrate.setLinked(Boolean(linked)); }
   displayMetrics() { return this.substrate.displayMetrics(); }
-  enumerateWindows() { return this.substrate.enumerateWindows(); }
+  coordinateSpace(displays) {
+    if (displays) return coordinateSpace(displays, this.platformName);
+    if (!this._coordinateSpace) this._coordinateSpace = coordinateSpace(this.displayMetrics(), this.platformName);
+    return this._coordinateSpace;
+  }
+  refreshCoordinateSpace() {
+    this._coordinateSpace = coordinateSpace(this.displayMetrics(), this.platformName);
+    return this._coordinateSpace;
+  }
+  toNormalizedPoint(point, displays) { return toNormalizedPoint(point, this.coordinateSpace(displays)); }
+  toPlatformPoint(point, displays) { return toPlatformPoint(point, this.coordinateSpace(displays)); }
+  toNormalizedBounds(bounds, displays) { return toNormalizedBounds(bounds, this.coordinateSpace(displays)); }
+  toPlatformBounds(bounds, displays) { return toPlatformBounds(bounds, this.coordinateSpace(displays)); }
+  enumerateWindows() {
+    const windows = this.substrate.enumerateWindows();
+    const space = this.coordinateSpace();
+    return windows.map((window) => ({
+      ...window,
+      // Keep `bounds` in raw OS-global coordinates: Chrome CDP window matching
+      // relies on it. New VU-aware callers must opt into normalizedBounds.
+      normalizedBounds: toNormalizedBounds(window.bounds, space),
+    }));
+  }
+  enumerateWindowsNormalized() {
+    return this.enumerateWindows().map((window) => ({ ...window, bounds: window.normalizedBounds }));
+  }
   setWindowBounds(id, bounds) { return this.substrate.setWindowBounds(id, bounds); }
+  setWindowBoundsNormalized(id, bounds) { return this.substrate.setWindowBounds(id, this.toPlatformBounds(bounds)); }
   focusWindow(id) { return this.substrate.focusWindow(id); }
   closeWindow(id) { return this.substrate.closeWindow(id); }
   guardWindow(id, bounds) { return this.substrate.guardWindow(id, bounds); }
@@ -141,4 +244,14 @@ function createNativeAdapter(options = {}) {
   return new NativeAdapter(loaded.binding, loaded.path);
 }
 
-module.exports = { createNativeAdapter, loadBinding, NativeAdapter, FallbackNativeAdapter };
+module.exports = {
+  createNativeAdapter,
+  loadBinding,
+  NativeAdapter,
+  FallbackNativeAdapter,
+  coordinateSpace,
+  toNormalizedPoint,
+  toPlatformPoint,
+  toNormalizedBounds,
+  toPlatformBounds,
+};

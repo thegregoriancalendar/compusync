@@ -29,6 +29,15 @@ function contains(outer, inner) {
     && inner.y + inner.height <= outer.y + outer.height;
 }
 
+function normalizeDesktop(desktop) {
+  if (desktop == null) return null;
+  if (!finite(desktop.widthVU) || !finite(desktop.heightVU)
+    || desktop.widthVU < 1 || desktop.heightVU < 1
+    || desktop.widthVU > MAX_VIRTUAL_COORDINATE || desktop.heightVU > MAX_VIRTUAL_COORDINATE
+    || !finite(desktop.scale) || desktop.scale < .25 || desktop.scale > 8) return false;
+  return { widthVU: desktop.widthVU, heightVU: desktop.heightVU, scale: desktop.scale };
+}
+
 // Layout reports use Electron DIP coordinates. More than one display may be
 // reported so the wire format can grow without another schema change, while
 // activeDisplayId selects the single display participating in this topology.
@@ -39,6 +48,8 @@ function normalizeLayout(layout) {
     || !Array.isArray(layout.displays) || !layout.displays.length
     || layout.displays.length > MAX_DISPLAYS_PER_MEMBER) return null;
 
+  const desktop = normalizeDesktop(layout.desktop);
+  if (desktop === false) return null;
   const ids = new Set();
   const displays = [];
   for (const display of layout.displays) {
@@ -63,6 +74,7 @@ function normalizeLayout(layout) {
     edge: layout.edge,
     activeDisplayId: layout.activeDisplayId,
     displays,
+    ...(desktop ? { desktop } : {}),
   };
 }
 

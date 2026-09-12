@@ -27,8 +27,7 @@ function writeHandoffLog(logger, event, details) {
   try { method.call(logger, event, sanitizeHandoffLog(details)); } catch { /* Logging cannot interrupt handoff. */ }
 }
 
-function boundsOf(window) {
-  const bounds = window?.bounds;
+function normalizeBounds(bounds) {
   if (!bounds) return null;
   const x = Number(bounds.x), y = Number(bounds.y);
   const width = Number(bounds.width ?? bounds.w), height = Number(bounds.height ?? bounds.h);
@@ -36,8 +35,14 @@ function boundsOf(window) {
     ? { x, y, width, height } : null;
 }
 
+function boundsOf(window) { return normalizeBounds(window?.bounds); }
+
+function normalizedBoundsOf(window) {
+  return normalizeBounds(window?.normalizedBounds) || boundsOf(window);
+}
+
 function geometryToVU(window, placement) {
-  const bounds = boundsOf(window);
+  const bounds = normalizedBoundsOf(window);
   if (!bounds || !placement || !Number.isFinite(placement.scale) || placement.scale <= 0) return null;
   return {
     x: bounds.x / placement.scale + placement.origin.x,
@@ -271,6 +276,7 @@ module.exports = {
   sanitizeHandoffLog,
   writeHandoffLog,
   boundsOf,
+  normalizedBoundsOf,
   geometryToVU,
   cursorAtSharedEdge,
   WindowHandoffRuntime,

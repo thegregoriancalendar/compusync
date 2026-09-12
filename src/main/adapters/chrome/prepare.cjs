@@ -150,7 +150,9 @@ class ChromePrepare {
   async prepare(inputDescriptor, options = {}) {
     const descriptor = sanitizeWindowDescriptor(inputDescriptor);
     if (!descriptor) throw new ChromePrepareError('CHROME_INVALID_DESCRIPTOR', 'The Chrome handoff descriptor is invalid.');
-    const bounds = prepareBounds(descriptor, options, this.placement);
+    const normalizedBounds = prepareBounds(descriptor, options, this.placement);
+    const bounds = typeof this.native.toPlatformBounds === 'function'
+      ? this.native.toPlatformBounds(normalizedBounds) : normalizedBounds;
     const { tabs, active, activeIndex } = orderedTabs(descriptor);
     await this.cdp.connect?.();
     let created;

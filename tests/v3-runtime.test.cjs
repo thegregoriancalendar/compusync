@@ -47,6 +47,15 @@ test('host layout configuration produces one adjacent, mixed-DPI VU pair', () =>
   assert.equal(placements[1].origin.y, 100);
 });
 
+test('v3 desktop metrics override the active-display DIP size for multi-monitor cursor placement', () => {
+  const win = { ...layout(2048, 1152, 1.25), desktop: { widthVU: 3584, heightVU: 1440, scale: 1.25 } };
+  const mac = { ...layout(1512, 982, 2), desktop: { widthVU: 2792, heightVU: 1080, scale: 2 } };
+  const placements = derivePairPlacements({ win, mac }, 'win', 'mac', settings);
+  assert.deepEqual(placements[0].size, { w: 3584, h: 1440 });
+  assert.equal(placements[0].scale, 1.25);
+  assert.deepEqual(placements[1].size, { w: 2792, h: 1080 });
+});
+
 test('runtime sanitizes traffic, agrees layout, links only with peer and native support, then recovers', () => {
   const session = new FakeSession();
   const native = new FakeNative();

@@ -129,8 +129,15 @@ class ChromeHandoffAdapter {
     if (this.platform === 'darwin') return this.apple.position(handle, bounds);
     const record = localRecord(this.records, handle);
     const windowId = handle?.windowId ?? record?.windowId;
-    if (Number.isInteger(windowId)) return this.cdp.setWindowBounds(windowId, bounds);
+    if (Number.isInteger(windowId)) {
+      const platformBounds = typeof this.native.toPlatformBounds === 'function'
+        ? this.native.toPlatformBounds(bounds) : bounds;
+      return this.cdp.setWindowBounds(windowId, platformBounds);
+    }
     const id = nativeWindowId(handle);
+    if (id != null && typeof this.native.setWindowBoundsNormalized === 'function') {
+      return this.native.setWindowBoundsNormalized(id, bounds);
+    }
     if (id != null && typeof this.native.setWindowBounds === 'function') return this.native.setWindowBounds(id, bounds);
     throw new ChromePrepareError('CHROME_NATIVE_WINDOW_UNAVAILABLE', 'The Chrome handoff window cannot be positioned.');
   }

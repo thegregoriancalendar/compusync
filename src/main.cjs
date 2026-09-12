@@ -94,14 +94,28 @@ function selectedDisplay() {
 
 function localLayout() {
   const active = selectedDisplay();
+  const primary = screen.getPrimaryDisplay();
   const displays = screen.getAllDisplays().slice(0, 8).map((display) => ({
     id: String(display.id),
     bounds: display.bounds,
     workArea: display.workArea,
     scaleFactor: display.scaleFactor,
-    primary: display.id === screen.getPrimaryDisplay().id,
+    primary: display.id === primary.id,
   }));
-  return { revision: ++layoutRevision, edge: config.edge, activeDisplayId: String(active.id), displays };
+  let desktop;
+  try {
+    const nativeSpace = nativeInput?.coordinateSpace?.();
+    const scale = Number(primary.scaleFactor);
+    if (nativeSpace && Number.isFinite(scale) && scale > 0) desktop = {
+      widthVU: nativeSpace.width * nativeSpace.scale / scale,
+      heightVU: nativeSpace.height * nativeSpace.scale / scale,
+      scale,
+    };
+  } catch { /* Native-unavailable development builds keep the Electron layout. */ }
+  return {
+    revision: ++layoutRevision, edge: config.edge, activeDisplayId: String(active.id), displays,
+    ...(desktop ? { desktop } : {}),
+  };
 }
 
 function scheduleLayoutUpdate() {
@@ -110,6 +124,12 @@ function scheduleLayoutUpdate() {
     if (!sync || sync.stopped) return;
     sync.action({ type: 'layout', layout: localLayout() });
   }, 100);
+}
+
+function handleDisplayChange() {
+  try { nativeInput?.refreshCoordinateSpace?.(); }
+  catch (error) { inputRuntime?.watchdog?.trigger?.('display-metrics-failed', error); }
+  scheduleLayoutUpdate();
 }
 
 function viewportFor(state) {
@@ -646,9 +666,9 @@ if (hasLock) app.whenReady().then(async () => {
   });
   seamOverlay.create();
   createTray();
-  screen.on('display-added', scheduleLayoutUpdate);
-  screen.on('display-removed', scheduleLayoutUpdate);
-  screen.on('display-metrics-changed', scheduleLayoutUpdate);
+  screen.on('display-added', handleDisplayChange);
+  screen.on('display-removed', handleDisplayChange);
+  screen.on('display-metrics-changed', handleDisplayChange);
   await startSession();
   if (!backgroundLaunch || pendingActivation) activateApp();
   else if (sync.phase === 'error') showSettings();

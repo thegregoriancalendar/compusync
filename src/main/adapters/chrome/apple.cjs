@@ -394,10 +394,11 @@ function createAppleChromeAdapter(options = {}) {
 
   async function setNativeBounds(id, bounds) {
     const normalized = boundsOf(bounds);
-    if (!id || !normalized || typeof native.setWindowBounds !== 'function') {
+    const setter = native.setWindowBoundsNormalized || native.setWindowBounds;
+    if (!id || !normalized || typeof setter !== 'function') {
       throw new AppleChromeError('CHROME_NATIVE_WINDOW_UNAVAILABLE', 'Compusync could not position the Chrome handoff window. Check Accessibility permission and try again.');
     }
-    try { await native.setWindowBounds(id, normalized); }
+    try { await setter.call(native, id, normalized); }
     catch { throw new AppleChromeError('CHROME_NATIVE_POSITION_FAILED', 'Compusync could not position the Chrome handoff window. Check Accessibility permission and try again.'); }
     return normalized;
   }

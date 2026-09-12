@@ -53,6 +53,14 @@ function crossingState() {
   return state;
 }
 
+test('layout normalization retains validated optional full-desktop cursor metrics', () => {
+  const layout = hostLayout();
+  layout.desktop = { widthVU: 3584, heightVU: 1440, scale: 1.25 };
+  assert.deepEqual(normalizeLayout(layout).desktop, layout.desktop);
+  layout.desktop.widthVU = Infinity;
+  assert.equal(normalizeLayout(layout), null);
+});
+
 test('state v2 starts as one host-placed logical window without mirrored presentation fields', () => {
   const state = initialState('windows', 1234, hostLayout());
   assert.equal(state.version, 2);

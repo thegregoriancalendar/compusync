@@ -161,7 +161,10 @@ test('prepare creates active first, bounds it before staggered background tabs, 
   const pinCalls = [];
   const prepare = new ChromePrepare({
     cdp,
-    native: { enumerateWindows: () => [{ id: 'hwnd-new', processName: 'chrome.exe', visible: true }] },
+    native: {
+      enumerateWindows: () => [{ id: 'hwnd-new', processName: 'chrome.exe', visible: true }],
+      toPlatformBounds: (bounds) => ({ ...bounds, x: bounds.x - 1920, y: bounds.y - 200 }),
+    },
     tabControl: { setPinned: (request) => { pinCalls.push(request); } },
     random: () => 0.5,
     sleep: async (ms) => { sleeps.push(ms); calls.push(['sleep', ms]); },
@@ -172,7 +175,7 @@ test('prepare creates active first, bounds it before staggered background tabs, 
   });
   assert.deepEqual(calls.find(([name]) => name === 'createWindow').slice(1), [
     'https://active.example/watch?token=secret',
-    { x: 2002, y: 40, width: 1600, height: 1200 },
+    { x: 82, y: -160, width: 1600, height: 1200 },
   ]);
   const backgrounds = calls.filter(([name]) => name === 'createTarget');
   assert.deepEqual(backgrounds.map((call) => call[1]), [
@@ -276,6 +279,18 @@ test('high-level adapter delegates Apple operations and marks maximized windows 
   await adapter.close(handle);
   assert.deepEqual(calls.find(([name]) => name === 'prepare')[2], { x: 2002, y: 40, width: 800, height: 600 });
   assert.deepEqual(calls.find(([name]) => name === 'position')[2], { x: 200, y: 100, width: 800, height: 600 });
+});
+
+test('VU-derived Windows CDP positions are converted back to OS-global coordinates', async () => {
+  const calls = [];
+  const adapter = createChromeHandoffAdapter({
+    platform: 'win32',
+    cdp: { setWindowBounds: (id, bounds) => calls.push({ id, bounds }) },
+    native: { toPlatformBounds: (bounds) => ({ ...bounds, x: bounds.x - 1920, y: bounds.y - 900 }) },
+    placement: { machineId: 'win', origin: { x: 0, y: 0 }, size: { w: 3584, h: 1440 }, scale: 1.25 },
+  });
+  await adapter.position({ windowId: 77, geometryVU: { x: 0, y: 0, w: 640, h: 480 } }, { x: 96, y: 40 });
+  assert.deepEqual(calls, [{ id: 77, bounds: { x: -1800, y: -850, width: 800, height: 600 } }]);
 });
 
 test('descriptor validation rejects unsafe input before any Chrome side effect', async () => {
