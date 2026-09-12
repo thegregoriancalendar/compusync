@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, clipboard, dialog, screen, safeStorage, session: electronSession } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, clipboard, dialog, screen, safeStorage, shell, systemPreferences, globalShortcut, powerMonitor, session: electronSession } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
@@ -11,6 +11,9 @@ const { pairWithCode } = require('./core/pairing.cjs');
 const { viewportsForActor } = require('./core/geometry.cjs');
 const { EDGES } = require('./core/state.cjs');
 const { DesktopService } = require('./desktop-service.cjs');
+const { cursorSettingsFromSaved, validateCursorSettings } = require('./core/cursor-preferences.cjs');
+const { SharedInputRuntime } = require('./main/runtime.cjs');
+const { createNativeAdapter } = require('../native/index.cjs');
 
 if (process.env.COMPUSYNC_PROFILE) {
   const profile = path.resolve(process.env.COMPUSYNC_PROFILE);
@@ -21,7 +24,7 @@ app.setName('CompuSync');
 const hasLock = app.requestSingleInstanceLock();
 if (!hasLock) app.quit();
 
-let surface, settings, tray, sync, desktopService, config;
+let surface, settings, tray, sync, desktopService, inputRuntime, nativeInput, config;
 let quitting = false;
 let changingSession = false;
 let applyingBounds = false;
@@ -30,6 +33,7 @@ let pendingActivation = false;
 let layoutRevision = 0;
 let layoutTimer;
 let lastNativeBounds = null;
+const notices = new Map();
 const rendererPath = (file) => path.join(__dirname, 'renderer', file);
 const configPath = () => path.join(app.getPath('userData'), 'settings.json');
 
@@ -45,6 +49,9 @@ function readConfig() {
     port: Number(process.env.COMPUSYNC_PORT ?? saved.port ?? 43187),
     secret: saved.secret || newSecret(), edge: saved.edge || 'right',
     autoLaunch: Boolean(saved.autoLaunch), firstRun: !saved.id,
+    cursorSettings: cursorSettingsFromSaved(saved.cursorSettings),
+    dismissedNotices: Array.isArray(saved.dismissedNotices)
+      ? saved.dismissedNotices.filter((id) => typeof id === 'string' && id.length <= 100).slice(0, 100) : [],
     bindHost: process.env.COMPUSYNC_BIND_HOST || undefined,
   };
 }
@@ -101,6 +108,11 @@ function details() {
   const ips = addresses();
   return {
     id: config.id, name: config.name, edge: config.edge, autoLaunch: config.autoLaunch,
+    cursorSettings: {
+      ...config.cursorSettings,
+      linked: inputRuntime ? inputRuntime.cursor.linked : false,
+    },
+    notices: [...notices.values()].filter((notice) => !config.dismissedNotices.includes(notice.id)),
     packaged: app.isPackaged,
     status: sync?.status() || { role: config.role, phase: 'starting', peers: [] },
     invitation: config.role === 'host' ? sync?.invitation() : null,
@@ -109,6 +121,20 @@ function details() {
     state: surfaceState(sync?.state),
     clockOffsetMs: sync?.clockOffsetMs || 0,
   };
+}
+
+function addNotice(notice) {
+  if (!notice?.id || typeof notice.message !== 'string') return;
+  notices.set(notice.id, notice);
+  refreshStatus();
+}
+
+function dismissNotice(id) {
+  if (typeof id !== 'string' || !notices.has(id)) return false;
+  if (!config.dismissedNotices.includes(id)) config.dismissedNotices.push(id);
+  saveConfig();
+  refreshStatus();
+  return true;
 }
 
 function send(window, channel, value) {
@@ -270,6 +296,12 @@ function menuTemplate() {
     { label: 'Bring window here', accelerator: 'CmdOrCtrl+Shift+Enter', click: bringHere },
     { label: 'Close shared window', accelerator: 'CmdOrCtrl+W', click: closeShared },
     { type: 'separator' },
+    {
+      label: inputRuntime?.cursor.linked ? 'Unlink cursors' : 'Link cursors',
+      click: () => inputRuntime?.setLinked(!inputRuntime.cursor.linked, 'menu'),
+    },
+    { label: 'Move cursor to other laptop', click: () => inputRuntime?.cursor.toggleOwnership() },
+    { type: 'separator' },
     { label: 'Connection & settings…', accelerator: 'CmdOrCtrl+,', click: showSettings },
     { type: 'separator' },
     { label: 'Quit on this laptop', accelerator: 'CmdOrCtrl+Q', click: () => app.quit() },
@@ -303,7 +335,56 @@ function createTray() {
   updateMenu();
 }
 
+function ensureInputRuntime() {
+  if (inputRuntime || !sync || sync.phase !== 'connected' || sync.members.length !== 2) return inputRuntime;
+  const peer = sync.members.find((member) => member.id !== config.id);
+  if (!peer) return null;
+  const hostId = config.role === 'host' ? config.id : peer.id;
+  try {
+    inputRuntime = new SharedInputRuntime({
+      session: sync,
+      native: nativeInput,
+      machineId: config.id,
+      hostId,
+      peerId: peer.id,
+      settings: config.cursorSettings,
+      layouts: sync.state.layouts,
+      globalShortcut,
+      powerMonitor,
+      onLayoutNeeded: scheduleLayoutUpdate,
+      onNotice: addNotice,
+      onModeChange: (linked, reason) => {
+        config.cursorSettings.linked = linked;
+        if (!linked && reason && reason !== 'user') addNotice({
+          id: 'cursor-recovered', kind: 'warning', title: 'Cursors unlinked for safety',
+          message: `Compusync restored local input after ${reason}. Link again when both laptops are ready.`,
+          dismissible: true,
+        });
+        saveConfig();
+        refreshStatus();
+      },
+    });
+    inputRuntime.start();
+  } catch (error) {
+    nativeInput?.emergencyRecover?.('runtime startup failed');
+    inputRuntime = null;
+    config.cursorSettings.linked = false;
+    addNotice({
+      id: 'input-runtime-error', kind: 'warning', title: 'Cursor linking needs attention',
+      message: error?.message || 'The native input layer could not start.', dismissible: false,
+    });
+  }
+  return inputRuntime;
+}
+
+function stopInputRuntime(reason = 'session-stop') {
+  const runtime = inputRuntime;
+  inputRuntime = null;
+  runtime?.stop(reason);
+}
+
 async function startSession() {
+  stopInputRuntime('session-restart');
   if (desktopService) await desktopService.stop();
   if (sync) await sync.stop();
   const layout = localLayout();
@@ -322,7 +403,10 @@ async function startSession() {
   sync.on('state', applyState);
   sync.on('status', () => {
     refreshStatus();
-    if (sync.phase === 'connected' && !sync.state.layouts[config.id]) sync.action({ type: 'layout', layout: localLayout() });
+    if (sync.phase === 'connected') {
+      if (!sync.state.layouts[config.id]) sync.action({ type: 'layout', layout: localLayout() });
+      ensureInputRuntime();
+    }
   });
   try {
     await desktopService.start();
@@ -380,6 +464,8 @@ function setupIpc() {
         if (!EDGES.includes(data?.edge)) throw new Error('Choose a valid screen edge.');
         config.edge = data.edge;
         config.autoLaunch = Boolean(data.autoLaunch);
+        config.cursorSettings = validateCursorSettings(data?.cursorSettings);
+        inputRuntime?.updateSettings(config.cursorSettings);
         if (app.isPackaged) app.setLoginItemSettings({
           openAtLogin: config.autoLaunch, args: ['--background'],
           ...(process.platform === 'win32' ? { path: process.env.PORTABLE_EXECUTABLE_FILE || process.execPath } : {}),
@@ -387,6 +473,32 @@ function setupIpc() {
         saveConfig();
         sync.action({ type: 'layout', layout: localLayout() });
         refreshStatus();
+      } else if (command === 'cursor-link') {
+        const runtime = ensureInputRuntime();
+        if (!runtime) throw new Error('Connect both laptops before linking cursors.');
+        if (!runtime.setLinked(true, 'user')) throw new Error('Native input support and a shared layout are required before linking.');
+        config.cursorSettings.linked = true;
+        saveConfig();
+        refreshStatus();
+      } else if (command === 'cursor-unlink') {
+        config.cursorSettings.linked = false;
+        inputRuntime?.setLinked(false, 'user');
+        saveConfig();
+        refreshStatus();
+      } else if (command === 'cursor-toggle-ownership') {
+        if (!inputRuntime?.cursor.toggleOwnership()) throw new Error('Link both cursors before changing ownership.');
+      } else if (command === 'dismiss-notice') {
+        if (!dismissNotice(data?.id)) throw new Error('Unknown notice.');
+      } else if (command === 'notice-action') {
+        const notice = notices.get(data?.id);
+        if (!notice || notice.action !== data?.action) throw new Error('Unknown notice action.');
+        const settingsPane = {
+          'open-accessibility': 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
+          'open-input-monitoring': 'x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent',
+          'open-automation': 'x-apple.systempreferences:com.apple.preference.security?Privacy_Automation',
+        }[notice.action];
+        if (!settingsPane) throw new Error('This notice has no action.');
+        await shell.openExternal(settingsPane);
       } else throw new Error('Unknown command.');
       return { ok: true };
     } catch (error) { return { ok: false, error: error.message }; }
@@ -429,12 +541,32 @@ app.on('before-quit', (event) => {
   quitting = true;
   clearTimeout(layoutTimer);
   cancelOwnedDrag();
+  stopInputRuntime('process-exit');
   Promise.resolve(desktopService?.stop()).finally(() => sync?.stop()).finally(() => app.quit());
   if (!sync && !desktopService) app.quit();
 });
 
 if (hasLock) app.whenReady().then(async () => {
   config = readConfig();
+  nativeInput = createNativeAdapter();
+  if (!nativeInput.available) notices.set('native-unavailable', {
+    id: 'native-unavailable', kind: 'warning', title: 'Native input support unavailable',
+    message: 'This development build can pair, but cursor linking requires the platform native addon.',
+    dismissible: false,
+  });
+  if (process.platform === 'darwin') {
+    const accessibility = systemPreferences.isTrustedAccessibilityClient(config.firstRun);
+    if (!accessibility) notices.set('accessibility-permission', {
+      id: 'accessibility-permission', kind: 'permission', title: 'Allow Accessibility',
+      message: 'Compusync needs Accessibility access to detect and position Chrome windows and share input.',
+      actionLabel: 'Open Accessibility Settings', action: 'open-accessibility', dismissible: false,
+    });
+    if (config.firstRun) notices.set('input-monitoring-permission', {
+      id: 'input-monitoring-permission', kind: 'permission', title: 'Allow Input Monitoring',
+      message: 'Compusync needs Input Monitoring access so either mouse and keyboard can drive the shared cursor.',
+      actionLabel: 'Open Input Monitoring Settings', action: 'open-input-monitoring', dismissible: false,
+    });
+  }
   backgroundLaunch = app.commandLine.hasSwitch('background') || (process.platform === 'darwin' && app.getLoginItemSettings().wasOpenedAtLogin);
   const permissions = (_contents, permission) => permission === 'pointerLock';
   electronSession.defaultSession.setPermissionCheckHandler(permissions);
