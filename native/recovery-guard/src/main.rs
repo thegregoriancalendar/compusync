@@ -238,6 +238,20 @@ mod platform {
     type CfString = *const c_void;
     type AxElement = *const c_void;
 
+    struct OwnedCf(CfType);
+
+    impl OwnedCf {
+        fn new(value: CfType) -> Option<Self> {
+            (!value.is_null()).then_some(Self(value))
+        }
+    }
+
+    impl Drop for OwnedCf {
+        fn drop(&mut self) {
+            unsafe { CFRelease(self.0) };
+        }
+    }
+
     #[repr(C)]
     #[derive(Clone, Copy)]
     struct Point {
@@ -253,9 +267,6 @@ mod platform {
 
     #[link(name = "ApplicationServices", kind = "framework")]
     unsafe extern "C" {
-        static kAXWindowsAttribute: CfString;
-        static kAXPositionAttribute: CfString;
-        static kAXSizeAttribute: CfString;
         fn AXUIElementCreateApplication(pid: i32) -> AxElement;
         fn AXUIElementCopyAttributeValues(
             element: AxElement,
@@ -282,6 +293,11 @@ mod platform {
 
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
+        fn CFStringCreateWithCString(
+            allocator: CfType,
+            value: *const i8,
+            encoding: u32,
+        ) -> CfString;
         fn CFArrayGetCount(array: CfArray) -> isize;
         fn CFArrayGetValueAtIndex(array: CfArray, index: isize) -> CfType;
         fn CFRelease(value: CfType);
@@ -371,22 +387,43 @@ mod platform {
             return;
         }
         unsafe {
-            let app = AXUIElementCreateApplication(pid);
-            if app.is_null() {
+            const UTF8: u32 = 0x0800_0100;
+            let Some(app) = OwnedCf::new(AXUIElementCreateApplication(pid)) else {
                 return;
-            }
+            };
+            let Some(windows_attribute) = OwnedCf::new(CFStringCreateWithCString(
+                null(),
+                b"AXWindows\0".as_ptr().cast(),
+                UTF8,
+            )) else {
+                return;
+            };
+            let Some(position_attribute) = OwnedCf::new(CFStringCreateWithCString(
+                null(),
+                b"AXPosition\0".as_ptr().cast(),
+                UTF8,
+            )) else {
+                return;
+            };
+            let Some(size_attribute) = OwnedCf::new(CFStringCreateWithCString(
+                null(),
+                b"AXSize\0".as_ptr().cast(),
+                UTF8,
+            )) else {
+                return;
+            };
             let mut windows: CfArray = null();
-            if AXUIElementCopyAttributeValues(app, kAXWindowsAttribute, 0, 200, &mut windows) != 0
+            if AXUIElementCopyAttributeValues(app.0, windows_attribute.0, 0, 200, &mut windows) != 0
                 || windows.is_null()
                 || index >= CFArrayGetCount(windows)
             {
                 if !windows.is_null() {
                     CFRelease(windows);
                 }
-                CFRelease(app);
                 return;
             }
-            let window = CFArrayGetValueAtIndex(windows, index) as AxElement;
+            let windows = OwnedCf(windows);
+            let window = CFArrayGetValueAtIndex(windows.0, index) as AxElement;
             let point = Point {
                 x: bounds.x,
                 y: bounds.y,
@@ -395,18 +432,15 @@ mod platform {
                 width: bounds.width,
                 height: bounds.height,
             };
-            let position_value = AXValueCreate(1, (&point as *const Point).cast());
-            let size_value = AXValueCreate(2, (&size as *const Size).cast());
-            if !position_value.is_null() {
-                AXUIElementSetAttributeValue(window, kAXPositionAttribute, position_value);
-                CFRelease(position_value);
+            if let Some(position_value) =
+                OwnedCf::new(AXValueCreate(1, (&point as *const Point).cast()))
+            {
+                AXUIElementSetAttributeValue(window, position_attribute.0, position_value.0);
             }
-            if !size_value.is_null() {
-                AXUIElementSetAttributeValue(window, kAXSizeAttribute, size_value);
-                CFRelease(size_value);
+            if let Some(size_value) = OwnedCf::new(AXValueCreate(2, (&size as *const Size).cast()))
+            {
+                AXUIElementSetAttributeValue(window, size_attribute.0, size_value.0);
             }
-            CFRelease(windows);
-            CFRelease(app);
         }
     }
 }
