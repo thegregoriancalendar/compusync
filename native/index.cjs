@@ -89,7 +89,9 @@ class NativeAdapter extends EventEmitter {
         else if (event.kind === 'unlinkHotkey') this.emit('unlinkHotkey');
         else if (event.kind === 'toggleOwnershipHotkey') this.emit('toggleOwnershipHotkey');
         else if (event.kind === 'displayChanged') this.emit('displayChanged');
-        else if (event.kind === 'moveSizeStart' || event.kind === 'moveSizeEnd') this.emit(event.kind, event.windowId);
+      else if (event.kind === 'moveSizeStart' || event.kind === 'moveSizeEnd') {
+        this.emit(event.kind, event.windowId ?? event.window_id);
+      }
       } catch (error) { this.emit('panic', error); }
     });
     this.callbackInstalled = true;
