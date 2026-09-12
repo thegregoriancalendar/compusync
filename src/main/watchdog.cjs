@@ -40,10 +40,15 @@ class RecoveryWatchdog extends EventEmitter {
     // The addon owns the final crash guard. Its implementation must not call
     // back into JS in order to recover cursor visibility and parking.
     this.native.installRecoveryGuard?.();
+    if (this.cursor?.linked !== false) {
+      this.native.setLinked?.(true);
+      this.native.heartbeat?.();
+    }
     this.native.on?.('panic', this.panicHandler);
     this.heartbeatTimer = setInterval(() => {
-      if (this.peerConnected && this.cursor?.linked !== false) {
-        this.send({ type: 'heartbeat', t: this.now() });
+      if (this.cursor?.linked !== false) {
+        this.native.heartbeat?.();
+        if (this.peerConnected) this.send({ type: 'heartbeat', t: this.now() });
       }
     }, this.heartbeatIntervalMs);
     this.checkTimer = setInterval(() => this.check(), this.checkIntervalMs);
@@ -55,6 +60,8 @@ class RecoveryWatchdog extends EventEmitter {
     this.recovered = false;
     this.lastHeartbeat = this.now();
     this.native.installRecoveryGuard?.();
+    this.native.setLinked?.(this.cursor?.linked !== false);
+    if (this.cursor?.linked !== false) this.native.heartbeat?.();
   }
 
   setPeerConnected(connected) {
@@ -93,6 +100,7 @@ class RecoveryWatchdog extends EventEmitter {
     // Each step is isolated. A broken native operation must never prevent the
     // remaining recovery operations from running.
     attempt(() => this.native.emergencyRecover?.(), errors);
+    attempt(() => this.native.setLinked?.(false), errors);
     attempt(() => this.native.showCursor?.(), errors);
     attempt(() => this.native.releaseCursor?.(), errors);
     attempt(() => this.native.removeAllHooks?.(), errors);

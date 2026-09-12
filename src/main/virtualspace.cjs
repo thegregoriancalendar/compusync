@@ -13,6 +13,7 @@ function normalizePlacement(value) {
   if (!value || typeof value !== 'object' || typeof value.machineId !== 'string'
     || !value.machineId.length || value.machineId.length > 80
     || !finite(value.origin?.x) || !finite(value.origin?.y)
+    || Math.abs(value.origin.x) > MAX_DIMENSION_VU || Math.abs(value.origin.y) > MAX_DIMENSION_VU
     || !finite(value.size?.w) || !finite(value.size?.h)
     || value.size.w <= 0 || value.size.h <= 0
     || value.size.w > MAX_DIMENSION_VU || value.size.h > MAX_DIMENSION_VU

@@ -33,7 +33,7 @@ const MESSAGE_POLICIES = Object.freeze({
 });
 
 function validUrl(value) {
-  if (!text(value, MAX_URL_LENGTH) || !value.length) return false;
+  if (typeof value !== 'string' || !value.length || Buffer.byteLength(value, 'utf8') > MAX_URL_LENGTH) return false;
   try {
     const parsed = new URL(value);
     return parsed.protocol === 'http:' || parsed.protocol === 'https:';
@@ -57,9 +57,13 @@ function sanitizeWindowDescriptor(value) {
   const geometry = value.geometryVU;
   if (!geometry || !finite(geometry.x) || !finite(geometry.y)
     || !finite(geometry.w) || !finite(geometry.h)
-    || Math.abs(geometry.x) > MAX_COORDINATE || Math.abs(geometry.y) > MAX_COORDINATE
-    || geometry.w < 1 || geometry.h < 1
-    || geometry.w > MAX_COORDINATE || geometry.h > MAX_COORDINATE) return null;
+    || geometry.w <= 0 || geometry.h <= 0) return null;
+  const clampedGeometry = {
+    x: Math.min(MAX_COORDINATE, Math.max(-MAX_COORDINATE, geometry.x)),
+    y: Math.min(MAX_COORDINATE, Math.max(-MAX_COORDINATE, geometry.y)),
+    w: Math.min(MAX_COORDINATE, Math.max(1, geometry.w)),
+    h: Math.min(MAX_COORDINATE, Math.max(1, geometry.h)),
+  };
   const payload = value.payload;
   if (!payload || !Array.isArray(payload.tabs) || !payload.tabs.length || payload.tabs.length > MAX_TABS
     || !integer(payload.activeIdx, 0, payload.tabs.length - 1)) return null;
@@ -89,7 +93,7 @@ function sanitizeWindowDescriptor(value) {
     adapterId: 'chrome',
     origin: value.origin,
     capturedAt: value.capturedAt,
-    geometryVU: { x: geometry.x, y: geometry.y, w: geometry.w, h: geometry.h },
+    geometryVU: clampedGeometry,
     state: value.state,
     payload: { activeIdx: payload.activeIdx, tabs },
   };

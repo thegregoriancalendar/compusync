@@ -24,7 +24,7 @@ function normalizeAcceleration(value = {}) {
     slope: finite(value.slope) ? value.slope : DEFAULT_ACCELERATION.slope,
   };
   if (acceleration.base < 0 || acceleration.base > 20
-    || acceleration.threshold < 0 || acceleration.threshold > 1000
+    || acceleration.threshold < 0 || acceleration.threshold > 100000
     || acceleration.slope < 0 || acceleration.slope > 20) throw new TypeError('Invalid acceleration curve.');
   return acceleration;
 }
@@ -111,6 +111,7 @@ class CursorController extends EventEmitter {
   start() {
     if (this.started) return;
     this.started = true;
+    safeCall(this.native, 'setLinked', this.linked);
     if (this.linked) this.#enableCapture();
     this.#applyPhysicalOwnership();
     this.frameTimer = setInterval(() => this.flush(), this.frameMs);
@@ -156,6 +157,7 @@ class CursorController extends EventEmitter {
     const next = Boolean(linked);
     if (this.linked === next) return false;
     this.linked = next;
+    safeCall(this.native, 'setLinked', next);
     this.edgePressure = null;
     this.pendingLocal = { dx: 0, dy: 0 };
     this.pendingRemote = { dx: 0, dy: 0 };

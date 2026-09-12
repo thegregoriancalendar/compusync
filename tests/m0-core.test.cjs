@@ -60,6 +60,7 @@ test('virtual-space conversion preserves VU across differing DPI scales', () => 
   assert.equal(ownerAt(point, [mac]), 'mac');
   assert.deepEqual(clampToPlacement({ x: 5, y: -5 }, mac), { x: -1e-6, y: 100 });
   assert.equal(normalizePlacement({ ...mac, scale: 0 }), null);
+  assert.equal(normalizePlacement(placement('far-away', 1e300, 0, 10, 10)), null);
 });
 
 test('pair layout centers screens, applies offset, and never permits overlap', () => {
@@ -146,6 +147,13 @@ test('window descriptors reject unsafe schemes, excessive tabs and malformed his
   const history = validDescriptor();
   history.payload.tabs[1].history.currentIndex = 9;
   assert.equal(sanitizeWindowDescriptor(history), null);
+  const oversizedGeometry = validDescriptor();
+  oversizedGeometry.geometryVU = { x: -1e9, y: 1e9, w: 1e9, h: .5 };
+  assert.deepEqual(sanitizeWindowDescriptor(oversizedGeometry).geometryVU,
+    { x: -65536, y: 65536, w: 65536, h: 1 });
+  const multibyteUrl = validDescriptor();
+  multibyteUrl.payload.tabs[0].url = `https://example.com/${'é'.repeat(4100)}`;
+  assert.equal(sanitizeWindowDescriptor(multibyteUrl), null);
 });
 
 test('shared acceleration uses the specified two-segment curve', () => {
