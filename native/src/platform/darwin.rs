@@ -711,12 +711,21 @@ struct CaptureRuntime {
     thread: Option<JoinHandle<()>>,
 }
 unsafe impl Send for CaptureRuntime {}
+
+fn take_run_loop(run_loop: &mut CfRunLoop) -> Option<CfRunLoop> {
+    let run_loop = std::mem::replace(run_loop, null_mut());
+    (!run_loop.is_null()).then_some(run_loop)
+}
+
 impl CaptureRuntime {
     fn stop(&mut self) {
         clear_drag_watch(&self.context, false);
-        if !self.run_loop.is_null() {
+        // HostPlatform stops this runtime explicitly and dropping it invokes
+        // stop again. Consume the run-loop pointer before waking and joining
+        // its thread so the Drop pass cannot use the now-retired CF object.
+        if let Some(run_loop) = take_run_loop(&mut self.run_loop) {
             unsafe {
-                CFRunLoopStop(self.run_loop);
+                CFRunLoopStop(run_loop);
             }
         }
         if let Some(thread) = self.thread.take() {
@@ -1081,7 +1090,16 @@ impl Drop for HostPlatform {
 
 #[cfg(test)]
 mod tests {
-    use super::activate_drag_watch;
+    use super::{activate_drag_watch, take_run_loop, CfRunLoop};
+
+    #[test]
+    fn capture_run_loop_stop_target_is_consumed_once() {
+        let expected = std::ptr::NonNull::<std::ffi::c_void>::dangling().as_ptr();
+        let mut run_loop = expected as CfRunLoop;
+
+        assert_eq!(take_run_loop(&mut run_loop), Some(expected));
+        assert_eq!(take_run_loop(&mut run_loop), None);
+    }
 
     #[test]
     fn ax_notification_starts_once_only_while_physical_left_is_held() {
