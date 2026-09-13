@@ -71,6 +71,7 @@ const ERR_AE_EVENT_NOT_PERMITTED: i32 = -1743;
 
 struct AxConstants {
     windows: usize,
+    focused_application: usize,
     focused_window: usize,
     position: usize,
     size: usize,
@@ -89,6 +90,7 @@ static AX: Lazy<AxConstants> = Lazy::new(|| {
     };
     AxConstants {
         windows: make(b"AXWindows\0"),
+        focused_application: make(b"AXFocusedApplication\0"),
         focused_window: make(b"AXFocusedWindow\0"),
         position: make(b"AXPosition\0"),
         size: make(b"AXSize\0"),
@@ -636,9 +638,30 @@ fn focused_window() -> Option<(String, i32, OwnedCf)> {
     if system.0.is_null() {
         return None;
     }
+    // AXFocusedWindow is an application attribute, not a system-wide one.
+    // Resolve the frontmost application first; asking the system-wide element
+    // for AXFocusedWindow fails silently on macOS and prevents drag lifecycle
+    // events from ever being emitted.
+    let mut focused_app = null();
+    if unsafe {
+        AXUIElementCopyAttributeValue(
+            system.0 as AxElement,
+            ax(AX.focused_application),
+            &mut focused_app,
+        )
+    } != 0
+        || focused_app.is_null()
+    {
+        return None;
+    }
+    let focused_app = OwnedCf(focused_app);
     let mut focused = null();
     if unsafe {
-        AXUIElementCopyAttributeValue(system.0 as AxElement, ax(AX.focused_window), &mut focused)
+        AXUIElementCopyAttributeValue(
+            focused_app.0 as AxElement,
+            ax(AX.focused_window),
+            &mut focused,
+        )
     } != 0
         || focused.is_null()
     {
@@ -649,10 +672,15 @@ fn focused_window() -> Option<(String, i32, OwnedCf)> {
     if unsafe { AXUIElementGetPid(focused.0 as AxElement, &mut pid) } != 0 {
         return None;
     }
-    let app = OwnedCf(unsafe { AXUIElementCreateApplication(pid) });
     let mut windows = null();
     if unsafe {
-        AXUIElementCopyAttributeValues(app.0 as AxElement, ax(AX.windows), 0, 200, &mut windows)
+        AXUIElementCopyAttributeValues(
+            focused_app.0 as AxElement,
+            ax(AX.windows),
+            0,
+            200,
+            &mut windows,
+        )
     } != 0
         || windows.is_null()
     {
@@ -1050,6 +1078,16 @@ impl Platform for HostPlatform {
     fn warp_cursor(&mut self, p: Point) -> Result<(), String> {
         let code = unsafe { CGWarpMouseCursorPosition(CgPoint { x: p.x, y: p.y }) };
         if code == 0 {
+            // CoreGraphics cursor warps do not reliably produce a
+            // kCGEventLeftMouseDragged callback. Poll explicitly while a peer
+            // button is held so peer-driven window drags use the same live AX
+            // geometry path as physical Mac trackpad drags.
+            if let Some(capture) = self.capture.as_ref() {
+                if capture.context.left_down.load(Ordering::Acquire) {
+                    ensure_drag_watch(&capture.context);
+                    poll_drag_watch(&capture.context);
+                }
+            }
             Ok(())
         } else {
             Err(format!("CGWarpMouseCursorPosition failed: {code}"))
