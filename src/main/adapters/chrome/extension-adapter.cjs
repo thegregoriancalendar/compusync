@@ -30,8 +30,11 @@ function normalizeWindow(value) {
     title: typeof tab?.title === 'string' ? tab.title.slice(0, 1024) : '',
     pinned: Boolean(tab?.pinned), active: Boolean(tab?.active), history: tab?.history,
   }));
-  if (tabs.some((tab) => !tab.id || !Number.isSafeInteger(tab.index) || !validUrl(tab.url))) return null;
-  return { windowId: value.windowId, bounds, tabs };
+  if (tabs.some((tab) => !tab.id || !Number.isSafeInteger(tab.index))) return null;
+  return {
+    windowId: value.windowId, bounds, tabs, focused: value.focused === true,
+    tabsAddressable: tabs.every((tab) => validUrl(tab.url)),
+  };
 }
 
 function boundsDistance(first, second) {
@@ -102,13 +105,33 @@ class ChromeExtensionAdapter {
       const enumerated = await this.native.enumerateWindows?.();
       if (Array.isArray(enumerated)) nativeWindows = enumerated;
     } catch {}
-    const selected = selectAddressableWindow(await this.windows(nativeWindows), window);
+    const groups = await this.windows(nativeWindows);
+    let selected;
+    if (isNativeChromeWindow(window)) {
+      // chrome.windows uses logical coordinates while GetWindowRect is
+      // physical-DPI and may also lag during Windows' modal move loop. The
+      // dragged HWND and Chrome's sole focused normal window are the same
+      // user-selected window, providing an identity-safe fallback.
+      const focused = groups.filter((group) => group.focused);
+      if (focused.length === 1) selected = { ...focused[0], nativeWindow: window };
+    }
+    if (!selected) selected = selectAddressableWindow(groups, window);
     if (!selected?.nativeWindow) {
       throw new ChromeCaptureError('CHROME_WINDOW_NOT_ADDRESSABLE', 'The selected Chrome window is not available through the CompuSync Chrome helper.');
     }
-    const captured = await this.bridge.request('window.capture', { windowId: selected.windowId });
+    let captured;
+    try { captured = await this.bridge.request('window.capture', { windowId: selected.windowId }); }
+    catch (error) {
+      if (error?.code === 'UNSUPPORTED_TABS') {
+        throw new ChromeCaptureError('CHROME_UNSUPPORTED_TABS', error.message);
+      }
+      throw error;
+    }
     const group = normalizeWindow(captured);
     if (!group) throw chromeError('CHROME_EXTENSION_PROTOCOL', 'The Chrome helper returned invalid window data.');
+    if (!group.tabsAddressable) {
+      throw new ChromeCaptureError('CHROME_UNSUPPORTED_TABS', 'This Chrome window contains a tab that cannot be safely handed off.');
+    }
     const ordered = [...group.tabs].sort((a, b) => a.index - b.index);
     let activeIdx = ordered.findIndex((tab) => tab.active);
     if (activeIdx < 0) activeIdx = 0;

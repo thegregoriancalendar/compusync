@@ -35,6 +35,7 @@ function clampOriginToPlacement(rect, placement) {
 function offscreenOrigin(rect, source, target) {
   if (target.origin.x >= source.origin.x + source.size.w) return { x: target.origin.x - rect.w - 1, y: rect.y };
   if (target.origin.x + target.size.w <= source.origin.x) return { x: target.origin.x + target.size.w + 1, y: rect.y };
+  if (target.origin.y + target.size.h <= source.origin.y) return { x: rect.x, y: target.origin.y + target.size.h + 1 };
   return { x: rect.x, y: target.origin.y - rect.h - 1 };
 }
 
@@ -46,6 +47,7 @@ function targetForSource(source, placements) {
     Math.abs(target.origin.x - source.origin.x - source.size.w),
     Math.abs(source.origin.x - target.origin.x - target.size.w),
     Math.abs(target.origin.y - source.origin.y - source.size.h),
+    Math.abs(source.origin.y - target.origin.y - target.size.h),
   );
   return peers.sort((a, b) => edgeDistance(a) - edgeDistance(b))[0];
 }
@@ -54,13 +56,21 @@ function motionTowardEdge(previous, current, source, target) {
   if (!previous) return false;
   if (target.origin.x >= source.origin.x + source.size.w) return current.x > previous.x;
   if (target.origin.x + target.size.w <= source.origin.x) return current.x < previous.x;
-  return current.y > previous.y;
+  if (target.origin.y >= source.origin.y + source.size.h) return current.y > previous.y;
+  return current.y < previous.y;
 }
 
 function originDistanceToEdge(rect, source, target) {
-  if (target.origin.x >= source.origin.x + source.size.w) return Math.abs(source.origin.x + source.size.w - rect.x);
-  if (target.origin.x + target.size.w <= source.origin.x) return Math.abs(rect.x - source.origin.x);
-  return Math.abs(source.origin.y + source.size.h - rect.y);
+  if (target.origin.x >= source.origin.x + source.size.w) {
+    return Math.max(0, source.origin.x + source.size.w - (rect.x + rect.w));
+  }
+  if (target.origin.x + target.size.w <= source.origin.x) {
+    return Math.max(0, rect.x - source.origin.x);
+  }
+  if (target.origin.y >= source.origin.y + source.size.h) {
+    return Math.max(0, source.origin.y + source.size.h - (rect.y + rect.h));
+  }
+  return Math.max(0, rect.y - source.origin.y);
 }
 
 function excludedState(value) {

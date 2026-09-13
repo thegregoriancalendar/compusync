@@ -33,6 +33,7 @@ const WM_QUIT: u32 = 0x0012;
 const WM_DISPLAYCHANGE: u32 = 0x007E;
 const WM_INPUT: u32 = 0x00FF;
 const WM_HOTKEY: u32 = 0x0312;
+const SMTO_ABORTIFHUNG: u32 = 0x0002;
 const RIM_TYPEMOUSE: u32 = 0;
 const RID_INPUT: u32 = 0x10000003;
 const RIDEV_INPUTSINK: u32 = 0x00000100;
@@ -239,6 +240,15 @@ unsafe extern "system" {
     fn SetForegroundWindow(window: Hwnd) -> Bool;
     fn ShowWindow(window: Hwnd, command: i32) -> Bool;
     fn PostMessageW(window: Hwnd, message: u32, wparam: Wparam, lparam: Lparam) -> Bool;
+    fn SendMessageTimeoutW(
+        window: Hwnd,
+        message: u32,
+        wparam: Wparam,
+        lparam: Lparam,
+        flags: u32,
+        timeout: u32,
+        result: *mut usize,
+    ) -> Lresult;
     fn SendInput(count: u32, inputs: *const Input, size: i32) -> u32;
     fn GetForegroundWindow() -> Hwnd;
     fn RegisterClassW(class: *const WndClass) -> u16;
@@ -1266,11 +1276,23 @@ impl Platform for HostPlatform {
     fn terminate_move_loop(&mut self, id: &str) -> Result<(), String> {
         let hwnd = parse_hwnd(id)?;
         let context = hook_context().ok_or_else(|| "input hook is not active".to_string())?;
-        // Queue cancellation on the window thread before injecting the
-        // release. This dismisses Windows' move/snap mode instead of letting a
-        // release at the monitor edge commit an Aero Snap layout.
-        if unsafe { PostMessageW(hwnd, WM_CANCELMODE, 0, 0) } == 0 {
-            return Err(os_error("PostMessage(WM_CANCELMODE)"));
+        // Synchronously leave the modal move loop before injecting release.
+        // PostMessage only confirmed queueing, allowing SendInput to overtake
+        // WM_CANCELMODE and commit an Aero Snap layout at the monitor edge.
+        let mut message_result = 0usize;
+        if unsafe {
+            SendMessageTimeoutW(
+                hwnd,
+                WM_CANCELMODE,
+                0,
+                0,
+                SMTO_ABORTIFHUNG,
+                100,
+                &mut message_result,
+            )
+        } == 0
+        {
+            return Err(os_error("SendMessageTimeout(WM_CANCELMODE)"));
         }
         context.suppress_move_loop_up.store(true, Ordering::Release);
         if let Err(error) = self.synthesize_button("left", false) {

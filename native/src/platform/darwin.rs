@@ -3,7 +3,7 @@ use crate::{DisplayMetric, NativeEvent, Point, Rect, WindowInfo};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::BTreeMap,
     ffi::{c_char, c_void, CStr},
     panic::{catch_unwind, AssertUnwindSafe},
     ptr::{null, null_mut},
@@ -59,6 +59,7 @@ const CG_FIELD_SCROLL_DELTA_AXIS_1: u32 = 11;
 const CG_FIELD_SCROLL_FIXED_DELTA_AXIS_1: u32 = 93;
 const CG_FIELD_SOURCE_USER_DATA: u32 = 42;
 const COMPUSYNC_SOURCE_TAG: i64 = 0x4353_594E;
+const COMPUSYNC_MOVE_LOOP_TAG: i64 = 0x4353_4D4C;
 const CG_FLAG_SHIFT: u64 = 1 << 17;
 const CG_FLAG_CONTROL: u64 = 1 << 18;
 const CG_FLAG_ALTERNATE: u64 = 1 << 19;
@@ -76,6 +77,7 @@ struct AxConstants {
     position: usize,
     size: usize,
     title: usize,
+    minimized: usize,
     fullscreen: usize,
     moved: usize,
     resized: usize,
@@ -95,6 +97,7 @@ static AX: Lazy<AxConstants> = Lazy::new(|| {
         position: make(b"AXPosition\0"),
         size: make(b"AXSize\0"),
         title: make(b"AXTitle\0"),
+        minimized: make(b"AXMinimized\0"),
         fullscreen: make(b"AXFullScreen\0"),
         moved: make(b"AXMoved\0"),
         resized: make(b"AXResized\0"),
@@ -132,7 +135,6 @@ unsafe extern "C" {
     static kCFBooleanTrue: CfType;
     static kCGWindowOwnerPID: CfString;
     static kCGWindowOwnerName: CfString;
-    static kCGWindowName: CfString;
     static kCGWindowLayer: CfString;
     fn CFRelease(value: CfType);
     fn CFArrayGetCount(array: CfArray) -> isize;
@@ -476,6 +478,7 @@ struct TapContext {
     linked: AtomicBool,
     owner: AtomicBool,
     left_down: AtomicBool,
+    move_loop_terminated: AtomicBool,
     tap: Mutex<CfMachPort>,
     drag_watch: Mutex<Option<AxDragWatch>>,
 }
@@ -835,21 +838,27 @@ unsafe fn event_tap_inner(
         }
         return event;
     }
-    let compusync_event = unsafe {
-        CGEventGetIntegerValueField(event, CG_FIELD_SOURCE_USER_DATA) == COMPUSYNC_SOURCE_TAG
-    };
+    let source_tag = unsafe { CGEventGetIntegerValueField(event, CG_FIELD_SOURCE_USER_DATA) };
+    if source_tag == COMPUSYNC_MOVE_LOOP_TAG {
+        // This release is delivered only to AppKit to leave its native drag;
+        // the physical button remains logically held until the user's actual
+        // release completes the cross-screen handoff.
+        return event;
+    }
+    let compusync_event = source_tag == COMPUSYNC_SOURCE_TAG;
     if compusync_event {
         // Do not echo injected peer input back across the transport, but keep
         // the local drag watcher in sync so a peer-driven Chrome drag can
         // still become a live cross-screen handoff.
         if kind == CG_EVENT_LEFT_DOWN {
             context.left_down.store(true, Ordering::Release);
+            context.move_loop_terminated.store(false, Ordering::Release);
             clear_drag_watch(context, false);
         } else if kind == CG_EVENT_LEFT_DRAGGED {
             ensure_drag_watch(context);
-            poll_drag_watch(context);
         } else if kind == CG_EVENT_LEFT_UP {
             context.left_down.store(false, Ordering::Release);
+            context.move_loop_terminated.store(false, Ordering::Release);
             clear_drag_watch(context, true);
         }
         return event;
@@ -866,7 +875,6 @@ unsafe fn event_tap_inner(
         | CG_EVENT_OTHER_DRAGGED => {
             if kind == CG_EVENT_LEFT_DRAGGED {
                 ensure_drag_watch(context);
-                poll_drag_watch(context);
             }
             let mut native = NativeEvent::simple("cursorDelta");
             native.timestamp = unsafe { CGEventGetTimestamp(event) } as f64 / 1_000_000.0;
@@ -877,6 +885,10 @@ unsafe fn event_tap_inner(
                 CGEventGetIntegerValueField(event, CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_Y)
             } as f64);
             (context.sink)(native);
+            if kind == CG_EVENT_LEFT_DRAGGED && context.move_loop_terminated.load(Ordering::Acquire)
+            {
+                return null_mut();
+            }
             // Forward the raw delta to the shared owner, but do not also move
             // the non-owner Mac cursor. Owner motion continues to applications
             // normally so native hover and drag behavior remain intact.
@@ -954,9 +966,11 @@ unsafe fn event_tap_inner(
             native.modifiers = Some(modifiers);
             if kind == CG_EVENT_LEFT_DOWN {
                 context.left_down.store(true, Ordering::Release);
+                context.move_loop_terminated.store(false, Ordering::Release);
                 clear_drag_watch(context, false);
             } else if kind == CG_EVENT_LEFT_UP {
                 context.left_down.store(false, Ordering::Release);
+                context.move_loop_terminated.store(false, Ordering::Release);
                 clear_drag_watch(context, true);
             }
             (context.sink)(native);
@@ -976,6 +990,8 @@ struct CaptureRuntime {
     context: Arc<TapContext>,
     run_loop: CfRunLoop,
     thread: Option<JoinHandle<()>>,
+    drag_poll_stop: Arc<AtomicBool>,
+    drag_poll_thread: Option<JoinHandle<()>>,
 }
 unsafe impl Send for CaptureRuntime {}
 
@@ -986,6 +1002,10 @@ fn take_run_loop(run_loop: &mut CfRunLoop) -> Option<CfRunLoop> {
 
 impl CaptureRuntime {
     fn stop(&mut self) {
+        self.drag_poll_stop.store(true, Ordering::Release);
+        if let Some(thread) = self.drag_poll_thread.take() {
+            let _ = thread.join();
+        }
         clear_drag_watch(&self.context, false);
         // HostPlatform stops this runtime explicitly and dropping it invokes
         // stop again. Consume the run-loop pointer before waking and joining
@@ -1086,6 +1106,31 @@ impl Platform for HostPlatform {
                 if capture.context.left_down.load(Ordering::Acquire) {
                     ensure_drag_watch(&capture.context);
                     poll_drag_watch(&capture.context);
+                    // A decoupled CoreGraphics cursor warp does not create an
+                    // AppKit drag event. Deliver one at the authoritative
+                    // position so Chrome visibly follows both local and peer
+                    // input while the button remains held.
+                    if !capture.context.move_loop_terminated.load(Ordering::Acquire) {
+                        let drag = unsafe {
+                            CGEventCreateMouseEvent(
+                                null(),
+                                CG_EVENT_LEFT_DRAGGED,
+                                CgPoint { x: p.x, y: p.y },
+                                0,
+                            )
+                        };
+                        if !drag.is_null() {
+                            unsafe {
+                                CGEventSetIntegerValueField(
+                                    drag,
+                                    CG_FIELD_SOURCE_USER_DATA,
+                                    COMPUSYNC_SOURCE_TAG,
+                                );
+                                CGEventPost(0, drag);
+                                CFRelease(drag);
+                            }
+                        }
+                    }
                 }
             }
             Ok(())
@@ -1149,7 +1194,6 @@ impl Platform for HostPlatform {
             return Err("CGWindowListCopyWindowInfo failed; Screen Recording/Accessibility permission may be missing".into());
         }
         let mut owners = BTreeMap::<i32, String>::new();
-        let mut visible = HashSet::<(i32, String)>::new();
         for i in 0..unsafe { CFArrayGetCount(list.0) } {
             let d = unsafe { CFArrayGetValueAtIndex(list.0, i) };
             if cf_i64(d, unsafe { kCGWindowLayer }) != 0 {
@@ -1158,10 +1202,6 @@ impl Platform for HostPlatform {
             let pid = cf_i64(d, unsafe { kCGWindowOwnerPID }) as i32;
             let owner = cf_string(unsafe { CFDictionaryGetValue(d, kCGWindowOwnerName) });
             owners.entry(pid).or_insert(owner);
-            visible.insert((
-                pid,
-                cf_string(unsafe { CFDictionaryGetValue(d, kCGWindowName) }),
-            ));
         }
         let mut result = vec![];
         for (pid, process_name) in owners {
@@ -1197,6 +1237,7 @@ impl Platform for HostPlatform {
                 } else {
                     String::new()
                 };
+                let minimized = ax_bool(window, ax(AX.minimized)).unwrap_or(false);
                 result.push(WindowInfo {
                     id: format!("ax:{pid}:{index}"),
                     pid: pid as u32,
@@ -1208,8 +1249,12 @@ impl Platform for HostPlatform {
                         width: size.width,
                         height: size.height,
                     },
-                    visible: visible.contains(&(pid, title)),
-                    minimized: false,
+                    // The owner was discovered from the on-screen CG list.
+                    // AXTitle and CGWindowName are not stable join keys (and
+                    // CGWindowName may be empty without Screen Recording), so
+                    // AXMinimized is the reliable per-window visibility gate.
+                    visible: !minimized,
+                    minimized,
                     maximized: false,
                     fullscreen: ax_bool(window, ax(AX.fullscreen)).unwrap_or(false),
                 });
@@ -1345,6 +1390,7 @@ impl Platform for HostPlatform {
             linked: AtomicBool::new(false),
             owner: AtomicBool::new(true),
             left_down: AtomicBool::new(false),
+            move_loop_terminated: AtomicBool::new(false),
             tap: Mutex::new(null_mut()),
             drag_watch: Mutex::new(None),
         });
@@ -1355,10 +1401,36 @@ impl Platform for HostPlatform {
             .recv_timeout(std::time::Duration::from_secs(2))
             .map_err(|_| "event tap thread did not start".to_string())??
             as CfRunLoop;
+        // Poll AX geometry after input has returned from the head-insert event
+        // tap. Chrome commonly delays AXMoved until mouse-up, while polling
+        // inside the tap delays delivery of the very drag event Chrome needs
+        // in order to update the window.
+        let drag_poll_stop = Arc::new(AtomicBool::new(false));
+        let poll_stop = drag_poll_stop.clone();
+        let poll_context = context.clone();
+        let drag_poll_thread = match thread::Builder::new()
+            .name("compusync-mac-window-drag".into())
+            .spawn(move || {
+                while !poll_stop.load(Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_millis(8));
+                    if poll_context.left_down.load(Ordering::Acquire) {
+                        poll_drag_watch(&poll_context);
+                    }
+                }
+            }) {
+            Ok(thread) => thread,
+            Err(error) => {
+                unsafe { CFRunLoopStop(run_loop) };
+                let _ = thread.join();
+                return Err(error.to_string());
+            }
+        };
         self.capture = Some(CaptureRuntime {
             context,
             run_loop,
             thread: Some(thread),
+            drag_poll_stop,
+            drag_poll_thread: Some(drag_poll_thread),
         });
         Ok(())
     }
@@ -1374,8 +1446,33 @@ impl Platform for HostPlatform {
             runtime.stop()
         }
     }
-    // macOS foreign windows do not enter the Windows-style modal SC_MOVE loop.
     fn terminate_move_loop(&mut self, _: &str) -> Result<(), String> {
+        let context = self
+            .capture
+            .as_ref()
+            .map(|runtime| runtime.context.clone())
+            .ok_or_else(|| "input capture is not active".to_string())?;
+        let location = self.cursor_position()?;
+        let event = unsafe {
+            CGEventCreateMouseEvent(
+                null(),
+                CG_EVENT_LEFT_UP,
+                CgPoint {
+                    x: location.x,
+                    y: location.y,
+                },
+                0,
+            )
+        };
+        if event.is_null() {
+            return Err("CGEventCreateMouseEvent move-loop release failed".into());
+        }
+        context.move_loop_terminated.store(true, Ordering::Release);
+        unsafe {
+            CGEventSetIntegerValueField(event, CG_FIELD_SOURCE_USER_DATA, COMPUSYNC_MOVE_LOOP_TAG);
+            CGEventPost(0, event);
+            CFRelease(event);
+        }
         Ok(())
     }
 }

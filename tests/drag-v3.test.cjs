@@ -2,7 +2,9 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { DragController, crossedFraction, offscreenOrigin } = require('../src/main/drag.cjs');
+const {
+  DragController, crossedFraction, offscreenOrigin, originDistanceToEdge, motionTowardEdge,
+} = require('../src/main/drag.cjs');
 
 const placements = [
   { machineId: 'a', origin: { x: 0, y: 0 }, size: { w: 1000, h: 800 }, scale: 1 },
@@ -90,6 +92,23 @@ test('crossing math and seam-side offscreen prewarm are deterministic', () => {
   assert.equal(crossedFraction({ x: 800, y: 100, w: 400, h: 300 }, placements[1]), 0.5);
   assert.deepEqual(offscreenOrigin({ x: 800, y: 100, w: 400, h: 300 }, placements[0], placements[1]),
     { x: 599, y: 100 });
+});
+
+test('wide windows arm from their leading edge and vertical helpers support an upper peer', async () => {
+  const setup = sourceController();
+  assert.equal(setup.drag.begin({
+    window: { id: 'wide' }, geometryVU: { x: 0, y: 100, w: 900, h: 300 },
+    cursorVU: { x: 500, y: 180 },
+  }), true);
+  await setup.drag.frame({ geometryVU: { x: 0, y: 100, w: 900, h: 300 }, cursorVU: { x: 510, y: 180 } });
+  assert.equal(setup.sent.filter(({ type }) => type === 'window.offer').length, 1);
+
+  const source = { origin: { x: 0, y: 0 }, size: { w: 1000, h: 800 } };
+  const above = { origin: { x: 0, y: -800 }, size: { w: 1000, h: 800 } };
+  assert.equal(originDistanceToEdge({ x: 100, y: 50, w: 400, h: 300 }, source, above), 50);
+  assert.equal(motionTowardEdge({ x: 100, y: 50 }, { x: 100, y: 40 }, source, above), true);
+  assert.deepEqual(offscreenOrigin({ x: 100, y: -100, w: 400, h: 300 }, source, above),
+    { x: 100, y: 1 });
 });
 
 test('fixed grab offset drives both copies from authoritative cursor and source closes only after ack', async () => {
