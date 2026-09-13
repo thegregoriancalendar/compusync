@@ -7,12 +7,51 @@
 })(typeof window === 'object' ? window : null, () => {
   const POSITIONS = Object.freeze(['left', 'right', 'top']);
   const MIN_OVERLAP = 24;
+  const MAX_GROUP_WIDTH = 152;
+  const MAX_GROUP_HEIGHT = 104;
   const clamp = (value, minimum, maximum) => Math.min(maximum, Math.max(minimum, value));
 
   function size(value, fallback) {
     return {
       w: Number.isFinite(value?.w) && value.w > 0 ? value.w : fallback.w,
       h: Number.isFinite(value?.h) && value.h > 0 ? value.h : fallback.h,
+    };
+  }
+
+  function monitorGroup(layout, fallbackAspect = 1.6, limits = {}) {
+    const fallbackWidth = Number.isFinite(limits.maxWidth) ? limits.maxWidth : 128;
+    const fallbackHeight = Math.round(fallbackWidth / fallbackAspect);
+    const displays = Array.isArray(layout?.displays) ? layout.displays.filter((display) => {
+      const bounds = display?.bounds;
+      return typeof display.id === 'string' && bounds
+        && [bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)
+        && bounds.width > 0 && bounds.height > 0;
+    }) : [];
+    if (!displays.length) return {
+      w: fallbackWidth,
+      h: fallbackHeight,
+      monitors: [{ id: 'unknown', x: 0, y: 0, w: fallbackWidth, h: fallbackHeight, primary: true }],
+    };
+    const left = Math.min(...displays.map(({ bounds }) => bounds.x));
+    const top = Math.min(...displays.map(({ bounds }) => bounds.y));
+    const right = Math.max(...displays.map(({ bounds }) => bounds.x + bounds.width));
+    const bottom = Math.max(...displays.map(({ bounds }) => bounds.y + bounds.height));
+    const width = right - left, height = bottom - top;
+    const maxWidth = Number.isFinite(limits.maxWidth) ? limits.maxWidth : MAX_GROUP_WIDTH;
+    const maxHeight = Number.isFinite(limits.maxHeight) ? limits.maxHeight : MAX_GROUP_HEIGHT;
+    const scale = Math.min(maxWidth / width, maxHeight / height);
+    return {
+      w: width * scale,
+      h: height * scale,
+      monitors: displays.map((display, index) => ({
+        id: display.id,
+        x: (display.bounds.x - left) * scale,
+        y: (display.bounds.y - top) * scale,
+        w: display.bounds.width * scale,
+        h: display.bounds.height * scale,
+        primary: Boolean(display.primary),
+        index,
+      })),
     };
   }
 
@@ -90,5 +129,14 @@
         : 'Mac is left of Windows. Cross at Mac right ↔ Windows left.';
   }
 
-  return { POSITIONS, MIN_OVERLAP, arrangeDiagram, snapDragged, arrangementText };
+  return {
+    POSITIONS,
+    MIN_OVERLAP,
+    MAX_GROUP_WIDTH,
+    MAX_GROUP_HEIGHT,
+    monitorGroup,
+    arrangeDiagram,
+    snapDragged,
+    arrangementText,
+  };
 });

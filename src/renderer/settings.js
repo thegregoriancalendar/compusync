@@ -17,36 +17,64 @@ const localCursorDefaults = {
   linked: true,
 };
 
-function diagramSizes(next) {
+function diagramGroups(next) {
   const layouts = Object.values(next.state?.layouts || {});
-  const metric = (platform, fallback) => {
+  const group = (platform, fallback) => {
     const layout = layouts.find((candidate) => candidate.platform === platform);
-    const width = layout?.desktop?.widthVU || layout?.displays?.[0]?.bounds?.width;
-    const height = layout?.desktop?.heightVU || layout?.displays?.[0]?.bounds?.height;
-    const aspect = Number.isFinite(width / height) ? Math.max(1.25, Math.min(2.2, width / height)) : fallback;
-    const w = 128;
-    return { w, h: Math.round(w / aspect) };
+    return window.CompuSyncScreenLayout.monitorGroup(layout, fallback);
   };
-  return { mac: metric('darwin', 1.55), windows: metric('win32', 1.7) };
+  return { mac: group('darwin', 1.55), windows: group('win32', 1.7) };
+}
+
+function renderMonitorGroup(element, platform, group, computerName) {
+  element.replaceChildren();
+  const platformName = platform === 'mac' ? 'Mac' : 'Windows';
+  const count = group.monitors.length;
+  element.setAttribute('aria-label', `${platformName} computer with ${count} display${count === 1 ? '' : 's'}. Drag to arrange.`);
+  for (const [index, monitor] of group.monitors.entries()) {
+    const display = document.createElement('span');
+    display.className = `layout-monitor${monitor.primary ? ' primary' : ''}`;
+    display.style.left = `${monitor.x}px`;
+    display.style.top = `${monitor.y}px`;
+    display.style.width = `${monitor.w}px`;
+    display.style.height = `${monitor.h}px`;
+    display.title = `${platformName} display ${index + 1}${monitor.primary ? ' (primary)' : ''}`;
+    const label = document.createElement('strong');
+    label.textContent = count === 1 ? platformName : String(index + 1);
+    display.append(label);
+    if (platform === 'mac' && Math.abs(monitor.y) < .5) {
+      const blocked = document.createElement('span');
+      blocked.className = 'blocked-edge';
+      blocked.setAttribute('aria-hidden', 'true');
+      display.append(blocked);
+    }
+    element.append(display);
+  }
+  const label = document.createElement('span');
+  label.className = 'layout-group-label';
+  label.textContent = `${platformName}${computerName ? ` · ${computerName}` : ''} · ${count} display${count === 1 ? '' : 's'}`;
+  element.append(label);
 }
 
 function renderScreenLayout(next = details) {
   if (!next || !window.CompuSyncScreenLayout) return;
   const editor = $('screen-layout-editor');
-  const sizes = diagramSizes(next);
+  const groups = diagramGroups(next);
   layoutRects = window.CompuSyncScreenLayout.arrangeDiagram(
-    editor.clientWidth, editor.clientHeight, layoutDraft.macPosition, layoutDraft.displayOffset, sizes,
+    editor.clientWidth, editor.clientHeight, layoutDraft.macPosition, layoutDraft.displayOffset, groups,
   );
+  const peer = next.status?.peers?.[0];
   for (const [platform, id] of [['mac', 'layout-mac'], ['windows', 'layout-windows']]) {
     const rect = layoutRects[platform];
     const element = $(id);
+    element.classList.toggle('group-above', platform === 'mac' && layoutDraft.macPosition === 'top');
     Object.assign(element.style, {
       left: `${rect.x}px`, top: `${rect.y}px`, width: `${rect.w}px`, height: `${rect.h}px`,
     });
+    const nativePlatform = platform === 'mac' ? 'darwin' : 'win32';
+    const computerName = next.platform === nativePlatform ? next.name : peer?.name || '';
+    renderMonitorGroup(element, platform, groups[platform], computerName);
   }
-  const peer = next.status?.peers?.[0];
-  $('layout-mac-name').textContent = next.platform === 'darwin' ? next.name : peer?.name || '';
-  $('layout-windows-name').textContent = next.platform === 'win32' ? next.name : peer?.name || '';
   $('layout-description').textContent = window.CompuSyncScreenLayout.arrangementText(layoutDraft.macPosition);
 }
 
