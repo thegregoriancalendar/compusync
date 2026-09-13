@@ -131,7 +131,8 @@ function localLayout() {
     };
   } catch { /* Native-unavailable development builds keep the Electron layout. */ }
   return {
-    revision: ++layoutRevision, edge: config.edge, activeDisplayId: String(active.id), displays,
+    revision: ++layoutRevision, edge: config.edge, platform: process.platform,
+    activeDisplayId: String(active.id), displays,
     ...(desktop ? { desktop } : {}),
   };
 }
@@ -153,7 +154,7 @@ function handleDisplayChange() {
 function details() {
   const ips = addresses();
   return {
-    id: config.id, name: config.name, edge: config.edge, autoLaunch: config.autoLaunch,
+    id: config.id, name: config.name, platform: process.platform, edge: config.edge, autoLaunch: config.autoLaunch,
     cursorSettings: {
       ...config.cursorSettings,
       linked: inputRuntime ? inputRuntime.cursor.linked : false,
@@ -314,6 +315,11 @@ function ensureInputRuntime() {
       logger: applicationLogger,
       onLayoutNeeded: scheduleLayoutUpdate,
       onNotice: addNotice,
+      onSettingsChange: (layout) => {
+        config.cursorSettings = { ...config.cursorSettings, ...layout };
+        saveConfig();
+        refreshStatus();
+      },
       onModeChange: (linked, reason) => {
         config.cursorSettings.linked = linked;
         if (linked) {

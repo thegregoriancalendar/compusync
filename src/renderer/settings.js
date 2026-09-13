@@ -5,14 +5,50 @@ const $ = (id) => document.getElementById(id);
 let details;
 let selectedTab = false;
 let copyTimer;
+let layoutDraft = { macPosition: 'left', displayOffset: 0 };
+let layoutRects = null;
+let layoutDrag = null;
 
 const localCursorDefaults = {
-  screenSide: /Mac/.test(navigator.platform) ? 'left' : 'right',
-  verticalOffsetVU: 0,
+  macPosition: 'left',
+  displayOffset: 0,
   acceleration: { base: 1, threshold: 0.5, slope: 0.015 },
   edgeResistanceVU: 0,
   linked: true,
 };
+
+function diagramSizes(next) {
+  const layouts = Object.values(next.state?.layouts || {});
+  const metric = (platform, fallback) => {
+    const layout = layouts.find((candidate) => candidate.platform === platform);
+    const width = layout?.desktop?.widthVU || layout?.displays?.[0]?.bounds?.width;
+    const height = layout?.desktop?.heightVU || layout?.displays?.[0]?.bounds?.height;
+    const aspect = Number.isFinite(width / height) ? Math.max(1.25, Math.min(2.2, width / height)) : fallback;
+    const w = 128;
+    return { w, h: Math.round(w / aspect) };
+  };
+  return { mac: metric('darwin', 1.55), windows: metric('win32', 1.7) };
+}
+
+function renderScreenLayout(next = details) {
+  if (!next || !window.CompuSyncScreenLayout) return;
+  const editor = $('screen-layout-editor');
+  const sizes = diagramSizes(next);
+  layoutRects = window.CompuSyncScreenLayout.arrangeDiagram(
+    editor.clientWidth, editor.clientHeight, layoutDraft.macPosition, layoutDraft.displayOffset, sizes,
+  );
+  for (const [platform, id] of [['mac', 'layout-mac'], ['windows', 'layout-windows']]) {
+    const rect = layoutRects[platform];
+    const element = $(id);
+    Object.assign(element.style, {
+      left: `${rect.x}px`, top: `${rect.y}px`, width: `${rect.w}px`, height: `${rect.h}px`,
+    });
+  }
+  const peer = next.status?.peers?.[0];
+  $('layout-mac-name').textContent = next.platform === 'darwin' ? next.name : peer?.name || '';
+  $('layout-windows-name').textContent = next.platform === 'win32' ? next.name : peer?.name || '';
+  $('layout-description').textContent = window.CompuSyncScreenLayout.arrangementText(layoutDraft.macPosition);
+}
 
 function setValueUnlessEditing(id, value) {
   const field = $(id);
@@ -66,6 +102,7 @@ function render(next) {
   const cursorReady = connected && next.cursorLinkReady === true;
   const cursorPending = next.cursorLinkPending === true;
   const cursor = next.cursorSettings || localCursorDefaults;
+  if (!layoutDrag) layoutDraft = { macPosition: cursor.macPosition, displayOffset: cursor.displayOffset };
   $('pairing-card').hidden = connected;
   $('status-dot').className = `dot ${status.phase}`;
   $('status').textContent = connected ? `Connected to ${status.peers[0]?.name || 'your other laptop'}` : {
@@ -96,8 +133,7 @@ function render(next) {
   $('update-check').disabled = !update.canCheck;
   $('update-install').hidden = !update.canRestart;
   $('app-version').textContent = update.currentVersion ? `Current version ${update.currentVersion}` : '';
-  $('screen-side').value = cursor.screenSide;
-  setValueUnlessEditing('vertical-offset', cursor.verticalOffsetVU);
+  renderScreenLayout(next);
   setValueUnlessEditing('acceleration-base', cursor.acceleration.base);
   setValueUnlessEditing('acceleration-threshold', cursor.acceleration.threshold);
   setValueUnlessEditing('acceleration-slope', cursor.acceleration.slope);
@@ -122,8 +158,8 @@ function render(next) {
 
 function cursorSettingsFromForm() {
   return {
-    screenSide: $('screen-side').value,
-    verticalOffsetVU: Number($('vertical-offset').value),
+    macPosition: layoutDraft.macPosition,
+    displayOffset: layoutDraft.displayOffset,
     acceleration: {
       base: Number($('acceleration-base').value),
       threshold: Number($('acceleration-threshold').value),
@@ -189,9 +225,57 @@ $('host').addEventListener('click', async () => {
   $('host').disabled = false;
 });
 for (const id of [
-  'auto-launch', 'screen-side', 'vertical-offset',
+  'auto-launch',
   'acceleration-base', 'acceleration-threshold', 'acceleration-slope', 'edge-resistance',
 ]) $(id).addEventListener('change', savePreferences);
+
+for (const [id, platform] of [['layout-mac', 'mac'], ['layout-windows', 'windows']]) {
+  const screen = $(id);
+  screen.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || !layoutRects) return;
+    const editorBounds = $('screen-layout-editor').getBoundingClientRect();
+    const rect = layoutRects[platform];
+    layoutDrag = {
+      platform,
+      pointerId: event.pointerId,
+      offsetX: event.clientX - editorBounds.left - rect.x - rect.w / 2,
+      offsetY: event.clientY - editorBounds.top - rect.y - rect.h / 2,
+    };
+    screen.classList.add('dragging');
+    screen.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  });
+  screen.addEventListener('pointermove', (event) => {
+    if (!layoutDrag || layoutDrag.platform !== platform || layoutDrag.pointerId !== event.pointerId) return;
+    const bounds = $('screen-layout-editor').getBoundingClientRect();
+    const snapped = window.CompuSyncScreenLayout.snapDragged(platform, {
+      x: event.clientX - bounds.left - layoutDrag.offsetX,
+      y: event.clientY - bounds.top - layoutDrag.offsetY,
+    }, layoutRects);
+    if (!snapped) return;
+    layoutDraft = snapped;
+    renderScreenLayout();
+  });
+  const finishDrag = (event) => {
+    if (!layoutDrag || layoutDrag.platform !== platform || layoutDrag.pointerId !== event.pointerId) return;
+    screen.classList.remove('dragging');
+    layoutDrag = null;
+    void savePreferences();
+  };
+  screen.addEventListener('pointerup', finishDrag);
+  screen.addEventListener('pointercancel', finishDrag);
+  screen.addEventListener('keydown', (event) => {
+    const positions = platform === 'mac'
+      ? { ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'top' }
+      : { ArrowLeft: 'right', ArrowRight: 'left', ArrowDown: 'top' };
+    if (!positions[event.key]) return;
+    layoutDraft = { macPosition: positions[event.key], displayOffset: 0 };
+    renderScreenLayout();
+    void savePreferences();
+    event.preventDefault();
+  });
+}
+window.addEventListener('resize', () => renderScreenLayout());
 $('cursor-mode').addEventListener('click', () => command(details?.cursorSettings?.linked === false ? 'cursor-link' : 'cursor-unlink'));
 $('toggle-ownership').addEventListener('click', () => command('cursor-toggle-ownership'));
 $('update-check').addEventListener('click', () => command('update-check'));

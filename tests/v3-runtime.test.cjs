@@ -5,8 +5,8 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const { SharedInputRuntime, derivePairPlacements } = require('../src/main/runtime.cjs');
 
-function layout(width, height, scaleFactor) {
-  return { displays: [{ bounds: { x: 0, y: 0, width, height }, scaleFactor, primary: true }] };
+function layout(width, height, scaleFactor, platform) {
+  return { platform, displays: [{ bounds: { x: 0, y: 0, width, height }, scaleFactor, primary: true }] };
 }
 
 class FakeSession extends EventEmitter {
@@ -34,34 +34,35 @@ class FakeNative extends EventEmitter {
 }
 
 const settings = {
-  screenSide: 'right', verticalOffsetVU: 10,
+  macPosition: 'left', displayOffset: 0,
   acceleration: { base: 1, threshold: 0.5, slope: 0.015 },
   edgeResistanceVU: 0, linked: true,
 };
 
 test('host layout configuration produces one adjacent, mixed-DPI VU pair', () => {
-  const placements = derivePairPlacements({ win: layout(1920, 1080, 1.25), mac: layout(1440, 900, 2) }, 'win', 'mac', settings);
+  const placements = derivePairPlacements({ win: layout(1920, 1080, 1.25, 'win32'), mac: layout(1440, 900, 2, 'darwin') }, 'win', 'mac', settings);
   assert.deepEqual(placements[0].size, { w: 1920, h: 1080 });
   assert.equal(placements[0].scale, 1.25);
   assert.equal(placements[1].origin.x, -1440);
-  assert.equal(placements[1].origin.y, 100);
+  assert.equal(placements[1].origin.y, 90);
 });
 
 test('v3 desktop metrics override the active-display DIP size for multi-monitor cursor placement', () => {
-  const win = { ...layout(2048, 1152, 1.25), desktop: { widthVU: 3584, heightVU: 1440, scale: 1.25 } };
-  const mac = { ...layout(1512, 982, 2), desktop: { widthVU: 2792, heightVU: 1080, scale: 2 } };
+  const win = { ...layout(2048, 1152, 1.25, 'win32'), desktop: { widthVU: 3584, heightVU: 1440, scale: 1.25 } };
+  const mac = { ...layout(1512, 982, 2, 'darwin'), desktop: { widthVU: 2792, heightVU: 1080, scale: 2 } };
   const placements = derivePairPlacements({ win, mac }, 'win', 'mac', settings);
   assert.deepEqual(placements[0].size, { w: 3584, h: 1440 });
   assert.equal(placements[0].scale, 1.25);
   assert.deepEqual(placements[1].size, { w: 2792, h: 1080 });
 });
 
-test('bottom layout places the peer below the host with the configured horizontal offset', () => {
+test('top layout places Mac above Windows without using the Mac menu-bar edge', () => {
   const placements = derivePairPlacements(
-    { win: layout(1920, 1080, 1.25), mac: layout(1440, 900, 2) },
-    'win', 'mac', { ...settings, screenSide: 'bottom' },
+    { win: layout(1920, 1080, 1.25, 'win32'), mac: layout(1440, 900, 2, 'darwin') },
+    'win', 'mac', { ...settings, macPosition: 'top', displayOffset: .5 },
   );
-  assert.deepEqual(placements[1].origin, { x: 250, y: 1080 });
+  assert.equal(placements[1].origin.y, -900);
+  assert.ok(placements[1].origin.x > 240);
 });
 
 test('join runtime builds distinct host and local screen placements while its transport peer is the host', () => {
@@ -69,7 +70,7 @@ test('join runtime builds distinct host and local screen placements while its tr
   const native = new FakeNative();
   const runtime = new SharedInputRuntime({
     session, native, machineId: 'mac', hostId: 'win', peerId: 'win', settings,
-    layouts: { win: layout(1920, 1080, 1), mac: layout(1440, 900, 2) },
+    layouts: { win: layout(1920, 1080, 1, 'win32'), mac: layout(1440, 900, 2, 'darwin') },
   });
   runtime.start();
   assert.deepEqual(runtime.cursor.placements.map(({ machineId }) => machineId), ['win', 'mac']);
@@ -87,7 +88,7 @@ test('runtime sanitizes traffic, agrees layout, links only with peer and native 
   const modes = [];
   const runtime = new SharedInputRuntime({
     session, native, machineId: 'win', hostId: 'win', peerId: 'mac', settings,
-    layouts: { win: layout(1920, 1080, 1), mac: layout(1440, 900, 2) },
+    layouts: { win: layout(1920, 1080, 1, 'win32'), mac: layout(1440, 900, 2, 'darwin') },
     onModeChange: (linked, reason) => modes.push([linked, reason]),
   });
   runtime.start();
@@ -107,7 +108,7 @@ test('runtime sanitizes traffic, agrees layout, links only with peer and native 
 test('one peer-wide link request activates both runtimes and unlink propagates', () => {
   const unlinkedSettings = { ...settings, linked: false };
   const winSession = new FakeSession(), macSession = new FakeSession();
-  const layouts = { win: layout(1920, 1080, 1), mac: layout(1440, 900, 2) };
+  const layouts = { win: layout(1920, 1080, 1, 'win32'), mac: layout(1440, 900, 2, 'darwin') };
   const win = new SharedInputRuntime({
     session: winSession, native: new FakeNative(), machineId: 'win', hostId: 'win', peerId: 'mac',
     settings: unlinkedSettings, layouts,
@@ -137,13 +138,41 @@ test('one peer-wide link request activates both runtimes and unlink propagates',
   mac.stop();
 });
 
+test('dragged canonical screen layout applies identically when changed from the join laptop', () => {
+  const unlinked = { ...settings, linked: false };
+  const layouts = { win: layout(1920, 1080, 1, 'win32'), mac: layout(1440, 900, 2, 'darwin') };
+  const hostSession = new FakeSession(), joinSession = new FakeSession();
+  const saved = [];
+  const host = new SharedInputRuntime({
+    session: hostSession, native: new FakeNative(), machineId: 'win', hostId: 'win', peerId: 'mac',
+    settings: unlinked, layouts, onSettingsChange: (value) => saved.push(value),
+  });
+  const join = new SharedInputRuntime({
+    session: joinSession, native: new FakeNative(), machineId: 'mac', hostId: 'win', peerId: 'win',
+    settings: unlinked, layouts,
+  });
+  host.start();
+  join.start();
+
+  join.updateSettings({ ...unlinked, macPosition: 'right', displayOffset: .4 });
+  const proposal = joinSession.sent.findLast(({ message }) => message.type === 'cursor.layout').message;
+  assert.equal(host.receive(proposal, 'mac'), true);
+  assert.deepEqual(saved.at(-1), { macPosition: 'right', displayOffset: .4 });
+  assert.equal(host.cursor.placementFor('mac').origin.x, 1920);
+  const acknowledgement = hostSession.sent.findLast(({ message }) => message.type === 'cursor.layout').message;
+  assert.equal(join.receive(acknowledgement, 'win'), true);
+  assert.equal(join.settings.macPosition, 'right');
+  host.stop();
+  join.stop();
+});
+
 test('orderly session restart recovers native input without reporting a failure or forgetting desired linking', () => {
   const session = new FakeSession();
   const native = new FakeNative();
   const modes = [];
   const runtime = new SharedInputRuntime({
     session, native, machineId: 'win', hostId: 'win', peerId: 'mac', settings,
-    layouts: { win: layout(1920, 1080, 1), mac: layout(1440, 900, 2) },
+    layouts: { win: layout(1920, 1080, 1, 'win32'), mac: layout(1440, 900, 2, 'darwin') },
     onModeChange: (linked, reason) => modes.push([linked, reason]),
   });
   runtime.start();
@@ -162,7 +191,7 @@ test('production native owns fail-safe hotkeys without Electron registration con
   const session = new FakeSession(), native = new FakeNative(), registered = [];
   const runtime = new SharedInputRuntime({
     session, native, machineId: 'win', hostId: 'win', peerId: 'mac', settings,
-    layouts: { win: layout(1920, 1080, 1), mac: layout(1440, 900, 2) },
+    layouts: { win: layout(1920, 1080, 1, 'win32'), mac: layout(1440, 900, 2, 'darwin') },
     globalShortcut: { register: (key) => { registered.push(key); return true; }, unregister() {} },
   });
   runtime.start();
@@ -174,7 +203,7 @@ test('overlapping peer placements are repaired with a runtime warning', () => {
   const session = new FakeSession(), native = new FakeNative(), warnings = [];
   const runtime = new SharedInputRuntime({
     session, native, machineId: 'win', hostId: 'win', peerId: 'mac', settings,
-    layouts: { win: layout(100, 100, 1), mac: layout(100, 100, 1) },
+    layouts: { win: layout(100, 100, 1, 'win32'), mac: layout(100, 100, 1, 'darwin') },
     logger: { warn: (message) => warnings.push(message) },
   });
   runtime.start();
@@ -193,7 +222,7 @@ test('a denied macOS event tap reports persistent Input Monitoring remediation',
   native.startCursorCapture = () => { throw new Error('CGEventTapCreate failed; grant Accessibility and Input Monitoring permissions'); };
   const runtime = new SharedInputRuntime({
     session, native, machineId: 'win', hostId: 'win', peerId: 'mac', settings,
-    layouts: { win: layout(100, 100, 1), mac: layout(100, 100, 1) },
+    layouts: { win: layout(100, 100, 1, 'win32'), mac: layout(100, 100, 1, 'darwin') },
     onNotice: (notice) => notices.push(notice),
   });
   runtime.start();

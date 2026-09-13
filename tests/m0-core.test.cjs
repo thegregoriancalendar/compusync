@@ -13,6 +13,7 @@ const {
   overlap,
   ensureNonOverlapping,
   layoutPair,
+  layoutMacAndWindows,
   boundingRect,
   placementFromDisplays,
   crossingTarget,
@@ -78,7 +79,13 @@ test('pair layout centers screens, applies offset, and never permits overlap', (
   assert.equal(fixed[1].origin.x, 100);
   assert.equal(overlap(fixed[0], fixed[1]), null);
   assert.equal(warnings.length, 1);
-  assert.throws(() => layoutPair(first, second, { screenSide: 'top' }), /shared edge/);
+  assert.deepEqual(layoutPair(first, second, { screenSide: 'top' })[1].origin, { x: 240, y: -900 });
+  const canonical = layoutMacAndWindows(
+    { ...first, platform: 'win32' }, { ...second, platform: 'darwin' },
+    { macPosition: 'right', displayOffset: 1 },
+  );
+  assert.equal(canonical[1].origin.x, 1920);
+  assert.ok(canonical[1].origin.y > 0);
 });
 
 test('a multi-monitor desktop becomes one logical placement', () => {
@@ -91,15 +98,19 @@ test('a multi-monitor desktop becomes one logical placement', () => {
     placement('pc', 20, 30, 3200, 1124, 1.5));
 });
 
-test('crossing finds left, right and bottom peers but never the top edge', () => {
-  const a = placement('a', 0, 0, 100, 100);
+test('crossing allows Windows top but blocks the red Mac top edge', () => {
+  const a = { ...placement('a', 0, 0, 100, 100), platform: 'darwin' };
+  const windows = { ...placement('windows', 0, 0, 100, 100), platform: 'win32' };
+  const above = { ...placement('above', 0, -100, 100, 100), platform: 'darwin' };
   const right = placement('right', 100, 20, 100, 60);
   const left = placement('left', -100, 10, 100, 80);
   const bottom = placement('bottom', 10, 100, 80, 80);
-  assert.equal(crossingTarget(a, { x: 101, y: 2 }, [a, right]).placement.machineId, 'right');
-  assert.equal(crossingTarget(a, { x: -1, y: 2 }, [a, left]).edge, 'left');
-  assert.equal(crossingTarget(a, { x: 2, y: 101 }, [a, bottom]).edge, 'bottom');
+  assert.equal(crossingTarget(a, { x: 101, y: 22 }, [a, right]).placement.machineId, 'right');
+  assert.equal(crossingTarget(a, { x: 101, y: 2 }, [a, right]), null);
+  assert.equal(crossingTarget(a, { x: -1, y: 12 }, [a, left]).edge, 'left');
+  assert.equal(crossingTarget(a, { x: 12, y: 101 }, [a, bottom]).edge, 'bottom');
   assert.equal(crossingTarget(a, { x: 2, y: -1 }, [a, right]), null);
+  assert.equal(crossingTarget(windows, { x: 2, y: -1 }, [windows, above]).edge, 'top');
 });
 
 test('message validation classifies realtime traffic and bounds input', () => {
@@ -108,6 +119,9 @@ test('message validation classifies realtime traffic and bounds input', () => {
   assert.deepEqual(sanitizePeerMessage({ type: 'cursor.mode', linked: true, junk: true }),
     { type: 'cursor.mode', linked: true });
   assert.equal(sanitizePeerMessage({ type: 'cursor.mode', linked: 'yes' }), null);
+  assert.deepEqual(sanitizePeerMessage({ type: 'cursor.layout', macPosition: 'top', displayOffset: -.5, junk: true }),
+    { type: 'cursor.layout', macPosition: 'top', displayOffset: -.5 });
+  assert.equal(sanitizePeerMessage({ type: 'cursor.layout', macPosition: 'bottom', displayOffset: 0 }), null);
   assert.deepEqual(sanitizePeerMessage({ type: 'cursor.delta', dx: 2, dy: -1, t: 8, junk: true }),
     { type: 'cursor.delta', dx: 2, dy: -1, t: 8 });
   assert.equal(sanitizePeerMessage({ type: 'cursor.delta', dx: Infinity, dy: 0, t: 1 }), null);
@@ -172,7 +186,7 @@ test('the owner sums local and remote deltas and edge resistance delays handoff'
   const outbound = [];
   const spaces = [placement('a', 0, 0, 100, 100), placement('b', 100, 20, 100, 60, 2)];
   const cursor = new CursorController({
-    machineId: 'a', placements: spaces, initialPosition: { x: 90, y: 10 }, ownerMachineId: 'a',
+    machineId: 'a', placements: spaces, initialPosition: { x: 90, y: 30 }, ownerMachineId: 'a',
     native: aNative, send: (message) => outbound.push(message), edgeResistanceVU: 5,
     acceleration: { base: 1, threshold: 1000, slope: 0 },
   });
@@ -186,11 +200,11 @@ test('the owner sums local and remote deltas and edge resistance delays handoff'
   cursor.flush(4);
   assert.equal(cursor.ownerMachineId, 'b');
   assert.ok(Math.abs(cursor.virtualCursor.x - 107) < 1e-5);
-  assert.equal(cursor.virtualCursor.y, 20);
+  assert.equal(cursor.virtualCursor.y, 30);
   const handoff = outbound.find((message) => message.type === 'cursor.handoff');
   assert.equal(handoff.type, 'cursor.handoff');
   assert.ok(Math.abs(handoff.x - 107) < 1e-5);
-  assert.deepEqual({ y: handoff.y, buttons: handoff.buttons, modifiers: handoff.modifiers }, { y: 20, buttons: 1, modifiers: 3 });
+  assert.deepEqual({ y: handoff.y, buttons: handoff.buttons, modifiers: handoff.modifiers }, { y: 30, buttons: 1, modifiers: 3 });
   assert.deepEqual(aNative.calls.slice(-3), [['release-input'], ['hide'], ['park']]);
 });
 
@@ -270,6 +284,24 @@ test('top movement clamps, non-owner follows authority, and ownership hotkey pre
   assert.equal(follower.receive({ type: 'cursor.position', x: 1, y: 1, t: 2 }, 'stranger'), false);
   assert.equal(follower.toggleOwnership(), true);
   assert.equal(follower.ownerMachineId, 'a');
+});
+
+test('Windows crosses its top edge into the safe bottom edge of a Mac above it', () => {
+  const spaces = [
+    { ...placement('win', 0, 0, 100, 100), platform: 'win32' },
+    { ...placement('mac', 0, -80, 100, 80), platform: 'darwin' },
+  ];
+  let handoff;
+  const cursor = new CursorController({
+    machineId: 'win', placements: spaces, initialPosition: { x: 50, y: 1 }, ownerMachineId: 'win',
+    acceleration: { base: 1, threshold: 1000, slope: 0 },
+    send: (message) => { handoff = message; return true; },
+  });
+  cursor.localDelta(0, -3, 1);
+  cursor.flush();
+  assert.equal(cursor.ownerMachineId, 'mac');
+  assert.equal(handoff.type, 'cursor.handoff');
+  assert.ok(handoff.y < 0 && handoff.y > -3);
 });
 
 test('ownership hotkey on the non-owner updates both peers without split brain', () => {

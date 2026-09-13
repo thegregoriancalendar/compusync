@@ -354,7 +354,9 @@ class CursorController extends EventEmitter {
       ? Math.max(0, candidate.x - (owner.origin.x + owner.size.w))
       : crossing.edge === 'left'
         ? Math.max(0, owner.origin.x - candidate.x)
-        : Math.max(0, candidate.y - (owner.origin.y + owner.size.h));
+        : crossing.edge === 'top'
+          ? Math.max(0, owner.origin.y - candidate.y)
+          : Math.max(0, candidate.y - (owner.origin.y + owner.size.h));
     const key = `${crossing.edge}:${crossing.placement.machineId}`;
     if (this.edgePressure?.key !== key) this.edgePressure = { key, amount: 0 };
     this.edgePressure.amount += pressure;
@@ -368,6 +370,7 @@ class CursorController extends EventEmitter {
     const position = { ...candidate };
     if (crossing.edge === 'right') position.x = crossing.placement.origin.x + excess;
     else if (crossing.edge === 'left') position.x = crossing.placement.origin.x + crossing.placement.size.w - excess;
+    else if (crossing.edge === 'top') position.y = crossing.placement.origin.y + crossing.placement.size.h - excess;
     else position.y = crossing.placement.origin.y + excess;
     this.#handoff(crossing.placement, clampToPlacement(position, crossing.placement), 'edge');
   }

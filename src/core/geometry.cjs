@@ -72,6 +72,7 @@ function normalizeLayout(layout) {
   return {
     revision: layout.revision,
     edge: layout.edge,
+    ...(layout.platform === 'darwin' || layout.platform === 'win32' ? { platform: layout.platform } : {}),
     activeDisplayId: layout.activeDisplayId,
     displays,
     ...(desktop ? { desktop } : {}),

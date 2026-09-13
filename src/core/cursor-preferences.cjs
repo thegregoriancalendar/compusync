@@ -1,8 +1,8 @@
 'use strict';
 
-const SCREEN_SIDES = Object.freeze(['left', 'right', 'bottom']);
+const MAC_POSITIONS = Object.freeze(['left', 'right', 'top']);
 const LIMITS = Object.freeze({
-  verticalOffsetVU: Object.freeze({ min: -10000, max: 10000 }),
+  displayOffset: Object.freeze({ min: -1, max: 1 }),
   base: Object.freeze({ min: 0.05, max: 8 }),
   threshold: Object.freeze({ min: 0, max: 20 }),
   slope: Object.freeze({ min: 0, max: 1 }),
@@ -11,12 +11,20 @@ const LIMITS = Object.freeze({
 
 function defaultCursorSettings(platform = process.platform) {
   return {
-    screenSide: platform === 'darwin' ? 'left' : 'right',
-    verticalOffsetVU: 0,
+    macPosition: 'left',
+    displayOffset: 0,
     acceleration: { base: 1, threshold: 0.5, slope: 0.015 },
     edgeResistanceVU: 0,
     linked: true,
   };
+}
+
+function legacyMacPosition(screenSide, platform) {
+  if (screenSide === 'bottom') return platform === 'darwin' ? 'top' : 'left';
+  if (screenSide !== 'left' && screenSide !== 'right') return 'left';
+  return platform === 'darwin'
+    ? screenSide
+    : screenSide === 'left' ? 'right' : 'left';
 }
 
 function bounded(value, fallback, limits) {
@@ -28,8 +36,9 @@ function cursorSettingsFromSaved(saved = {}, platform = process.platform) {
   const defaults = defaultCursorSettings(platform);
   const acceleration = saved.acceleration && typeof saved.acceleration === 'object' ? saved.acceleration : {};
   return {
-    screenSide: SCREEN_SIDES.includes(saved.screenSide) ? saved.screenSide : defaults.screenSide,
-    verticalOffsetVU: bounded(saved.verticalOffsetVU, defaults.verticalOffsetVU, LIMITS.verticalOffsetVU),
+    macPosition: MAC_POSITIONS.includes(saved.macPosition)
+      ? saved.macPosition : legacyMacPosition(saved.screenSide, platform),
+    displayOffset: bounded(saved.displayOffset, defaults.displayOffset, LIMITS.displayOffset),
     acceleration: {
       base: bounded(acceleration.base, defaults.acceleration.base, LIMITS.base),
       threshold: bounded(acceleration.threshold, defaults.acceleration.threshold, LIMITS.threshold),
@@ -48,13 +57,13 @@ function assertNumber(name, value, limits) {
 }
 
 function validateCursorSettings(value) {
-  if (!value || typeof value !== 'object' || !SCREEN_SIDES.includes(value.screenSide)) {
-    throw new Error('Choose whether this laptop is on the left, right, or bottom.');
+  if (!value || typeof value !== 'object' || !MAC_POSITIONS.includes(value.macPosition)) {
+    throw new Error('Arrange the Mac to the left, right, or above Windows.');
   }
   if (!value.acceleration || typeof value.acceleration !== 'object') throw new Error('Enter valid pointer acceleration settings.');
   return {
-    screenSide: value.screenSide,
-    verticalOffsetVU: assertNumber('Vertical offset', value.verticalOffsetVU, LIMITS.verticalOffsetVU),
+    macPosition: value.macPosition,
+    displayOffset: assertNumber('Display offset', value.displayOffset, LIMITS.displayOffset),
     acceleration: {
       base: assertNumber('Base acceleration', value.acceleration.base, LIMITS.base),
       threshold: assertNumber('Acceleration threshold', value.acceleration.threshold, LIMITS.threshold),
@@ -65,4 +74,4 @@ function validateCursorSettings(value) {
   };
 }
 
-module.exports = { SCREEN_SIDES, LIMITS, defaultCursorSettings, cursorSettingsFromSaved, validateCursorSettings };
+module.exports = { MAC_POSITIONS, LIMITS, defaultCursorSettings, cursorSettingsFromSaved, validateCursorSettings };

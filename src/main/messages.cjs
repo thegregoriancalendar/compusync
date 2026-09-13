@@ -22,6 +22,7 @@ const MESSAGE_POLICIES = Object.freeze({
   'window.position': { reliable: false, ordered: false, priority: 'realtime' },
   'cursor.handoff': { reliable: true, ordered: true, priority: 'control' },
   'cursor.mode': { reliable: true, ordered: true, priority: 'control' },
+  'cursor.layout': { reliable: true, ordered: true, priority: 'control' },
   'cursor.button': { reliable: true, ordered: true, priority: 'control' },
   'key.event': { reliable: true, ordered: true, priority: 'control' },
   'window.offer': { reliable: true, ordered: true, priority: 'control' },
@@ -126,6 +127,12 @@ function sanitizePeerMessage(value, options = {}) {
       break;
     case 'cursor.mode':
       if (typeof value.linked === 'boolean') result = { type: value.type, linked: value.linked };
+      break;
+    case 'cursor.layout':
+      if (['left', 'right', 'top'].includes(value.macPosition)
+        && finite(value.displayOffset) && Math.abs(value.displayOffset) <= 1) {
+        result = { type: value.type, macPosition: value.macPosition, displayOffset: value.displayOffset };
+      }
       break;
     case 'cursor.button':
       if (BUTTONS.has(value.button) && typeof value.down === 'boolean') {

@@ -7,18 +7,21 @@ const { RecoveryWatchdog } = require('./watchdog.cjs');
 const { registerCursorHotkeys } = require('./hotkeys.cjs');
 const { sanitizePeerMessage, policyForMessage } = require('./messages.cjs');
 const { routePeerInput } = require('./input-runtime.cjs');
-const { placementFromDisplays, layoutPair } = require('./virtualspace.cjs');
+const { placementFromDisplays, layoutPair, layoutMacAndWindows } = require('./virtualspace.cjs');
 
 function placementForLayout(machineId, layout) {
   if (layout?.desktop) {
     const { widthVU, heightVU, scale } = layout.desktop;
     if ([widthVU, heightVU, scale].every((value) => typeof value === 'number' && Number.isFinite(value))
       && widthVU > 0 && heightVU > 0 && scale > 0) {
-      return { machineId, origin: { x: 0, y: 0 }, size: { w: widthVU, h: heightVU }, scale };
+      return {
+        machineId, ...(layout.platform ? { platform: layout.platform } : {}),
+        origin: { x: 0, y: 0 }, size: { w: widthVU, h: heightVU }, scale,
+      };
     }
   }
   if (!layout?.displays?.length) return null;
-  try { return placementFromDisplays(machineId, layout.displays); }
+  try { return placementFromDisplays(machineId, layout.displays, { platform: layout.platform }); }
   catch { return null; }
 }
 
@@ -26,6 +29,17 @@ function derivePairPlacements(layouts, hostId, peerId, settings) {
   const host = placementForLayout(hostId, layouts?.[hostId]);
   const peer = placementForLayout(peerId, layouts?.[peerId]);
   if (!host || !peer) return host ? [host] : peer ? [peer] : [];
+  const hostPlatform = layouts?.[hostId]?.platform;
+  const peerPlatform = layouts?.[peerId]?.platform;
+  const macId = hostPlatform === 'darwin' ? hostId
+    : peerPlatform === 'darwin' ? peerId
+      : hostPlatform === 'win32' ? peerId
+        : peerPlatform === 'win32' ? hostId : null;
+  if (macId) {
+    const arranged = layoutMacAndWindows(macId === hostId ? peer : host, macId === hostId ? host : peer, settings);
+    return [hostId, peerId].map((id) => arranged.find((placement) => placement.machineId === id));
+  }
+  // Compatibility for a peer that has not yet reported its platform.
   const peerSide = settings?.screenSide === 'bottom'
     ? 'bottom' : settings?.screenSide === 'right' ? 'left' : 'right';
   return layoutPair(host, peer, {
@@ -65,6 +79,7 @@ class SharedInputRuntime extends EventEmitter {
     this.onNotice = typeof options.onNotice === 'function' ? options.onNotice : () => {};
     this.onModeChange = typeof options.onModeChange === 'function' ? options.onModeChange : () => {};
     this.onLayoutNeeded = typeof options.onLayoutNeeded === 'function' ? options.onLayoutNeeded : () => {};
+    this.onSettingsChange = typeof options.onSettingsChange === 'function' ? options.onSettingsChange : () => {};
     this.logger = options.logger || null;
     this.started = false;
     this.stopping = false;
@@ -189,6 +204,7 @@ class SharedInputRuntime extends EventEmitter {
     const clean = sanitizePeerMessage(message, { logger: this.logger });
     if (!clean || peerMachineId !== this.peerId) return false;
     if (clean.type === 'cursor.mode') return this.#receiveCursorMode(clean.linked);
+    if (clean.type === 'cursor.layout') return this.#receiveCursorLayout(clean);
     if (clean.type.startsWith('window.')) return this.windowController?.receive(clean) || false;
     const handled = routePeerInput({ cursor: this.cursor, keyboard: this.keyboard, watchdog: this.watchdog }, clean, peerMachineId);
     if (clean.type === 'layout.update' && handled) this.#applyDesiredLink();
@@ -200,6 +216,7 @@ class SharedInputRuntime extends EventEmitter {
     if (!this.peerConnected) this.peerLinkRequested = false;
     this.watchdog.setPeerConnected(this.peerConnected);
     if (!this.peerConnected) return;
+    if (this.isHost) this.broadcastCursorLayout();
     if (this.isHost) this.broadcastLayout();
     this.#applyDesiredLink();
   }
@@ -216,10 +233,19 @@ class SharedInputRuntime extends EventEmitter {
     return this.send({ type: 'layout.update', placements });
   }
 
+  broadcastCursorLayout() {
+    return this.send({
+      type: 'cursor.layout',
+      macPosition: this.settings.macPosition,
+      displayOffset: this.settings.displayOffset,
+    });
+  }
+
   updateSettings(settings) {
     this.settings = settings;
     this.desiredLinked = settings.linked !== false;
     this.cursor.setConfig(settings);
+    if (this.peerConnected) this.broadcastCursorLayout();
     if (this.isHost && this.peerConnected) this.broadcastLayout();
     this.#applyDesiredLink();
   }
@@ -294,6 +320,27 @@ class SharedInputRuntime extends EventEmitter {
     this.peerLinkRequested = true;
     const linkedLocally = this.#applyLinked(true, 'peer');
     if (acceptedPeerRequest) this.send({ type: 'cursor.mode', linked: linkedLocally });
+    return true;
+  }
+
+  #receiveCursorLayout(message) {
+    this.settings = {
+      ...this.settings,
+      macPosition: message.macPosition,
+      displayOffset: message.displayOffset,
+    };
+    this.onSettingsChange({
+      macPosition: message.macPosition,
+      displayOffset: message.displayOffset,
+    });
+    if (this.isHost) {
+      this.broadcastCursorLayout();
+      this.broadcastLayout();
+    }
+    this.#logMode('cursor.layout.applied', {
+      macPosition: message.macPosition,
+      displayOffset: message.displayOffset,
+    });
     return true;
   }
 

@@ -26,6 +26,16 @@ header p { margin: 0; }
 .hotkeys { padding-top: 4px; }
 .control-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
 .field-help { margin-top: -4px; }
+.screen-layout-editor { position: relative; height: 238px; margin: 15px 0 10px; overflow: hidden; border: 1px solid #dde3ec; border-radius: 10px; background: radial-gradient(circle at 1px 1px, #dfe5ee 1px, transparent 1px) 0 0 / 18px 18px, #f8fafc; user-select: none; touch-action: none; }
+.layout-screen { position: absolute; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; margin: 0; padding: 8px; border: 2px solid #60789f; border-radius: 7px; background: #eaf0fa; color: #2f4568; box-shadow: 0 3px 8px #253a5918; cursor: grab; transition: left 100ms ease, top 100ms ease, box-shadow 100ms ease; touch-action: none; }
+.layout-screen.windows { border-color: #597c9d; background: #e9f3f7; color: #31556e; }
+.layout-screen:hover { background: #e3ebf8; }
+.layout-screen.dragging { z-index: 2; cursor: grabbing; box-shadow: 0 7px 18px #253a5930; transition: box-shadow 100ms ease; }
+.layout-screen strong { font-size: 12px; line-height: 1.2; }
+.layout-screen small { display: block; max-width: 100%; overflow: hidden; color: #68778c; font-size: 9px; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
+.layout-screen.mac .blocked-edge { position: absolute; left: -2px; right: -2px; top: -3px; height: 4px; border-radius: 4px 4px 0 0; background: #d24e4e; box-shadow: 0 0 0 1px #fff8; }
+.layout-description { min-height: 18px; margin-top: 0; color: #44546a; font-weight: 550; text-align: center; }
+.red-edge-key { display: inline-block; width: 17px; height: 3px; margin: 0 4px 2px 0; border-radius: 2px; background: #d24e4e; }
 .notice-list { margin-bottom: 16px; }
 .notice { position: relative; padding: 14px 42px 14px 16px; border: 1px solid #e4d4ae; border-radius: 10px; background: #fffaf0; }
 .notice + .notice { margin-top: 8px; }

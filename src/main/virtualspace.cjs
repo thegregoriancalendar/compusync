@@ -4,7 +4,9 @@ const MAX_DIMENSION_VU = 65536;
 const MAX_SCALE = 8;
 const MIN_SCALE = .25;
 const POSITION_EPSILON = 1e-6;
-const CROSSING_EDGES = Object.freeze(['left', 'right', 'bottom']);
+const CROSSING_EDGES = Object.freeze(['left', 'right', 'top', 'bottom']);
+const MAC_POSITIONS = Object.freeze(['left', 'right', 'top']);
+const MIN_SHARED_EDGE_RATIO = .2;
 
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);
 const clamp = (value, minimum, maximum) => Math.min(maximum, Math.max(minimum, value));
@@ -20,6 +22,7 @@ function normalizePlacement(value) {
     || !finite(value.scale) || value.scale < MIN_SCALE || value.scale > MAX_SCALE) return null;
   return {
     machineId: value.machineId,
+    ...(value.platform === 'darwin' || value.platform === 'win32' ? { platform: value.platform } : {}),
     origin: { x: value.origin.x, y: value.origin.y },
     size: { w: value.size.w, h: value.size.h },
     scale: value.scale,
@@ -91,8 +94,7 @@ function ensureNonOverlapping(values, logger = null) {
 }
 
 // Places `second` on the configured side of `first`. The offset is measured
-// from centered alignment, in VU. Top is deliberately unsupported because the
-// macOS menu-bar edge can never participate in cursor crossing.
+// from centered alignment, in VU.
 function layoutPair(firstValue, secondValue, options = {}) {
   const first = normalizePlacement(firstValue), second = normalizePlacement(secondValue);
   if (!first || !second) throw new TypeError('Invalid screen placement.');
@@ -104,11 +106,34 @@ function layoutPair(firstValue, secondValue, options = {}) {
     second.origin.x = side === 'right'
       ? first.origin.x + first.size.w
       : first.origin.x - second.size.w;
-  } else {
+  } else if (side === 'bottom') {
     second.origin.x = first.origin.x + (first.size.w - second.size.w) / 2 + offset;
     second.origin.y = first.origin.y + first.size.h;
+  } else {
+    second.origin.x = first.origin.x + (first.size.w - second.size.w) / 2 + offset;
+    second.origin.y = first.origin.y - second.size.h;
   }
   return ensureNonOverlapping([first, second], options.logger);
+}
+
+function layoutMacAndWindows(windowsValue, macValue, options = {}) {
+  const windows = normalizePlacement(windowsValue), mac = normalizePlacement(macValue);
+  if (!windows || !mac) throw new TypeError('Valid Mac and Windows placements are required.');
+  const macPosition = MAC_POSITIONS.includes(options.macPosition) ? options.macPosition : 'left';
+  const alignment = clamp(finite(options.displayOffset) ? options.displayOffset : 0, -1, 1);
+  windows.origin = { x: 0, y: 0 };
+  if (macPosition === 'left' || macPosition === 'right') {
+    const minimumSeam = Math.min(windows.size.h, mac.size.h) * MIN_SHARED_EDGE_RATIO;
+    const maximumOffset = Math.max(0, (windows.size.h + mac.size.h) / 2 - minimumSeam);
+    mac.origin.y = (windows.size.h - mac.size.h) / 2 + alignment * maximumOffset;
+    mac.origin.x = macPosition === 'left' ? -mac.size.w : windows.size.w;
+  } else {
+    const minimumSeam = Math.min(windows.size.w, mac.size.w) * MIN_SHARED_EDGE_RATIO;
+    const maximumOffset = Math.max(0, (windows.size.w + mac.size.w) / 2 - minimumSeam);
+    mac.origin.x = (windows.size.w - mac.size.w) / 2 + alignment * maximumOffset;
+    mac.origin.y = -mac.size.h;
+  }
+  return ensureNonOverlapping([windows, mac], options.logger);
 }
 
 function boundingRect(displays) {
@@ -136,6 +161,7 @@ function placementFromDisplays(machineId, displays, options = {}) {
   const scale = finite(options.scale) ? options.scale : preferred.scaleFactor;
   const placement = normalizePlacement({
     machineId,
+    ...(options.platform ? { platform: options.platform } : {}),
     origin: options.origin || { x: 0, y: 0 },
     size: { w: bounds.width, h: bounds.height },
     scale,
@@ -152,19 +178,26 @@ function crossingTarget(owner, candidate, placements) {
   let edge = null;
   if (candidate.x < left) edge = 'left';
   else if (candidate.x >= right) edge = 'right';
+  else if (candidate.y < top && owner.platform === 'win32') edge = 'top';
   else if (candidate.y >= bottom) edge = 'bottom';
-  // Top is always clamped, including on Windows, so both peers agree.
+  // The Mac top edge remains clamped so the menu bar is never a seam.
   if (!edge) return null;
   const candidates = placements.filter((placement) => {
     if (placement.machineId === owner.machineId) return false;
-    if (edge === 'right') return placement.origin.x >= right - POSITION_EPSILON;
-    if (edge === 'left') return placement.origin.x + placement.size.w <= left + POSITION_EPSILON;
-    return placement.origin.y >= bottom - POSITION_EPSILON;
+    const sharesVerticalPoint = candidate.y >= placement.origin.y
+      && candidate.y < placement.origin.y + placement.size.h;
+    const sharesHorizontalPoint = candidate.x >= placement.origin.x
+      && candidate.x < placement.origin.x + placement.size.w;
+    if (edge === 'right') return placement.origin.x >= right - POSITION_EPSILON && sharesVerticalPoint;
+    if (edge === 'left') return placement.origin.x + placement.size.w <= left + POSITION_EPSILON && sharesVerticalPoint;
+    if (edge === 'top') return placement.origin.y + placement.size.h <= top + POSITION_EPSILON && sharesHorizontalPoint;
+    return placement.origin.y >= bottom - POSITION_EPSILON && sharesHorizontalPoint;
   });
   if (!candidates.length) return null;
   const distance = (placement) => {
     if (edge === 'right') return Math.abs(placement.origin.x - right);
     if (edge === 'left') return Math.abs(left - placement.origin.x - placement.size.w);
+    if (edge === 'top') return Math.abs(top - placement.origin.y - placement.size.h);
     return Math.abs(placement.origin.y - bottom);
   };
   candidates.sort((a, b) => distance(a) - distance(b));
@@ -187,6 +220,7 @@ module.exports = {
   overlap,
   ensureNonOverlapping,
   layoutPair,
+  layoutMacAndWindows,
   boundingRect,
   placementFromDisplays,
   crossingTarget,

@@ -55,7 +55,9 @@ function crossingState() {
 
 test('layout normalization retains validated optional full-desktop cursor metrics', () => {
   const layout = hostLayout();
+  layout.platform = 'win32';
   layout.desktop = { widthVU: 3584, heightVU: 1440, scale: 1.25 };
+  assert.equal(normalizeLayout(layout).platform, 'win32');
   assert.deepEqual(normalizeLayout(layout).desktop, layout.desktop);
   layout.desktop.widthVU = Infinity;
   assert.equal(normalizeLayout(layout), null);
