@@ -6,8 +6,11 @@ let details;
 let selectedTab = false;
 let copyTimer;
 let layoutDraft = { macPosition: 'left', displayOffset: 0 };
+let layoutBaseRects = null;
 let layoutRects = null;
 let layoutDrag = null;
+let layoutViewportDrag = null;
+let layoutView = { zoom: 1, panX: 0, panY: 0 };
 
 const localCursorDefaults = {
   macPosition: 'left',
@@ -59,17 +62,30 @@ function renderScreenLayout(next = details) {
   if (!next || !window.CompuSyncScreenLayout) return;
   const editor = $('screen-layout-editor');
   const groups = diagramGroups(next);
-  layoutRects = window.CompuSyncScreenLayout.arrangeDiagram(
+  layoutBaseRects = window.CompuSyncScreenLayout.arrangeDiagram(
     editor.clientWidth, editor.clientHeight, layoutDraft.macPosition, layoutDraft.displayOffset, groups,
   );
+  layoutRects = Object.fromEntries(Object.entries(layoutBaseRects).map(([platform, rect]) => [
+    platform,
+    window.CompuSyncScreenLayout.viewportRect(rect, editor.clientWidth, editor.clientHeight, layoutView),
+  ]));
+  const gridSize = 18 * layoutView.zoom;
+  const gridOrigin = window.CompuSyncScreenLayout.diagramToViewport(
+    { x: 0, y: 0 }, editor.clientWidth, editor.clientHeight, layoutView,
+  );
+  editor.style.backgroundSize = `${gridSize}px ${gridSize}px`;
+  editor.style.backgroundPosition = `${gridOrigin.x}px ${gridOrigin.y}px`;
+  $('layout-zoom-level').textContent = `${Math.round(layoutView.zoom * 100)}%`;
   const peer = next.status?.peers?.[0];
   for (const [platform, id] of [['mac', 'layout-mac'], ['windows', 'layout-windows']]) {
     const rect = layoutRects[platform];
+    const baseRect = layoutBaseRects[platform];
     const element = $(id);
     element.classList.toggle('label-above', layoutDraft.macPosition === 'top'
       ? platform === 'mac' : platform === 'windows');
     Object.assign(element.style, {
-      left: `${rect.x}px`, top: `${rect.y}px`, width: `${rect.w}px`, height: `${rect.h}px`,
+      left: `${rect.x}px`, top: `${rect.y}px`, width: `${baseRect.w}px`, height: `${baseRect.h}px`,
+      transform: `scale(${layoutView.zoom})`, transformOrigin: 'top left',
     });
     const nativePlatform = platform === 'mac' ? 'darwin' : 'win32';
     const computerName = next.platform === nativePlatform ? next.name : peer?.name || '';
@@ -262,14 +278,19 @@ for (const id of [
 for (const [id, platform] of [['layout-mac', 'mac'], ['layout-windows', 'windows']]) {
   const screen = $(id);
   screen.addEventListener('pointerdown', (event) => {
-    if (event.button !== 0 || !layoutRects) return;
-    const editorBounds = $('screen-layout-editor').getBoundingClientRect();
-    const rect = layoutRects[platform];
+    if (event.button !== 0 || !layoutBaseRects) return;
+    const editor = $('screen-layout-editor');
+    const editorBounds = editor.getBoundingClientRect();
+    const point = window.CompuSyncScreenLayout.viewportToDiagram({
+      x: event.clientX - editorBounds.left - editor.clientLeft,
+      y: event.clientY - editorBounds.top - editor.clientTop,
+    }, editor.clientWidth, editor.clientHeight, layoutView);
+    const rect = layoutBaseRects[platform];
     layoutDrag = {
       platform,
       pointerId: event.pointerId,
-      offsetX: event.clientX - editorBounds.left - rect.x - rect.w / 2,
-      offsetY: event.clientY - editorBounds.top - rect.y - rect.h / 2,
+      offsetX: point.x - rect.x - rect.w / 2,
+      offsetY: point.y - rect.y - rect.h / 2,
     };
     screen.classList.add('dragging');
     screen.setPointerCapture(event.pointerId);
@@ -277,11 +298,16 @@ for (const [id, platform] of [['layout-mac', 'mac'], ['layout-windows', 'windows
   });
   screen.addEventListener('pointermove', (event) => {
     if (!layoutDrag || layoutDrag.platform !== platform || layoutDrag.pointerId !== event.pointerId) return;
-    const bounds = $('screen-layout-editor').getBoundingClientRect();
+    const editor = $('screen-layout-editor');
+    const bounds = editor.getBoundingClientRect();
+    const point = window.CompuSyncScreenLayout.viewportToDiagram({
+      x: event.clientX - bounds.left - editor.clientLeft,
+      y: event.clientY - bounds.top - editor.clientTop,
+    }, editor.clientWidth, editor.clientHeight, layoutView);
     const snapped = window.CompuSyncScreenLayout.snapDragged(platform, {
-      x: event.clientX - bounds.left - layoutDrag.offsetX,
-      y: event.clientY - bounds.top - layoutDrag.offsetY,
-    }, layoutRects);
+      x: point.x - layoutDrag.offsetX,
+      y: point.y - layoutDrag.offsetY,
+    }, layoutBaseRects);
     if (!snapped) return;
     layoutDraft = snapped;
     renderScreenLayout();
@@ -305,6 +331,60 @@ for (const [id, platform] of [['layout-mac', 'mac'], ['layout-windows', 'windows
     event.preventDefault();
   });
 }
+
+const layoutEditor = $('screen-layout-editor');
+layoutEditor.addEventListener('pointerdown', (event) => {
+  if (event.button !== 0 || event.target !== layoutEditor) return;
+  layoutViewportDrag = {
+    pointerId: event.pointerId,
+    x: event.clientX,
+    y: event.clientY,
+    panX: layoutView.panX,
+    panY: layoutView.panY,
+  };
+  layoutEditor.classList.add('panning');
+  layoutEditor.setPointerCapture(event.pointerId);
+  event.preventDefault();
+});
+layoutEditor.addEventListener('pointermove', (event) => {
+  if (!layoutViewportDrag || layoutViewportDrag.pointerId !== event.pointerId) return;
+  layoutView = {
+    ...layoutView,
+    panX: layoutViewportDrag.panX + event.clientX - layoutViewportDrag.x,
+    panY: layoutViewportDrag.panY + event.clientY - layoutViewportDrag.y,
+  };
+  renderScreenLayout();
+});
+const finishViewportDrag = (event) => {
+  if (!layoutViewportDrag || layoutViewportDrag.pointerId !== event.pointerId) return;
+  layoutViewportDrag = null;
+  layoutEditor.classList.remove('panning');
+};
+layoutEditor.addEventListener('pointerup', finishViewportDrag);
+layoutEditor.addEventListener('pointercancel', finishViewportDrag);
+layoutEditor.addEventListener('wheel', (event) => {
+  const bounds = layoutEditor.getBoundingClientRect();
+  const factor = Math.exp(-event.deltaY * .0015);
+  layoutView = window.CompuSyncScreenLayout.zoomViewAt(layoutView, layoutView.zoom * factor, {
+    x: event.clientX - bounds.left - layoutEditor.clientLeft,
+    y: event.clientY - bounds.top - layoutEditor.clientTop,
+  }, layoutEditor.clientWidth, layoutEditor.clientHeight);
+  renderScreenLayout();
+  event.preventDefault();
+}, { passive: false });
+
+function zoomLayout(factor) {
+  layoutView = window.CompuSyncScreenLayout.zoomViewAt(
+    layoutView, layoutView.zoom * factor, null, layoutEditor.clientWidth, layoutEditor.clientHeight,
+  );
+  renderScreenLayout();
+}
+$('layout-zoom-out').addEventListener('click', () => zoomLayout(1 / 1.2));
+$('layout-zoom-in').addEventListener('click', () => zoomLayout(1.2));
+$('layout-zoom-fit').addEventListener('click', () => {
+  layoutView = { zoom: 1, panX: 0, panY: 0 };
+  renderScreenLayout();
+});
 window.addEventListener('resize', () => renderScreenLayout());
 $('cursor-mode').addEventListener('click', () => command(details?.cursorSettings?.linked === false ? 'cursor-link' : 'cursor-unlink'));
 $('toggle-ownership').addEventListener('click', () => command('cursor-toggle-ownership'));

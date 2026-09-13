@@ -69,8 +69,14 @@
 
     <section class="card">
       <h2>Screen layout</h2>
-      <p>Each physical monitor is shown inside its computer group. Drag any monitor to move that computer; monitor positions within a group follow the operating system’s display settings.</p>
-      <div id="screen-layout-editor" class="screen-layout-editor" aria-label="Drag the Mac and Windows monitor groups to arrange them">
+      <p>Each physical monitor is shown inside its computer group. Drag any monitor to move that computer; drag empty space to pan, and scroll to zoom. Positions within each group follow the operating system’s display settings.</p>
+      <div id="screen-layout-editor" class="screen-layout-editor" aria-label="Pan and zoom the Mac and Windows monitor layout">
+        <div class="layout-viewport-controls" role="group" aria-label="Layout zoom controls">
+          <button id="layout-zoom-out" type="button" aria-label="Zoom out" title="Zoom out">−</button>
+          <span id="layout-zoom-level" aria-live="polite">100%</span>
+          <button id="layout-zoom-in" type="button" aria-label="Zoom in" title="Zoom in">+</button>
+          <button id="layout-zoom-fit" type="button">Fit</button>
+        </div>
         <button id="layout-mac" class="layout-screen mac" type="button" aria-label="Mac computer. Drag to arrange."></button>
         <button id="layout-windows" class="layout-screen windows" type="button" aria-label="Windows computer. Drag to arrange."></button>
       </div>
