@@ -299,8 +299,12 @@ class SharedInputRuntime extends EventEmitter {
   }
 
   #applyDesiredLink() {
-    if (!this.desiredLinked || !this.peerConnected || this.cursor.placements.length !== 2 || !this.native.available) return;
+    if (!this.desiredLinked || !this.#readyToLink()) return;
     this.setLinked(true, 'connected');
+  }
+
+  #readyToLink() {
+    return this.peerConnected && this.native.available && this.cursor.placements.length === 2;
   }
 
   #receiveCursorMode(linked) {
@@ -318,6 +322,14 @@ class SharedInputRuntime extends EventEmitter {
     this.desiredLinked = true;
     this.localLinkRequested = true;
     this.peerLinkRequested = true;
+    // A peer can request linking before its canonical two-screen layout has
+    // arrived. Do not start native capture or acknowledge success until this
+    // side is actually ready; layout.update will retry #applyDesiredLink().
+    if (!this.#readyToLink()) {
+      this.#logMode('cursor.mode.pending', { linked: true, reason: 'peer', placements: this.cursor.placements.length });
+      this.emit('mode-pending', { linked: true, reason: 'peer' });
+      return true;
+    }
     const linkedLocally = this.#applyLinked(true, 'peer');
     if (acceptedPeerRequest) this.send({ type: 'cursor.mode', linked: linkedLocally });
     return true;

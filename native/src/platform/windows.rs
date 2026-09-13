@@ -788,11 +788,31 @@ impl Platform for HostPlatform {
         Ok(())
     }
     fn warp_cursor(&mut self, point: Point) -> Result<(), String> {
-        if unsafe { SetCursorPos(point.x.round() as i32, point.y.round() as i32) } == 0 {
-            Err(os_error("SetCursorPos"))
-        } else {
-            Ok(())
+        let was_parked = self.parked;
+        if was_parked {
+            if unsafe { ClipCursor(null()) } == 0 {
+                return Err(os_error("ClipCursor(NULL)"));
+            }
+            self.parked = false;
         }
+        if unsafe { SetCursorPos(point.x.round() as i32, point.y.round() as i32) } == 0 {
+            return Err(os_error("SetCursorPos"));
+        }
+        if was_parked {
+            let x = point.x.round() as i32;
+            let y = point.y.round() as i32;
+            let rect = WinRect {
+                left: x,
+                top: y,
+                right: x + 1,
+                bottom: y + 1,
+            };
+            if unsafe { ClipCursor(&rect) } == 0 {
+                return Err(os_error("ClipCursor"));
+            }
+            self.parked = true;
+        }
+        Ok(())
     }
     fn cursor_position(&self) -> Result<Point, String> {
         let mut point = WinPoint::default();

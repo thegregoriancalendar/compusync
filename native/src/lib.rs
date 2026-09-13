@@ -266,12 +266,17 @@ impl Inner {
         self.owner.store(true, Ordering::Release);
 
         let guarded = std::mem::take(&mut *self.guarded_windows.lock());
+        let buttons = self.synthetic_buttons.load(Ordering::Acquire);
+        let modifiers = self.synthetic_modifiers.load(Ordering::Acquire);
         let mut platform = self.platform.lock();
         platform.stop_capture();
-        for code in SYNTHETIC_MODIFIERS {
+        // An unmatched mouse-up is itself visible input: a bare right-up opens
+        // a context menu on Windows and macOS. Recovery may run repeatedly, so
+        // release only state that CompuSync recorded as synthetically held.
+        for code in held_modifier_codes(modifiers) {
             let _ = platform.synthesize_key(code, false, 0);
         }
-        for button in ["left", "right", "middle", "x1", "x2"] {
+        for button in held_buttons(buttons) {
             let _ = platform.synthesize_button(button, false);
         }
         for (id, bounds) in guarded {
@@ -808,9 +813,8 @@ impl NativeSubstrate {
         let buttons = self.inner.synthetic_buttons.load(Ordering::Acquire);
         let modifiers = self.inner.synthetic_modifiers.load(Ordering::Acquire);
         let mut platform = self.inner.platform.lock();
-        // Normal ownership transfer must not inject unmatched mouse-up events.
-        // A bare right-up opens a context menu on macOS even though the user
-        // never clicked. The broader all-input release remains in recover().
+        // Ownership transfer must not inject unmatched mouse-up events.
+        // A bare right-up opens a context menu even though the user never clicked.
         for button in held_buttons(buttons) {
             if platform.synthesize_button(button, false).is_ok() {
                 self.inner
@@ -865,7 +869,7 @@ mod tests {
     use super::{held_buttons, held_modifier_codes};
 
     #[test]
-    fn normal_input_release_selects_only_synthetic_holds() {
+    fn every_input_release_selects_only_synthetic_holds() {
         assert_eq!(held_buttons(0).collect::<Vec<_>>(), Vec::<&str>::new());
         assert_eq!(held_buttons(2 | 8).collect::<Vec<_>>(), ["right", "x1"]);
         assert_eq!(

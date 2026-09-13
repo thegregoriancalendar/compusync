@@ -82,6 +82,29 @@ test('join runtime builds distinct host and local screen placements while its tr
   runtime.stop('session-stop');
 });
 
+test('a peer link request waits for the complete two-screen layout', () => {
+  const session = new FakeSession();
+  const native = new FakeNative();
+  const runtime = new SharedInputRuntime({
+    session, native, machineId: 'mac', hostId: 'win', peerId: 'win',
+    settings: { ...settings, linked: false }, layouts: { mac: layout(1440, 900, 2, 'darwin') },
+  });
+  runtime.start();
+
+  assert.equal(runtime.receive({ type: 'cursor.mode', linked: true }, 'win'), true);
+  assert.equal(runtime.cursor.linked, false);
+  assert.equal(native.calls.some(([name, value]) => name === 'setLinked' && value === true), false);
+  assert.equal(session.sent.some(({ message }) => message.type === 'cursor.mode' && message.linked), false);
+
+  assert.equal(runtime.receive({ type: 'layout.update', placements: [
+    { machineId: 'win', platform: 'win32', origin: { x: 0, y: 0 }, size: { w: 1920, h: 1080 }, scale: 1 },
+    { machineId: 'mac', platform: 'darwin', origin: { x: -1440, y: 90 }, size: { w: 1440, h: 900 }, scale: 2 },
+  ] }, 'win'), true);
+  assert.equal(runtime.cursor.linked, true);
+  assert.equal(native.calls.some(([name, value]) => name === 'setLinked' && value === true), true);
+  runtime.stop();
+});
+
 test('runtime sanitizes traffic, agrees layout, links only with peer and native support, then recovers', () => {
   const session = new FakeSession();
   const native = new FakeNative();

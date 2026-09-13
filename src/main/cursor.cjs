@@ -8,6 +8,7 @@ const {
   clampToPlacement,
   ownerAt,
   toLocal,
+  toVirtual,
   crossingTarget,
 } = require('./virtualspace.cjs');
 
@@ -161,6 +162,10 @@ class CursorController extends EventEmitter {
     const next = Boolean(linked);
     if (this.linked === next) return false;
     if (next) this.failureRaised = false;
+    // Preserve the owner's real pointer position when shared control starts.
+    // Initializing from the layout center makes the cursor visibly jump and
+    // fight the first physical deltas while the peer handshake completes.
+    if (next && this.isOwner() && !this.#sampleOwnerPosition()) return false;
     this.linked = next;
     if (!this.#nativeCall('setLinked', next)) return false;
     this.edgePressure = null;
@@ -320,13 +325,17 @@ class CursorController extends EventEmitter {
   }
 
   #applyPhysicalOwnership() {
-    if (!this.linked || this.isOwner()) {
+    if (!this.linked) {
       if (!this.#nativeCall('releaseCursor')) return false;
-      if (this.linked) {
-        const placement = this.placementFor(this.machineId);
-        if (placement && !this.#nativeCall('warpCursor', toLocal(this.virtualCursor, placement))) return false;
-      }
       if (!this.#nativeCall('showCursor')) return false;
+    } else if (this.isOwner()) {
+      const placement = this.placementFor(this.machineId);
+      if (!this.#nativeCall('releaseCursor')) return false;
+      if (placement && !this.#nativeCall('warpCursor', toLocal(this.virtualCursor, placement))) return false;
+      // Raw/event-tap deltas drive the virtual cursor. Keep native device
+      // motion decoupled on the owner too, otherwise the OS and the 60 Hz
+      // authoritative warp continually pull the pointer against each other.
+      if (!this.#nativeCall('showCursor') || !this.#nativeCall('parkCursor')) return false;
     } else {
       if (!this.#nativeCall('hideCursor') || !this.#nativeCall('parkCursor')) return false;
     }
@@ -415,6 +424,7 @@ class CursorController extends EventEmitter {
       if (!this.#nativeCall('releaseCursor')
         || !this.#nativeCall('warpCursor', toLocal(this.virtualCursor, target))
         || !this.#nativeCall('showCursor')
+        || !this.#nativeCall('parkCursor')
         || !this.#nativeCall('assumeInputState', desiredSynthetic, message.modifiers)) return false;
       this.syntheticButtons = desiredSynthetic;
     } else {
@@ -464,6 +474,22 @@ class CursorController extends EventEmitter {
     if (!this.#nativeCall('synthesizeButton', button, down)) return false;
     this.syntheticButtons = down ? this.syntheticButtons | bit : this.syntheticButtons & ~bit;
     return true;
+  }
+
+  #sampleOwnerPosition() {
+    const placement = this.placementFor(this.machineId);
+    if (!placement || typeof this.native?.cursorPosition !== 'function') return true;
+    try {
+      const point = this.native.cursorPosition();
+      if (!point || !finite(point.x) || !finite(point.y)) {
+        throw new TypeError('Native cursor position must be finite.');
+      }
+      this.virtualCursor = clampToPlacement(toVirtual(point, placement), placement);
+      return true;
+    } catch (error) {
+      this.#fail('native-cursorPosition-failed', error);
+      return false;
+    }
   }
 
   #nativeCall(method, ...args) {

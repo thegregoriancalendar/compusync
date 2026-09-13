@@ -181,6 +181,24 @@ test('shared acceleration uses the specified two-segment curve', () => {
   assert.deepEqual(accelerateDelta(6, 8, 5, { base: 1, threshold: 1, slope: .5 }), { dx: 9, dy: 12, gain: 1.5 });
 });
 
+test('linking preserves the owner pointer and keeps native motion managed', () => {
+  const native = mockNative();
+  native.cursorPosition = () => ({ x: 80, y: 40 });
+  const cursor = new CursorController({
+    machineId: 'owner',
+    placements: [placement('owner', 100, 50, 200, 100, 2), placement('peer', 300, 50, 100, 100)],
+    ownerMachineId: 'owner', initialPosition: { x: 200, y: 100 }, linked: false, native,
+  });
+
+  assert.equal(cursor.setLinked(true), true);
+  assert.deepEqual(cursor.virtualCursor, { x: 140, y: 70 });
+  assert.deepEqual(native.calls.slice(-4), [
+    ['release'], ['warp', { x: 80, y: 40 }], ['show'], ['park'],
+  ]);
+  assert.equal(cursor.setLinked(false), true);
+  assert.deepEqual(native.calls.slice(-2), [['release'], ['show']]);
+});
+
 test('the owner sums local and remote deltas and edge resistance delays handoff', () => {
   const aNative = mockNative();
   const outbound = [];
@@ -229,7 +247,7 @@ test('a drag disables resistance and the destination assumes held input state', 
   assert.equal(destination.receive(handoff, 'a'), true);
   assert.equal(destination.isOwner(), true);
   assert.deepEqual(native.calls, [
-    ['release'], ['warp', { x: 2, y: 100 }], ['show'], ['assume', 1, 7],
+    ['release'], ['warp', { x: 2, y: 100 }], ['show'], ['park'], ['assume', 1, 7],
   ]);
 });
 
