@@ -11,6 +11,7 @@ const {
   REGISTRY_KEY,
   WindowsChromeExtensionSetup,
   appAsarUnpackedPath,
+  launchChromeForHandoff,
   nativeHostExecutable,
   registerNativeHost,
   stageExtension,
@@ -141,6 +142,26 @@ test('setup offer is honest and open prepares the bridge then guides Load unpack
   assert.deepEqual(spawned[0].args, ['chrome://extensions/']);
   assert.equal(spawned[0].options.shell, false);
   assert.equal(revealed[0], path.join(result.extensionDirectory, 'manifest.json'));
+});
+
+test('handoff launch starts normal-profile Chrome without a visible startup window', async (t) => {
+  const value = await fixture();
+  t.after(() => fs.promises.rm(value.root, { recursive: true, force: true }));
+  const spawned = [];
+  const executable = launchChromeForHandoff({
+    chromeExecutable: value.chrome,
+    spawn(file, args, options) {
+      spawned.push({ file, args, options });
+      return { once() {}, unref() {} };
+    },
+  });
+  assert.equal(executable, value.chrome);
+  assert.deepEqual(spawned[0].args, [
+    '--no-startup-window', '--no-first-run', '--no-default-browser-check',
+  ]);
+  assert.equal(spawned[0].options.shell, false);
+  assert.equal(spawned[0].options.windowsHide, true);
+  assert.doesNotMatch(spawned[0].args.join(' '), /user-data-dir|profile-directory|remote-debugging/i);
 });
 
 test('extension setup is unavailable off Windows', async () => {

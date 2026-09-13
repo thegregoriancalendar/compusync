@@ -13,10 +13,15 @@ class Bridge extends EventEmitter {
 
 test('Chrome runtime never launches Chrome at startup and ignores non-Chrome windows', async () => {
   const bridge = new Bridge();
-  const runtime = new ChromeAdapterRuntime({ platform: 'win32', machineId: 'win', bridge });
+  let launches = 0;
+  const runtime = new ChromeAdapterRuntime({
+    platform: 'win32', machineId: 'win', bridge,
+    setup: { prepare: async () => {}, launch: async () => { launches += 1; } },
+  });
   runtime.start();
   await runtime.scan();
   assert.equal(bridge.started, 1);
+  assert.equal(launches, 0);
   assert.equal(runtime.adapterForWindow({ processName: 'notepad.exe' }), null);
   runtime.stop();
 });
@@ -37,6 +42,7 @@ test('missing Windows helper stays non-crossing while explicit setup connects wi
   const adapter = { capture: async () => 'captured' };
   const setup = {
     prepare: async () => events.push('prepare'), offer: async () => ({ id: 'offer' }),
+    launch: async () => events.push('launch'),
     open: async () => { events.push('open'); bridge.connected = true; bridge.emit('ready'); },
   };
   const runtime = new ChromeAdapterRuntime({
@@ -50,6 +56,73 @@ test('missing Windows helper stays non-crossing while explicit setup connects wi
     .capture({ id: 'window' }, { x: 0, y: 0, w: 800, h: 600 });
   assert.equal(value, 'captured');
   assert.deepEqual(events, ['prepare', 'consent', 'open']);
+  runtime.stop();
+});
+
+test('incoming Windows handoff cold-launches Chrome, waits for the bridge, and skips setup', async () => {
+  const events = [];
+  const bridge = new Bridge();
+  const adapter = { prepare: async () => { events.push('window'); return 'prepared'; } };
+  const runtime = new ChromeAdapterRuntime({
+    platform: 'win32', bridge,
+    setup: {
+      prepare: async () => events.push('prepare'),
+      launch: async () => {
+        events.push('launch');
+        bridge.connected = true;
+        bridge.emit('ready');
+      },
+      open: async () => events.push('setup'),
+    },
+    requestExtensionSetup: async () => { events.push('prompt'); return true; },
+    createAdapter: () => adapter,
+  });
+  const result = await runtime.adapterForId('chrome').prepare({}, {});
+  assert.equal(result, 'prepared');
+  assert.deepEqual(events, ['prepare', 'launch', 'window']);
+  runtime.stop();
+});
+
+test('missing helper after cold launch falls through to the existing setup flow', async () => {
+  const events = [];
+  const bridge = new Bridge();
+  const adapter = { prepare: async () => 'prepared' };
+  const runtime = new ChromeAdapterRuntime({
+    platform: 'win32', bridge, coldLaunchTimeoutMs: 1,
+    setup: {
+      prepare: async () => events.push('prepare'),
+      launch: async () => events.push('launch'),
+      offer: async () => ({}),
+      open: async () => {
+        events.push('setup');
+        bridge.connected = true;
+        bridge.emit('ready');
+      },
+    },
+    requestExtensionSetup: async () => { events.push('prompt'); return true; },
+    createAdapter: () => adapter,
+  });
+  assert.equal(await runtime.adapterForId('chrome').prepare({}, {}), 'prepared');
+  assert.deepEqual(events, ['prepare', 'launch', 'prompt', 'setup']);
+  runtime.stop();
+});
+
+test('Windows destination reports a typed Chrome launch failure without opening extension setup', async () => {
+  const bridge = new Bridge();
+  let prompts = 0;
+  const runtime = new ChromeAdapterRuntime({
+    platform: 'win32', bridge,
+    setup: {
+      prepare: async () => {},
+      launch: async () => { throw Object.assign(new Error('spawn failed'), { code: 'CHROME_LAUNCH_FAILED' }); },
+    },
+    requestExtensionSetup: async () => { prompts += 1; return true; },
+  });
+  await assert.rejects(
+    () => runtime.adapterForId('chrome').prepare({}, {}),
+    { code: 'CHROME_LAUNCH_FAILED' },
+  );
+  assert.equal(prompts, 0);
   runtime.stop();
 });
 

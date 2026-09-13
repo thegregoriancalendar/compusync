@@ -6,6 +6,7 @@ const { createChromeExtensionAdapter } = require('./extension-adapter.cjs');
 const { ChromeNativeMessagingServer } = require('./native-messaging-server.cjs');
 
 const STARTUP_TIMEOUT_MS = 30_000;
+const COLD_LAUNCH_TIMEOUT_MS = 5_000;
 const POLL_MS = 250;
 
 function typedError(code, message) {
@@ -25,9 +26,10 @@ class ChromeAdapterRuntime extends EventEmitter {
       ? options.requestExtensionSetup : async () => false;
     this.promptOnStart = options.promptOnStart === true;
     this.sleep = options.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-    this.now = options.now || Date.now;
     this.startupTimeoutMs = options.startupTimeoutMs || STARTUP_TIMEOUT_MS;
+    this.coldLaunchTimeoutMs = options.coldLaunchTimeoutMs || COLD_LAUNCH_TIMEOUT_MS;
     this.setup = options.setup || null;
+    this.launching = null;
     this.bridge = this.platform === 'win32'
       ? (options.bridge || new ChromeNativeMessagingServer(options)) : null;
     this.createAdapter = options.createAdapter || (this.platform === 'win32'
@@ -48,7 +50,7 @@ class ChromeAdapterRuntime extends EventEmitter {
     this.facade = Object.freeze({
       adapterId: 'chrome',
       capture: async (...args) => (await this.#ensureAdapter()).capture(...args),
-      prepare: async (...args) => (await this.#ensureAdapter()).prepare(...args),
+      prepare: async (...args) => (await this.#ensureDestinationAdapter()).prepare(...args),
       position: async (...args) => (await this.#ensureAdapter()).position(...args),
       focus: async (...args) => (await this.#ensureAdapter()).focus(...args),
       close: async (...args) => (await this.#ensureAdapter()).close(...args),
@@ -124,24 +126,58 @@ class ChromeAdapterRuntime extends EventEmitter {
     finally { this.setupRequest = null; }
   }
 
+  async #waitForBridge(timeoutMs) {
+    const intervalMs = Math.min(POLL_MS, Math.max(1, timeoutMs));
+    const polls = Math.max(0, Math.ceil(timeoutMs / intervalMs));
+    for (let poll = 0; poll <= polls; poll += 1) {
+      if (this.bridge.connected) return this.#acceptBridge();
+      if (poll < polls) await this.sleep(intervalMs);
+    }
+    return null;
+  }
+
+  async #launchDestinationChrome() {
+    if (this.bridge.connected) return this.#acceptBridge();
+    if (typeof this.setup?.launch !== 'function') return null;
+    if (!this.launching) {
+      this.launching = (async () => {
+        await this.setup.launch();
+        return this.#waitForBridge(this.coldLaunchTimeoutMs);
+      })();
+    }
+    try { return await this.launching; }
+    finally { this.launching = null; }
+  }
+
+  async #ensureStarted() {
+    if (!this.started) this.start();
+    if (this.starting) await this.starting;
+    return this.bridge.connected ? this.#acceptBridge() : null;
+  }
+
   async #ensureAdapter() {
     if (this.adapter) return this.adapter;
     if (this.platform !== 'win32') throw typedError('CHROME_UNAVAILABLE', 'Google Chrome is not available for handoff.');
-    if (!this.started) this.start();
-    if (this.starting) await this.starting;
-    if (this.bridge.connected) return this.#acceptBridge();
+    const started = await this.#ensureStarted();
+    if (started) return started;
     await this.#openSetup();
-    const deadline = this.now() + this.startupTimeoutMs;
-    do {
-      if (this.bridge.connected) return this.#acceptBridge();
-      await this.sleep(POLL_MS);
-    } while (this.now() < deadline);
+    const connected = await this.#waitForBridge(this.startupTimeoutMs);
+    if (connected) return connected;
     this.onNotice({
       id: 'chrome-extension-not-connected', kind: 'warning', title: 'Chrome helper needs attention',
       message: 'In Chrome Extensions, enable Developer mode and use Load unpacked to select the CompuSync helper folder.',
       dismissible: true,
     });
     throw typedError('CHROME_EXTENSION_NOT_CONNECTED', 'The CompuSync Chrome helper did not connect. Finish Load unpacked, then try again.');
+  }
+
+  async #ensureDestinationAdapter() {
+    if (this.adapter) return this.adapter;
+    if (this.platform !== 'win32') return this.#ensureAdapter();
+    const started = await this.#ensureStarted();
+    if (started) return started;
+    const launched = await this.#launchDestinationChrome();
+    return launched || this.#ensureAdapter();
   }
 
   stop() {
@@ -154,4 +190,4 @@ class ChromeAdapterRuntime extends EventEmitter {
   }
 }
 
-module.exports = { ChromeAdapterRuntime, STARTUP_TIMEOUT_MS, POLL_MS, typedError };
+module.exports = { ChromeAdapterRuntime, STARTUP_TIMEOUT_MS, COLD_LAUNCH_TIMEOUT_MS, POLL_MS, typedError };

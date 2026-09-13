@@ -240,7 +240,7 @@ async function registerNativeHost(manifestFilename, options = {}) {
   return filename;
 }
 
-function launchChromeExtensions(options = {}) {
+function spawnChrome(options, args) {
   const fsLike = options.fs || fs;
   const executable = options.chromeExecutable || findChromeExecutable({ fs: fsLike, env: options.env });
   if (!executable) throw Object.assign(new Error('Google Chrome was not found in a standard install location.'), { code: 'CHROME_NOT_FOUND' });
@@ -249,12 +249,29 @@ function launchChromeExtensions(options = {}) {
   try { info = fsLike.statSync(resolved); } catch {}
   if (!info?.isFile()) throw Object.assign(new Error('Google Chrome executable was not found.'), { code: 'CHROME_NOT_FOUND' });
   const spawn = options.spawn || spawnProcess;
-  const child = spawn(resolved, ['chrome://extensions/'], {
-    detached: true, stdio: 'ignore', windowsHide: true, shell: false,
-  });
+  let child;
+  try {
+    child = spawn(resolved, args, {
+      detached: true, stdio: 'ignore', windowsHide: true, shell: false,
+    });
+  } catch (cause) {
+    throw Object.assign(new Error('CompuSync could not open Google Chrome on this Windows computer.'), {
+      code: 'CHROME_LAUNCH_FAILED', cause,
+    });
+  }
   child?.once?.('error', () => {});
   child?.unref?.();
   return resolved;
+}
+
+function launchChromeExtensions(options = {}) {
+  return spawnChrome(options, ['chrome://extensions/']);
+}
+
+function launchChromeForHandoff(options = {}) {
+  return spawnChrome(options, [
+    '--no-startup-window', '--no-first-run', '--no-default-browser-check',
+  ]);
 }
 
 async function revealExtensionDirectory(directory, options = {}) {
@@ -302,6 +319,11 @@ class WindowsChromeExtensionSetup {
       steps: [...SETUP_STEPS],
     };
   }
+
+  launch() {
+    if (this.platform !== 'win32') throw new Error('Chrome handoff launch is only available on Windows.');
+    return launchChromeForHandoff({ ...this.options, platform: this.platform });
+  }
 }
 
 module.exports = {
@@ -320,6 +342,7 @@ module.exports = {
   createWindowsChromeExtensionSetup: (options) => new WindowsChromeExtensionSetup(options),
   defaultExtensionSourceDirectory,
   launchChromeExtensions,
+  launchChromeForHandoff,
   nativeHostExecutable,
   nativeHostManifest,
   registerNativeHost,
