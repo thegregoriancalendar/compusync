@@ -5,6 +5,7 @@ use parking_lot::Mutex;
 use std::{
     collections::{BTreeMap, HashSet},
     ffi::{c_char, c_void, CStr},
+    panic::{catch_unwind, AssertUnwindSafe},
     ptr::{null, null_mut},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -585,6 +586,23 @@ fn begin_drag_watch(context: &TapContext) {
 }
 
 unsafe extern "C" fn event_tap(
+    proxy: CgEventTapProxy,
+    kind: u32,
+    event: CgEvent,
+    user: *mut c_void,
+) -> CgEvent {
+    if user.is_null() || event.is_null() {
+        return event;
+    }
+    // A panic may not unwind through CoreGraphics' C callback. Returning the
+    // original event keeps local input usable instead of aborting Electron.
+    catch_unwind(AssertUnwindSafe(|| unsafe {
+        event_tap_inner(proxy, kind, event, user)
+    }))
+    .unwrap_or(event)
+}
+
+unsafe fn event_tap_inner(
     _: CgEventTapProxy,
     kind: u32,
     event: CgEvent,

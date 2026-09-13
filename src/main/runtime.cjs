@@ -134,10 +134,12 @@ class SharedInputRuntime extends EventEmitter {
   start() {
     if (this.started) return;
     this.started = true;
-    this.cursor.start();
+    // Install panic recovery before native capture can deliver its first event.
+    // Event taps may emit synchronously while cursor.start() is still running.
     this.watchdog.start();
     this.watchdog.bindProcess(this.processLike);
     this.watchdog.bindPowerMonitor(this.powerMonitor);
+    this.cursor.start();
     this.session.on('peer-message', this._peerMessage);
     this.session.on('status', this._status);
     this.session.on('state', this._state);

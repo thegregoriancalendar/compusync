@@ -74,3 +74,26 @@ test('native JSON events normalize Rust snake-case window ids', () => {
   adapter.substrate.callback(JSON.stringify({ kind: 'moveSizeStart', window_id: 'hwnd:42' }));
   assert.equal(started, 'hwnd:42');
 });
+
+test('native callback failures never escape the N-API callback boundary', () => {
+  class Substrate {
+    setEventCallback(callback) { this.callback = callback; }
+    startCapture() {}
+    get platformName() { return 'test'; }
+  }
+  const adapter = new NativeAdapter({ NativeSubstrate: Substrate }, 'test.node');
+  adapter.on('panic', () => { throw new Error('recovery listener failed'); });
+  adapter.startCursorCapture({ onDelta() { throw new Error('delta handler failed'); } });
+
+  const originalConsoleError = console.error;
+  const reported = [];
+  console.error = (...values) => reported.push(values);
+  try {
+    assert.doesNotThrow(() => adapter.substrate.callback(null,
+      JSON.stringify({ kind: 'cursorDelta', dx: 1, dy: 2, dt: 3, timestamp: 4 })));
+    assert.doesNotThrow(() => adapter.substrate.callback(new Error('conversion failed')));
+  } finally {
+    console.error = originalConsoleError;
+  }
+  assert.equal(reported.length, 2);
+});

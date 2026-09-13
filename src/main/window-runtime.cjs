@@ -37,6 +37,11 @@ function normalizeBounds(bounds) {
 
 function boundsOf(window) { return normalizeBounds(window?.bounds); }
 
+function processIdOf(window) {
+  const value = Number(window?.pid ?? window?.processId ?? window?.process_id ?? window?.ownerPid ?? window?.owner_pid);
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
 function normalizedBoundsOf(window) {
   return normalizeBounds(window?.normalizedBounds) || boundsOf(window);
 }
@@ -84,6 +89,12 @@ class WindowHandoffRuntime extends EventEmitter {
     this.sourceStartBounds = null;
     this.nativeLoopTerminated = false;
     this.guardedWindowId = null;
+    // Never let native window discovery feed one of CompuSync's own Electron
+    // windows into a handoff adapter. Chrome identity checks already reject it,
+    // but the PID boundary is an independent last line of defence before any
+    // adapter can capture, move, or close a source window.
+    this.processId = Number.isSafeInteger(options.processId) && options.processId > 0
+      ? options.processId : process.pid;
     this.isWindows = (this.native.platformName || (process.platform === 'win32' ? 'windows' : process.platform)) === 'windows';
     this.drag = new DragController({
       machineId: this.input.machineId,
@@ -154,6 +165,7 @@ class WindowHandoffRuntime extends EventEmitter {
     if (!this.started || !this.input.cursor.linked || this.drag.active) return false;
     const windows = await this.windows();
     const window = windows.find((candidate) => String(candidate.id) === String(id));
+    if (processIdOf(window) === this.processId) return false;
     const geometryVU = geometryToVU(window, this.localPlacement());
     if (!window || !geometryVU) return false;
     const began = this.drag.begin({ window, geometryVU, cursorVU: this.input.cursor.virtualCursor });
@@ -282,6 +294,7 @@ module.exports = {
   sanitizeHandoffLog,
   writeHandoffLog,
   boundsOf,
+  processIdOf,
   normalizedBoundsOf,
   geometryToVU,
   cursorAtSharedEdge,

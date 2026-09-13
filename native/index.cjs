@@ -193,8 +193,17 @@ class NativeAdapter extends EventEmitter {
 
   _installCallback() {
     if (this.callbackInstalled) return;
-    this.substrate.setEventCallback((json) => {
+    this.substrate.setEventCallback((...callbackArgs) => {
       try {
+        // Current addons use Node's error-first callback convention. Continue
+        // accepting the one-argument convention used by v3 development builds
+        // so replacing an addon can never turn the first input event into a
+        // process-fatal callback exception.
+        const error = callbackArgs.length > 1 || callbackArgs[0] == null
+          ? callbackArgs[0] : (typeof callbackArgs[0] === 'string' ? null : callbackArgs[0]);
+        if (error) throw error;
+        const json = callbackArgs.length > 1 ? callbackArgs[1] : callbackArgs[0];
+        if (typeof json !== 'string') throw new TypeError('Native input event must be JSON text.');
         const event = JSON.parse(json);
         this.emit('nativeEvent', event);
         if (event.kind === 'cursorDelta') this.handlers.onDelta?.(event.dx, event.dy, event.dt, event.timestamp);
@@ -212,7 +221,17 @@ class NativeAdapter extends EventEmitter {
       else if (event.kind === 'moveSizeStart' || event.kind === 'moveSizeEnd') {
         this.emit(event.kind, event.windowId ?? event.window_id);
       }
-      } catch (error) { this.emit('panic', error); }
+      } catch (error) {
+        // A ThreadsafeFunction callback is a fatal N-API boundary: anything
+        // thrown from here terminates Electron (SIGTRAP on macOS). Recovery is
+        // best effort and must therefore be unable to escape this callback too.
+        try {
+          if (this.listenerCount('panic') > 0) this.emit('panic', error);
+          else console.error('[Compusync] Native input callback failed:', error);
+        } catch (recoveryError) {
+          try { console.error('[Compusync] Native input recovery failed:', recoveryError); } catch { /* Never cross N-API. */ }
+        }
+      }
     });
     this.callbackInstalled = true;
   }

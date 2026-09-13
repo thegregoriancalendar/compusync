@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
-const { sanitizeHandoffLog, geometryToVU, WindowHandoffRuntime } = require('../src/main/window-runtime.cjs');
+const { sanitizeHandoffLog, geometryToVU, processIdOf, WindowHandoffRuntime } = require('../src/main/window-runtime.cjs');
 
 function runtimeFixture(options = {}) {
   const native = new EventEmitter();
@@ -41,6 +41,7 @@ function runtimeFixture(options = {}) {
   const runtime = new WindowHandoffRuntime({
     input, native, chrome, frameMs: options.frameMs || 100000,
     setSeam: options.setSeam, showHint: options.showHint, logger: options.logger,
+    processId: options.processId,
   });
   runtime.start();
   return {
@@ -48,6 +49,28 @@ function runtimeFixture(options = {}) {
     setWindow(value) { window = value; },
   };
 }
+
+test('CompuSync never hands one of its own Electron windows to an adapter', async () => {
+  const ownPid = 4242;
+  const fixture = runtimeFixture({
+    processId: ownPid,
+    // Keep the adapter deliberately permissive: the runtime PID boundary must
+    // protect settings even if a future native identity regression labels it
+    // as Chrome.
+    window: {
+      id: 'settings-window', pid: ownPid, processName: 'Google Chrome',
+      title: 'CompuSync · Connection',
+      bounds: { x: 700, y: 100, width: 580, height: 780 },
+    },
+  });
+
+  assert.equal(processIdOf({ owner_pid: ownPid }), ownPid);
+  assert.equal(await fixture.runtime.handleMoveStart('settings-window'), false);
+  assert.equal(fixture.runtime.drag.active, null);
+  assert.equal(fixture.sent.length, 0);
+  assert.equal(fixture.nativeCalls.length, 0);
+  await fixture.runtime.stop();
+});
 
 test('native device-pixel window geometry converts to the shared VU placement', () => {
   assert.deepEqual(geometryToVU({ bounds: { x: 200, y: 100, width: 800, height: 600 } },

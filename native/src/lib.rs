@@ -162,7 +162,7 @@ impl NativeEvent {
     }
 }
 
-type JsEventCallback = ThreadsafeFunction<String, ErrorStrategy::Fatal>;
+type JsEventCallback = ThreadsafeFunction<String, ErrorStrategy::CalleeHandled>;
 
 struct EventHub {
     queue: Mutex<VecDeque<NativeEvent>>,
@@ -180,7 +180,7 @@ impl EventHub {
     fn emit(&self, event: NativeEvent) {
         if let Some(callback) = self.callback.lock().as_ref() {
             if let Ok(json) = serde_json::to_string(&event) {
-                let _ = callback.call(json, ThreadsafeFunctionCallMode::NonBlocking);
+                let _ = callback.call(Ok(json), ThreadsafeFunctionCallMode::NonBlocking);
             }
         }
         let mut queue = self.queue.lock();
