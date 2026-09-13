@@ -103,18 +103,26 @@ class ChromeHandoffAdapter {
     const placement = options.targetPlacement || this.getPlacement();
     if (this.platform === 'darwin') {
       const bounds = prepareBounds(descriptor, options, placement);
-      const appleHandle = await this.apple.prepare(descriptor, bounds);
-      const handle = {
+      const decorate = (appleHandle) => ({
         ...appleHandle,
         descriptorId: descriptor.id,
         geometryVU: descriptor.geometryVU,
         state: descriptor.state,
         instantCommit: descriptor.state === 'maximized',
         placement: placement || null,
+      });
+      const remember = (handle) => {
+        this.identities.remember(handle, descriptor.id);
+        const nativeId = nativeWindowId(handle);
+        if (nativeId != null) this.records.set(String(nativeId), { descriptor, ...handle });
+        return handle;
       };
-      this.identities.remember(handle, descriptor.id);
-      const nativeId = nativeWindowId(handle);
-      if (nativeId != null) this.records.set(String(nativeId), { descriptor, ...handle });
+      const appleHandle = await this.apple.prepare(descriptor, bounds, {
+        onPrepared: typeof options.onPrepared === 'function'
+          ? (earlyAppleHandle) => options.onPrepared(decorate(earlyAppleHandle))
+          : undefined,
+      });
+      const handle = remember(decorate(appleHandle));
       return handle;
     }
     if (!this.preparer) throw new ChromePrepareError('CHROME_UNAVAILABLE', 'Chrome local debugging is unavailable.');

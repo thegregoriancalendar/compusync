@@ -68,3 +68,57 @@ test('unsupported tabs remain matchable and report their real capture error', as
   await assert.rejects(() => adapter.capture(dragged, { x: 10, y: 20, w: 800, h: 600 }),
     ({ code }) => code === 'CHROME_UNSUPPORTED_TABS');
 });
+
+test('extension prepare exposes a movable window before slow tab restoration finishes', async () => {
+  const requests = [];
+  let finish;
+  const finishing = new Promise((resolve) => { finish = resolve; });
+  const bridge = { connected: true, async request(method, params) {
+    requests.push([method, params]);
+    if (method === 'window.prepare.begin') {
+      return { windowId: 44, tabs: [{ tabId: 100, index: 0, active: true }] };
+    }
+    if (method === 'window.prepare.finish') {
+      await finishing;
+      return { windowId: 44, tabs: [
+        { tabId: 100, index: 0, active: true },
+        { tabId: 101, index: 1, active: false },
+      ] };
+    }
+    if (method === 'window.position') return { windowId: params.windowId };
+    throw new Error(`unexpected ${method}`);
+  } };
+  const adapter = new ChromeExtensionAdapter({ bridge, sleep: async () => {} });
+  const descriptor = {
+    schemaVersion: 1, id: 'handoff', adapterId: 'chrome', origin: 'peer', capturedAt: 1,
+    geometryVU: { x: 10, y: 20, w: 800, h: 600 }, state: 'normal',
+    payload: {
+      activeIdx: 0,
+      tabs: [
+        { url: 'https://one.example/', title: 'One', pinned: false, index: 0 },
+        { url: 'https://two.example/', title: 'Two', pinned: false, index: 1 },
+      ],
+    },
+  };
+  let earlyHandle;
+  const targetPlacement = {
+    machineId: 'local', platform: 'win32', origin: { x: 0, y: 0 },
+    size: { w: 1920, h: 1080 }, scale: 1,
+  };
+  const preparing = adapter.prepare(descriptor, {
+    originVU: { x: -900, y: 20 }, targetPlacement,
+    onPrepared: async (handle) => {
+      earlyHandle = handle;
+      await adapter.position(handle, { x: 300, y: 200 });
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(earlyHandle.windowId, 44);
+  assert.deepEqual(requests.slice(0, 3).map(([method]) => method), [
+    'window.prepare.begin', 'window.position', 'window.prepare.finish',
+  ]);
+  finish();
+  const handle = await preparing;
+  assert.equal(handle.windowId, 44);
+  assert.deepEqual(handle.tabIds, [100, 101]);
+});

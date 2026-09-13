@@ -1263,11 +1263,24 @@ impl Platform for HostPlatform {
         Ok(result)
     }
     fn window_exists(&self, id: &str) -> Result<bool, String> {
-        match ax_window(id) {
-            Ok(_) => Ok(true),
-            Err(error) if error == "macOS window no longer exists" => Ok(false),
-            Err(error) => Err(error),
+        if !unsafe { AXIsProcessTrusted() } {
+            return Err("Accessibility permission is required; enable Compusync in System Settings > Privacy & Security > Accessibility".into());
         }
+        let (pid, index) = parse_ax_id(id)?;
+        let app = OwnedCf(unsafe { AXUIElementCreateApplication(pid) });
+        let mut windows = null();
+        let code = unsafe {
+            AXUIElementCopyAttributeValues(app.0 as AxElement, ax(AX.windows), 0, 200, &mut windows)
+        };
+        // A terminated application reports an invalid element or cannot-
+        // complete AX error. Those are normal liveness misses, not permission
+        // failures that should trip the shared-input watchdog.
+        if code == -25202 || code == -25204 || (code == 0 && windows.is_null()) {
+            return Ok(false);
+        }
+        ax_error(code, "AX windows")?;
+        let windows = OwnedCf(windows);
+        Ok(index >= 0 && index < unsafe { CFArrayGetCount(windows.0) })
     }
     fn set_window_bounds(&mut self, id: &str, b: Rect) -> Result<(), String> {
         let (_owner, w) = ax_window(id)?;

@@ -439,7 +439,7 @@ function createAppleChromeAdapter(options = {}) {
     return normalized;
   }
 
-  async function prepare(inputDescriptor, offscreenBoundsPx) {
+  async function prepare(inputDescriptor, offscreenBoundsPx, options = {}) {
     const descriptor = sanitizeWindowDescriptor(inputDescriptor);
     if (!descriptor) throw new AppleChromeError('CHROME_INVALID_DESCRIPTOR', 'The Chrome window handoff data is invalid.');
     const bounds = boundsOf(offscreenBoundsPx);
@@ -466,6 +466,12 @@ function createAppleChromeAdapter(options = {}) {
       chromeWindowIndex: Number.isSafeInteger(appleResult?.chromeWindowIndex) ? appleResult.chromeWindowIndex : 1,
     };
     try {
+      if (typeof options.onPrepared === 'function') {
+        const accepted = await options.onPrepared(handle);
+        if (accepted === false) {
+          throw new AppleChromeError('CHROME_PREPARE_CANCELLED', 'The Chrome handoff was cancelled while preparing.');
+        }
+      }
       await runJxa(populateWindowScript(descriptor, handle), 'CHROME_PREPARE_FAILED');
     } catch (error) {
       try { await runJxa(closeScript(handle), 'CHROME_CLOSE_FAILED'); } catch { /* Best-effort cleanup. */ }

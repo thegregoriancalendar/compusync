@@ -183,9 +183,44 @@ class ChromeExtensionAdapter {
     const normalizedBounds = prepareBounds(descriptor, options, placement);
     const bounds = typeof this.native.toPlatformBounds === 'function'
       ? this.native.toPlatformBounds(normalizedBounds) : normalizedBounds;
-    const prepared = await this.bridge.request('window.prepare', {
+    const payload = {
       bounds, state: descriptor.state, tabs: descriptor.payload.tabs, activeIdx: descriptor.payload.activeIdx,
-    });
+    };
+    let begun;
+    let prepared;
+    try {
+      begun = await this.bridge.request('window.prepare.begin', payload);
+    } catch (error) {
+      // Allow a desktop update to keep working until Chrome reloads an older
+      // unpacked worker. Live positioning begins after its legacy preparation.
+      if (error?.code !== 'INVALID_REQUEST') throw error;
+      prepared = await this.bridge.request('window.prepare', payload);
+    }
+    if (begun && (!Number.isInteger(begun.windowId) || begun.windowId < 0)) {
+      throw chromeError('CHROME_EXTENSION_PROTOCOL', 'The Chrome helper returned an invalid prepared window.');
+    }
+    const earlyHandle = begun ? {
+      id: descriptor.id, descriptorId: descriptor.id, windowId: begun.windowId,
+      nativeWindowId: null,
+      activeTabId: Array.isArray(begun.tabs) ? begun.tabs.find((tab) => tab.active)?.tabId : undefined,
+      tabIds: Array.isArray(begun.tabs) ? begun.tabs.map((tab) => tab.tabId).filter(Number.isInteger) : [],
+      geometryVU: descriptor.geometryVU, state: descriptor.state,
+      instantCommit: descriptor.state === 'maximized', placement: placement || null,
+    } : null;
+    try {
+      if (earlyHandle && typeof options.onPrepared === 'function') {
+        const accepted = await options.onPrepared(earlyHandle);
+        if (accepted === false) {
+          throw new ChromePrepareError('CHROME_PREPARE_CANCELLED', 'The Chrome handoff was cancelled during preparation.');
+        }
+      }
+      if (begun) prepared = await this.bridge.request('window.prepare.finish', { windowId: begun.windowId });
+    } catch (error) {
+      if (begun) {
+        try { await this.bridge.request('window.close', { windowId: begun.windowId }); } catch {}
+      }
+      throw error;
+    }
     if (!Number.isInteger(prepared?.windowId) || !Array.isArray(prepared?.tabs)) {
       throw chromeError('CHROME_EXTENSION_PROTOCOL', 'The Chrome helper returned an invalid prepared window.');
     }

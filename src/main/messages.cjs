@@ -127,8 +127,10 @@ function sanitizePeerMessage(value, options = {}) {
     case 'cursor.handoff':
       if (finite(value.x) && finite(value.y)
         && Math.abs(value.x) <= MAX_COORDINATE && Math.abs(value.y) <= MAX_COORDINATE
-        && integer(value.buttons, 0, 31) && integer(value.modifiers, 0, 65535)) {
+        && integer(value.buttons, 0, 31) && integer(value.modifiers, 0, 65535)
+        && (value.managedDrag === undefined || typeof value.managedDrag === 'boolean')) {
         result = { type: value.type, x: value.x, y: value.y, buttons: value.buttons, modifiers: value.modifiers };
+        if (value.managedDrag === true) result.managedDrag = true;
       }
       break;
     case 'cursor.mode':
@@ -160,12 +162,16 @@ function sanitizePeerMessage(value, options = {}) {
     case 'window.committed':
       if (ID.test(value.id || '')) result = { type: value.type, id: value.id };
       break;
-    case 'window.position':
+    case 'window.position': {
+      const sequence = value.sequence === undefined ? 0 : value.sequence;
       if (ID.test(value.id || '') && finite(value.originVU?.x) && finite(value.originVU?.y)
-        && Math.abs(value.originVU.x) <= MAX_COORDINATE && Math.abs(value.originVU.y) <= MAX_COORDINATE) {
-        result = { type: value.type, id: value.id, originVU: { x: value.originVU.x, y: value.originVU.y } };
+        && Math.abs(value.originVU.x) <= MAX_COORDINATE && Math.abs(value.originVU.y) <= MAX_COORDINATE
+        && integer(sequence, 0, Number.MAX_SAFE_INTEGER)) {
+        result = { type: value.type, id: value.id, sequence,
+          originVU: { x: value.originVU.x, y: value.originVU.y } };
       }
       break;
+    }
     case 'window.commit':
       if (ID.test(value.id || '') && WINNERS.has(value.winner)) {
         result = { type: value.type, id: value.id, winner: value.winner };

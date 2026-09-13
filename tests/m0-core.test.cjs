@@ -265,16 +265,17 @@ test('a managed window drag disables resistance without starting a second native
   source.localDelta(2, 0, 1);
   source.flush();
   assert.equal(source.ownerMachineId, 'b');
+  assert.equal(handoff.managedDrag, true);
   const native = mockNative();
   const destination = new CursorController({
     machineId: 'b', placements: spaces, initialPosition: { x: 99, y: 50 }, ownerMachineId: 'a', native,
   });
-  destination.setDragging(true);
   assert.equal(destination.receive(handoff, 'a'), true);
   assert.equal(destination.isOwner(), true);
   assert.deepEqual(native.calls, [
     ['release'], ['warp', { x: 2, y: 100 }], ['show'], ['park'], ['assume', 0, 7],
   ]);
+  destination.setDragging(true);
   assert.equal(destination.receive({ type: 'cursor.button', button: 'left', down: false }, 'a'), true);
   assert.equal(native.calls.some(([name]) => name === 'button'), false);
 });

@@ -162,6 +162,24 @@ class ChromePrepare {
       // are applied, preventing a populated window from flashing on-screen.
       created = await this.cdp.createWindow(active.url, bounds);
       targets.push({ targetId: created.targetId, index: active.index, url: active.url, pinned: active.pinned, history: active.history });
+      if (typeof options.onPrepared === 'function') {
+        const accepted = await options.onPrepared({
+          id: descriptor.id,
+          descriptorId: descriptor.id,
+          targetId: created.targetId,
+          activeTargetId: created.targetId,
+          windowId: created.windowId,
+          nativeWindowId: null,
+          targetIds: [created.targetId],
+          geometryVU: descriptor.geometryVU,
+          state: descriptor.state,
+          instantCommit: descriptor.state === 'maximized',
+          placement: options.targetPlacement || this.placement || null,
+        });
+        if (accepted === false) {
+          throw new ChromePrepareError('CHROME_PREPARE_CANCELLED', 'The Chrome handoff was cancelled while preparing.');
+        }
+      }
       for (const tab of tabs) {
         if (tab === active) continue;
         const stagger = TAB_STAGGER_MIN_MS + Math.floor(this.random() * (TAB_STAGGER_MAX_MS - TAB_STAGGER_MIN_MS + 1));

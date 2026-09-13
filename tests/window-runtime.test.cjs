@@ -28,6 +28,7 @@ function runtimeFixture(options = {}) {
   const positions = [];
   const adapter = {
     async capture(_window, geometryVU) {
+      if (typeof options.capture === 'function') return options.capture(_window, geometryVU);
       return { schemaVersion: 1, id: 'window-stable', adapterId: 'chrome', origin: 'a', capturedAt: 1,
         geometryVU, state: 'normal', payload: { activeIdx: 0, tabs: [{ url: 'https://example.com', title: '', pinned: false, index: 0 }] } };
     },
@@ -123,6 +124,29 @@ test('native move events poll at the drag boundary and emit one Chrome offer', a
   await runtime.poll();
   assert.equal(sent.filter(({ type }) => type === 'window.offer').length, 1);
   await runtime.stop();
+});
+
+test('physical mouse-up waits for an in-flight capture instead of discarding the offer', async () => {
+  let resolveCapture;
+  const capture = new Promise((resolve) => { resolveCapture = resolve; });
+  const fixture = runtimeFixture({ capture: () => capture });
+  assert.equal(await fixture.runtime.handleMoveStart('hwnd'), true);
+  fixture.input.cursor.virtualCursor = { x: 850, y: 150 };
+  const polling = fixture.runtime.poll();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fixture.runtime.drag.active?.phase, 'capturing');
+
+  const ending = fixture.runtime.handleMoveEnd('hwnd', { physical: true });
+  resolveCapture({
+    schemaVersion: 1, id: 'window-stable', adapterId: 'chrome', origin: 'a', capturedAt: 1,
+    geometryVU: { x: 750, y: 100, w: 400, h: 300 }, state: 'normal',
+    payload: { activeIdx: 0, tabs: [{ url: 'https://example.com', title: '', pinned: false, index: 0 }] },
+  });
+  await Promise.all([polling, ending]);
+
+  assert.equal(fixture.sent.filter(({ type }) => type === 'window.offer').length, 1);
+  assert.deepEqual(fixture.sent.at(-1), { type: 'window.commit', id: 'window-stable', winner: 'source' });
+  await fixture.runtime.stop();
 });
 
 test('a vanished source window commits the destination survivor instead of aborting it', async () => {

@@ -190,6 +190,7 @@ test('prepare creates active first, bounds it before staggered background tabs, 
   const result = await prepare.prepare(descriptor(), {
     originVU: { x: 2001, y: 20 },
     targetPlacement: { machineId: 'win-b', origin: { x: 1000, y: 0 }, size: { w: 1000, h: 800 }, scale: 2 },
+    onPrepared: (handle) => { calls.push(['early', handle]); return true; },
   });
   assert.deepEqual(calls.find(([name]) => name === 'createWindow').slice(1), [
     'https://active.example/watch?token=secret',
@@ -200,6 +201,8 @@ test('prepare creates active first, bounds it before staggered background tabs, 
     'https://first.example/private?a=secret', 'https://last.example/',
   ]);
   assert.ok(backgrounds.every((call) => call[2].background === true));
+  assert.ok(calls.findIndex(([name]) => name === 'early') < calls.findIndex(([name]) => name === 'createTarget'));
+  assert.equal(calls.find(([name]) => name === 'early')[1].windowId, 77);
   assert.deepEqual(sleeps, [100, 100]);
   assert.deepEqual(pinCalls.map(({ pinned, index }) => [pinned, index]), [[true, 0], [false, 1], [true, 2]]);
   assert.ok(calls.findIndex(([name]) => name === 'focus') > calls.findLastIndex(([name]) => name === 'createTarget'));
@@ -288,9 +291,11 @@ test('high-level adapter delegates Apple operations and marks maximized windows 
       calls.push(['capture', window, geometry, stable]);
       return descriptor({ id: stable.id, geometryVU: geometry, state: 'maximized' });
     },
-    async prepare(value, bounds) {
+    async prepare(value, bounds, options) {
       calls.push(['prepare', value.id, bounds]);
-      return { nativeWindowId: 'ax-window', chromeWindowId: '42' };
+      const early = { nativeWindowId: 'ax-window', chromeWindowId: '42' };
+      if (options.onPrepared) await options.onPrepared(early);
+      return early;
     },
     async position(handle, bounds) { calls.push(['position', handle.nativeWindowId, bounds]); },
     async focus(handle) { calls.push(['focus', handle.nativeWindowId]); },
@@ -306,11 +311,15 @@ test('high-level adapter delegates Apple operations and marks maximized windows 
   assert.equal(adapter.isAddressable({ id: 'notes', processName: 'Notes' }), false);
   const captured = await adapter.capture(source, { x: 0, y: 0, w: 400, h: 300 });
   assert.equal(captured.id, 'apple-stable-id');
+  let earlyHandle = null;
   const handle = await adapter.prepare(captured, {
     originVU: { x: 2001, y: 20 },
     targetPlacement: adapter.placement,
+    onPrepared: (value) => { earlyHandle = value; return true; },
   });
   assert.equal(handle.instantCommit, true);
+  assert.equal(earlyHandle.instantCommit, true);
+  assert.deepEqual(earlyHandle.geometryVU, captured.geometryVU);
   await adapter.position(handle, { x: 1100, y: 50 });
   await adapter.focus(handle);
   await adapter.close(handle);

@@ -154,6 +154,7 @@ test('source Chrome force-quit commits the prepared destination survivor through
   native.platformName = 'windows';
   native.guardLog = [];
   native.enumerateWindows = () => sourceWindow ? [sourceWindow] : [];
+  native.windowExists = () => Boolean(sourceWindow);
   native.guardWindow = (id, bounds) => native.guardLog.push(['guard', id, bounds]);
   native.terminateMoveLoop = (id) => native.guardLog.push(['terminate', id]);
   native.releaseWindowGuard = (id) => native.guardLog.push(['release', id]);
@@ -175,7 +176,7 @@ test('source Chrome force-quit commits the prepared destination survivor through
   chrome.adapterForId = () => sourceAdapter;
   chrome.setLinked = () => {};
   chrome.stop = () => {};
-  const runtime = new WindowHandoffRuntime({ input, native, chrome, frameMs: 100000 });
+  const runtime = new WindowHandoffRuntime({ input, native, chrome, frameMs: 100000, livenessMs: 0 });
   const destination = new DragController({
     machineId: 'destination', getPlacements: () => placements,
     adapterForId: () => destinationAdapter,

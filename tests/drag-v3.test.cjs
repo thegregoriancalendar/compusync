@@ -135,7 +135,8 @@ test('pointer movement and loss-tolerant position updates never wait for destina
   assert.deepEqual(setup.log.filter(([type]) => type === 'position').at(-1)[2], { x: 1100, y: 100 });
   assert.deepEqual(setup.sent.filter(({ type }) => type === 'window.position').at(-1).originVU, { x: 1100, y: 100 });
   await setup.drag.receive({ type: 'window.ready', id: 'stable-window-id' });
-  assert.deepEqual(setup.sent.at(-1), { type: 'window.position', id: 'stable-window-id', originVU: { x: 1100, y: 100 } });
+  assert.deepEqual(setup.sent.at(-1), { type: 'window.position', id: 'stable-window-id', sequence: 3,
+    originVU: { x: 1100, y: 100 } });
 });
 
 test('destination queues the latest position and reverse timeout while prepare is still in flight', async () => {
@@ -146,8 +147,8 @@ test('destination queues the latest position and reverse timeout while prepare i
     reverseKeepaliveMs: 3000, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout });
   const preparing = drag.receive({ type: 'window.offer', descriptor: descriptor() });
   await Promise.resolve();
-  await drag.receive({ type: 'window.position', id: 'stable-window-id', originVU: { x: 900, y: 100 } });
-  await drag.receive({ type: 'window.position', id: 'stable-window-id', originVU: { x: 500, y: 100 } });
+  await drag.receive({ type: 'window.position', id: 'stable-window-id', sequence: 1, originVU: { x: 900, y: 100 } });
+  await drag.receive({ type: 'window.position', id: 'stable-window-id', sequence: 2, originVU: { x: 500, y: 100 } });
   assert.equal(drag.active.phase, 'reverse-hold');
   gate.resolve({ id: 'queued-handle' });
   assert.equal(await preparing, true);
@@ -156,6 +157,35 @@ test('destination queues the latest position and reverse timeout while prepare i
   await clock.tick(3000);
   assert.equal(drag.active, null);
   assert.deepEqual(sent.at(-1), { type: 'window.abort', id: 'stable-window-id', reason: 'reverse-timeout' });
+});
+
+test('destination positions an early native handle while full prepare remains in flight', async () => {
+  const gate = deferred(), log = [], sent = [];
+  const chrome = adapter(log, {
+    prepare: async (_value, options) => {
+      assert.equal(await options.onPrepared({ id: 'early-handle' }), true);
+      return gate.promise;
+    },
+  });
+  const drag = new DragController({ machineId: 'b', getPlacements: () => placements,
+    adapterForId: () => chrome, send: (message) => { sent.push(message); return true; } });
+  const preparing = drag.receive({ type: 'window.offer', descriptor: descriptor() });
+  await Promise.resolve();
+
+  await drag.receive({ type: 'window.position', id: 'stable-window-id', sequence: 1, originVU: { x: 1100, y: 140 } });
+  assert.deepEqual(log.filter(([type]) => type === 'position').at(-1),
+    ['position', 'early-handle', { x: 1100, y: 140 }]);
+  await drag.receive({ type: 'window.position', id: 'stable-window-id', sequence: 0, originVU: { x: 500, y: 140 } });
+  assert.deepEqual(log.filter(([type]) => type === 'position').at(-1),
+    ['position', 'early-handle', { x: 1100, y: 140 }]);
+  assert.equal(sent.some(({ type }) => type === 'window.ready'), false);
+  assert.equal(drag.active.ready, false);
+
+  gate.resolve({ id: 'final-handle' });
+  assert.equal(await preparing, true);
+  assert.deepEqual(log.filter(([type]) => type === 'position').at(-1),
+    ['position', 'final-handle', { x: 1100, y: 140 }]);
+  assert.deepEqual(sent.at(-1), { type: 'window.ready', id: 'stable-window-id' });
 });
 
 test('mouse-up at or beyond 50 percent waits at most two seconds, shows busy, then commits', async () => {
@@ -206,14 +236,14 @@ test('reverse holds destination for three seconds, supports re-cross, then expir
     adapterForId: () => chrome, send: (message) => { sent.push(message); return true; },
     reverseKeepaliveMs: 3000, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout });
   await drag.receive({ type: 'window.offer', descriptor: descriptor() });
-  await drag.receive({ type: 'window.position', id: 'stable-window-id', originVU: { x: 900, y: 100 } });
-  await drag.receive({ type: 'window.position', id: 'stable-window-id', originVU: { x: 500, y: 100 } });
+  await drag.receive({ type: 'window.position', id: 'stable-window-id', sequence: 1, originVU: { x: 900, y: 100 } });
+  await drag.receive({ type: 'window.position', id: 'stable-window-id', sequence: 2, originVU: { x: 500, y: 100 } });
   assert.equal(drag.active.phase, 'reverse-hold');
   await clock.tick(2999);
-  await drag.receive({ type: 'window.position', id: 'stable-window-id', originVU: { x: 900, y: 100 } });
+  await drag.receive({ type: 'window.position', id: 'stable-window-id', sequence: 3, originVU: { x: 900, y: 100 } });
   assert.equal(drag.active.phase, 'straddling');
   assert.equal(log.some(([type]) => type === 'close'), false);
-  await drag.receive({ type: 'window.position', id: 'stable-window-id', originVU: { x: 500, y: 100 } });
+  await drag.receive({ type: 'window.position', id: 'stable-window-id', sequence: 4, originVU: { x: 500, y: 100 } });
   await clock.tick(3000);
   assert.equal(drag.active, null);
   assert.deepEqual(log.at(-1), ['close', 'stable-window-id']);

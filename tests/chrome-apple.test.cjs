@@ -201,6 +201,65 @@ test('prepare creates active URL first, finds the real native window, and moves 
   ]);
 });
 
+test('prepare exposes and positions the native Apple window before tab population finishes', async () => {
+  let releasePopulate;
+  const populateGate = new Promise((resolve) => { releasePopulate = resolve; });
+  const boundsCalls = [];
+  let populateStarted = false;
+  const nativeWindow = {
+    id: 'ax:8:0', processName: 'Google Chrome', visible: true, title: 'Active',
+    bounds: { x: 10, y: 20, width: 800, height: 600 },
+  };
+  let enumerations = 0;
+  const adapter = createAppleChromeAdapter({
+    machineId: 'mac-b', sleep: async () => {}, requestAutomation: () => true,
+    native: {
+      enumerateWindows: () => (++enumerations === 1 ? [] : [nativeWindow]),
+      setWindowBoundsNormalized: (id, bounds) => boundsCalls.push({ id, bounds }),
+    },
+    execFile: (file, args, options, callback) => {
+      const script = args[3];
+      if (script.includes('compusync:chrome:prepare:create')) {
+        callback(null, JSON.stringify({ chromeWindowId: '88', chromeWindowIndex: 1, title: 'Active', bounds: [10, 20, 810, 620] }), '');
+        return;
+      }
+      if (script.includes('compusync:chrome:prepare:populate')) {
+        populateStarted = true;
+        void populateGate.then(() => callback(null, '{}', ''));
+        return;
+      }
+      callback(new Error(`unexpected JXA program: ${file} ${options}`));
+    },
+  });
+  let earlyHandle = null;
+  const descriptor = {
+    schemaVersion: 1, id: 'early-apple', adapterId: 'chrome', origin: 'win-a', capturedAt: 1,
+    geometryVU: { x: 0, y: 0, w: 800, h: 600 }, state: 'normal',
+    payload: { activeIdx: 0, tabs: [{ url: 'https://active.example/', title: 'Active', pinned: false, index: 0 }] },
+  };
+  let settled = false;
+  const preparing = adapter.prepare(descriptor, { x: -900, y: 20, width: 800, height: 600 }, {
+    onPrepared: async (handle) => {
+      earlyHandle = handle;
+      await adapter.position(handle, { x: -400, y: 30, width: 800, height: 600 });
+      return true;
+    },
+  }).then((value) => { settled = true; return value; });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(populateStarted, true);
+  assert.equal(settled, false);
+  assert.equal(earlyHandle.nativeWindowId, 'ax:8:0');
+  assert.deepEqual(boundsCalls, [
+    { id: 'ax:8:0', bounds: { x: -900, y: 20, width: 800, height: 600 } },
+    { id: 'ax:8:0', bounds: { x: -400, y: 30, width: 800, height: 600 } },
+  ]);
+
+  releasePopulate();
+  assert.equal((await preparing).nativeWindowId, 'ax:8:0');
+  assert.equal(settled, true);
+});
+
 test('close uses Chrome Automation identity and requests Automation only once', async () => {
   const calls = [];
   let permissionRequests = 0;

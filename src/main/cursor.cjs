@@ -206,7 +206,13 @@ class CursorController extends EventEmitter {
   }
 
   setDragging(dragging) {
-    this.dragging = Boolean(dragging);
+    const next = Boolean(dragging);
+    if (next && !this.dragging && (this.syntheticButtons & BUTTON_BITS.left)) {
+      // If the cursor crossed before the reliable window offer arrived, tear
+      // down the briefly synthesized hold as soon as managed drag begins.
+      this.#synthesizeButton('left', BUTTON_BITS.left, false);
+    }
+    this.dragging = next;
     if (this.dragging) this.edgePressure = null;
   }
 
@@ -320,7 +326,8 @@ class CursorController extends EventEmitter {
     if (this.isOwner()) return this.#handoff(target, position, 'hotkey');
     else {
       const buttons = this.localButtons | this.remoteButtons;
-      if (!this.#sendPeer({ type: 'cursor.handoff', x: position.x, y: position.y, buttons, modifiers: this.modifiers }, true)) return false;
+      if (!this.#sendPeer({ type: 'cursor.handoff', x: position.x, y: position.y, buttons,
+        modifiers: this.modifiers, managedDrag: this.dragging }, true)) return false;
       this.virtualCursor = position;
       this.ownerMachineId = target.machineId;
       this.edgePressure = null;
@@ -430,6 +437,7 @@ class CursorController extends EventEmitter {
       y: position.y,
       buttons,
       modifiers: this.modifiers,
+      managedDrag: this.dragging,
     }, true)) return false;
     this.virtualCursor = position;
     this.ownerMachineId = target.machineId;
@@ -480,7 +488,7 @@ class CursorController extends EventEmitter {
     this.#updateEntryGuard(this.virtualCursor, target);
     if (this.isOwner()) {
       const desiredSynthetic = this.remoteButtons & ~this.localButtons
-        & ~(this.dragging ? BUTTON_BITS.left : 0);
+        & ~((this.dragging || message.managedDrag === true) ? BUTTON_BITS.left : 0);
       if (!this.#nativeCall('releaseCursor')
         || !this.#nativeCall('warpCursor', toLocal(this.virtualCursor, target))
         || !this.#nativeCall('showCursor')

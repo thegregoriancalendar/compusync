@@ -111,7 +111,7 @@ class DragController extends EventEmitter {
       startedAt: this.now(), startGeometry: { ...geometryVU }, geometry: { ...geometryVU }, previous: { ...geometryVU },
       cursorVU: { ...cursorVU }, grabOffsetVU: { x: cursorVU.x - geometryVU.x, y: cursorVU.y - geometryVU.y },
       descriptor: null, ready: false, aborted: false, winner: null, committed: false,
-      straddleStarted: false, instant: excludedState(window),
+      straddleStarted: false, instant: excludedState(window), positionSequence: 0,
     };
     this.setDragging(true);
     this.#lifecycle(this.active, 'started');
@@ -211,10 +211,13 @@ class DragController extends EventEmitter {
       if (state.instant) return this.#sendCommit(state);
       if (state.winner === 'source' || state.phase === 'committing') return true;
       this.#setPhase(state, 'straddling', 'straddle-ready');
-      this.send({ type: 'window.position', id: message.id, originVU: { x: state.geometry.x, y: state.geometry.y } });
+      this.send({ type: 'window.position', id: message.id, sequence: ++state.positionSequence,
+        originVU: { x: state.geometry.x, y: state.geometry.y } });
       return true;
     }
-    if (message.type === 'window.position' && state.role === 'destination') return this.#receivePosition(message.originVU);
+    if (message.type === 'window.position' && state.role === 'destination') {
+      return this.#receivePosition(message.originVU, message.sequence);
+    }
     if (message.type === 'window.commit' && state.role === 'destination') {
       if (!['source', 'destination'].includes(message.winner)) return false;
       if (!state.ready) {
@@ -270,7 +273,7 @@ class DragController extends EventEmitter {
 
   snapshot() {
     if (!this.active) return null;
-    const { adapter, window, handle, resolveReady, readyTimer, reverseTimer, ...safe } = this.active;
+    const { adapter, window, handle, resolveReady, readyTimer, reverseTimer, positionDrain, pendingPosition, ...safe } = this.active;
     const geometry = safe.geometry || (safe.descriptor?.geometryVU && safe.originVU
       ? { ...safe.descriptor.geometryVU, ...safe.originVU } : null);
     return { ...safe, grabOffsetVU: safe.grabOffsetVU && { ...safe.grabOffsetVU },
@@ -303,6 +306,7 @@ class DragController extends EventEmitter {
       await state.adapter.position(state.window, { x: state.geometry.x, y: state.geometry.y });
       this.emit('position', this.snapshot());
       this.send({ type: 'window.position', id: state.descriptor.id,
+        sequence: ++state.positionSequence,
         originVU: { x: state.geometry.x, y: state.geometry.y } });
       return true;
     } catch (error) {
@@ -340,23 +344,36 @@ class DragController extends EventEmitter {
       handle: null, aborted: false, ready: false, startedAt: this.now(),
       originVU: { x: descriptor.geometryVU.x, y: descriptor.geometryVU.y },
       instant: excludedState(descriptor), hasCrossed: false, pendingWinner: null,
-      positionReceived: false,
+      positionReceived: false, lastPositionSequence: -1, pendingPosition: null, positionDrain: null,
     };
     this.setDragging(true);
     this.#lifecycle(state, 'offer-received', { instant: state.instant });
     const prepareStartedAt = this.now();
     try {
-      state.handle = await adapter.prepare(descriptor, {
+      const preparedHandle = await adapter.prepare(descriptor, {
         originVU: offscreenOrigin(descriptor.geometryVU, source, target), targetPlacement: target,
+        // Adapters may expose the real native window as soon as it exists,
+        // while slower tab/history restoration continues. This keeps the
+        // straddled copy attached to the pointer without claiming readiness
+        // until the full prepare promise resolves.
+        onPrepared: async (handle) => {
+          if (!handle || this.active !== state || state.aborted) return false;
+          state.handle = handle;
+          if (!state.instant && state.positionReceived) {
+            await this.#queueDestinationPosition(state);
+          }
+          return true;
+        },
       });
       this.#timing(state, 'prepare', prepareStartedAt, { status: 'ok' });
       if (this.active !== state || state.aborted) {
-        if (state.handle) await adapter.close(state.handle);
+        if (preparedHandle) await adapter.close(preparedHandle);
         return false;
       }
+      state.handle = preparedHandle || state.handle;
+      if (!state.handle) throw new Error('prepare-handle-missing');
       if (!state.instant && state.positionReceived) {
-        await adapter.position(state.handle, state.originVU);
-        this.emit('position', this.snapshot());
+        await this.#queueDestinationPosition(state);
       }
       state.ready = true;
       this.#setPhase(state, 'ready', 'ready');
@@ -377,9 +394,13 @@ class DragController extends EventEmitter {
     }
   }
 
-  async #receivePosition(originVU) {
+  async #receivePosition(originVU, sequence = 0) {
     const state = this.active;
-    if (!state || state.role !== 'destination' || !point(originVU) || state.instant) return false;
+    if (!state || state.role !== 'destination' || !point(originVU) || state.instant
+      || !Number.isSafeInteger(sequence) || sequence < 0) return false;
+    if (['committing', 'committed'].includes(state.phase)) return true;
+    if (sequence <= state.lastPositionSequence) return true;
+    state.lastPositionSequence = sequence;
     state.originVU = { ...originVU };
     state.positionReceived = true;
     const fraction = crossedFraction({ ...state.descriptor.geometryVU, ...state.originVU }, state.target);
@@ -395,13 +416,31 @@ class DragController extends EventEmitter {
       state.reverseTimer = this.setTimer(() => { void this.#expireReversed(state); }, this.reverseKeepaliveMs);
       state.reverseTimer?.unref?.();
     }
-    if (!state.ready || !state.handle) return true;
-    try {
-      await state.adapter.position(state.handle, state.originVU);
-      this.emit('position', this.snapshot());
+    if (!state.handle) return true;
+    return this.#queueDestinationPosition(state);
+  }
+
+  async #queueDestinationPosition(state) {
+    if (this.active !== state || !state.handle || state.instant) return false;
+    state.pendingPosition = { ...state.originVU };
+    if (state.positionDrain) return state.positionDrain;
+    const drain = (async () => {
+      while (this.active === state && state.handle && state.pendingPosition) {
+        const originVU = state.pendingPosition;
+        state.pendingPosition = null;
+        await state.adapter.position(state.handle, originVU);
+        if (this.active === state) this.emit('position', this.snapshot());
+      }
       return true;
+    })();
+    state.positionDrain = drain;
+    try {
+      return await drain;
     }
     catch (error) { return this.abort(this.#reason(error, 'destination-position-failed')); }
+    finally {
+      if (state.positionDrain === drain) state.positionDrain = null;
+    }
   }
 
   async #expireReversed(state) {
@@ -422,6 +461,9 @@ class DragController extends EventEmitter {
     if (state.reverseTimer) { this.clearTimer(state.reverseTimer); state.reverseTimer = null; }
     this.#setPhase(state, 'committing', 'commit-received', { winner });
     try {
+      if (state.positionDrain) await state.positionDrain;
+      if (this.active !== state || state.aborted) return false;
+      state.pendingPosition = null;
       if (winner === 'destination') {
         const rect = { ...state.descriptor.geometryVU, ...state.originVU };
         await state.adapter.position(state.handle, clampOriginToPlacement(rect, state.target));

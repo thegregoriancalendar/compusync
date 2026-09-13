@@ -172,6 +172,76 @@ test('window.prepare removes the entire prepared window when tab restoration fai
   assert.deepEqual(operations, [['remove', 44]]);
 });
 
+test('split prepare allows live position requests while tab restoration is pending', async () => {
+  const operations = [];
+  let releaseTabCreation;
+  const tabCreation = new Promise((resolve) => { releaseTabCreation = resolve; });
+  const preparedWindow = {
+    id: 44, type: 'normal', state: 'normal', focused: false,
+    left: -900, top: 20, width: 800, height: 600,
+    tabs: [{ id: 100, index: 0, url: 'https://one.example/', pinned: false, active: true }],
+  };
+  const worker = workerContext({
+    windows: {
+      create: async (options) => ({ ...preparedWindow, ...options, id: 44, tabs: preparedWindow.tabs }),
+      update: async (windowId, value) => {
+        operations.push(['window.update', windowId, value]);
+        Object.assign(preparedWindow, value);
+        return preparedWindow;
+      },
+      get: async () => ({ ...preparedWindow, tabs: [
+        preparedWindow.tabs[0],
+        { id: 101, index: 1, url: 'https://two.example/', pinned: false, active: false },
+      ] }),
+      remove: async (windowId) => operations.push(['window.remove', windowId]),
+    },
+    tabs: {
+      create: async () => {
+        operations.push(['tab.create.started']);
+        await tabCreation;
+        return { id: 101 };
+      },
+      update: async (tabId, value) => operations.push(['tab.update', tabId, value]),
+      move: async (tabId, value) => operations.push(['tab.move', tabId, value]),
+    },
+    debugger: {},
+  });
+  const params = {
+    bounds: { left: -900, top: 20, width: 800, height: 600 },
+    state: 'normal', activeIdx: 0,
+    tabs: [
+      { url: 'https://one.example/', pinned: false, index: 0 },
+      { url: 'https://two.example/', pinned: false, index: 1 },
+    ],
+  };
+  const begun = await request(worker, {
+    v: 1, id: 'begin', method: 'window.prepare.begin', params,
+  });
+  assert.equal(begun.ok, true);
+  assert.equal(begun.result.windowId, 44);
+
+  worker.port.onMessage.emit({
+    v: 1, id: 'finish', method: 'window.prepare.finish', params: { windowId: 44 },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(operations.some(([operation]) => operation === 'tab.create.started'));
+
+  const positioned = await request(worker, {
+    v: 1, id: 'position', method: 'window.position',
+    params: { windowId: 44, bounds: { left: 50, top: 60, width: 800, height: 600 } },
+  });
+  assert.equal(positioned.ok, true);
+  assert.equal(worker.sent.some((message) => message.id === 'finish'), false);
+  assert.ok(operations.some(([operation, , value]) => operation === 'window.update' && value.left === 50));
+
+  releaseTabCreation();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  const finished = worker.sent.find((message) => message.id === 'finish');
+  assert.equal(finished.ok, true);
+  assert.equal(finished.result.left, 50);
+});
+
 test('extension manifest has no browsing host or content-script access', () => {
   const manifest = require('../src/main/adapters/chrome/extension/manifest.json');
   assert.deepEqual(manifest.permissions, ['debugger', 'nativeMessaging', 'tabs']);

@@ -203,6 +203,8 @@ class WindowHandoffRuntime extends EventEmitter {
   async poll() {
     if (!this.drag.active || this.drag.active.role !== 'source') return false;
     if (this.pollPromise) return this.pollPromise;
+    const sourceState = this.drag.active;
+    const sourceWindowId = this.sourceWindowId;
     this.polling = true;
     const operation = (async () => {
       // Window enumeration is an expensive synchronous AX walk on macOS and
@@ -216,17 +218,18 @@ class WindowHandoffRuntime extends EventEmitter {
         if (!await this.#enterProgrammaticMove()) return false;
       }
       await frame;
-      if (!this.drag.active || this.drag.active.role !== 'source') return false;
+      if (this.drag.active !== sourceState || this.sourceWindowId !== sourceWindowId) return false;
       const at = this.now();
       if (typeof this.native.windowExists === 'function'
         && at - this.lastLivenessAt >= this.livenessMs) {
         this.lastLivenessAt = at;
         let exists;
-        try { exists = await this.native.windowExists(this.sourceWindowId); }
+        try { exists = await this.native.windowExists(sourceWindowId); }
         catch (error) {
           this.input.watchdog.trigger('window-liveness-failed', error);
           return true;
         }
+        if (this.drag.active !== sourceState || this.sourceWindowId !== sourceWindowId) return false;
         if (!exists) {
           await this.drag.sourceDisappeared('source-quit');
           this.setSeam(null);
@@ -247,6 +250,8 @@ class WindowHandoffRuntime extends EventEmitter {
   async handleMoveEnd(id, options = {}) {
     if (!this.drag.active || this.drag.active.role !== 'source'
       || (id != null && String(id) !== this.sourceWindowId)) return false;
+    const sourceState = this.drag.active;
+    const sourceWindowId = this.sourceWindowId;
     // terminateMoveLoop causes MOVESIZEEND on Windows, but the user's true
     // physical left button is still held and raw deltas must keep driving.
     if (this.isWindows && this.nativeLoopTerminated && !options.physical) return false;
@@ -255,7 +260,9 @@ class WindowHandoffRuntime extends EventEmitter {
     if (this.pollPromise) {
       try { await this.pollPromise; } catch { /* Drag abort reports the actionable failure. */ }
     }
+    if (this.drag.active !== sourceState || this.sourceWindowId !== sourceWindowId) return false;
     await this.poll();
+    if (this.drag.active !== sourceState || this.sourceWindowId !== sourceWindowId) return false;
     const geometryVU = this.drag.active?.geometry;
     const ended = await this.drag.end({ geometryVU });
     this.setSeam(this.drag.snapshot());

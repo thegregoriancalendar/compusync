@@ -222,10 +222,11 @@ async function applyWindowBounds(windowId, bounds, state) {
   if (state === 'maximized') await chrome.windows.update(windowId, { state: 'maximized' });
 }
 
-async function prepareWindow(params) {
+const pendingPrepares = new Map();
+
+async function beginPrepareWindow(params) {
   const input = normalizedPrepare(params);
   const activeSource = input.tabs[input.activeIdx];
-  const ordered = [...input.tabs].sort((a, b) => a.index - b.index);
   let createdWindow;
   try {
     createdWindow = await chrome.windows.create({
@@ -237,11 +238,33 @@ async function prepareWindow(params) {
     if (!Number.isSafeInteger(createdWindow?.id) || !createdWindow.tabs?.[0]?.id) {
       throw new BridgeError('PREPARE_FAILED', 'Chrome did not create the handoff window.');
     }
-    const created = new Map([[activeSource, createdWindow.tabs[0].id]]);
+    pendingPrepares.set(createdWindow.id, {
+      input,
+      activeTabId: createdWindow.tabs[0].id,
+    });
+    return publicWindow(createdWindow);
+  } catch (error) {
+    if (Number.isSafeInteger(createdWindow?.id)) {
+      pendingPrepares.delete(createdWindow.id);
+      try { await chrome.windows.remove(createdWindow.id); } catch { /* The failed window may already be gone. */ }
+    }
+    throw error;
+  }
+}
+
+async function finishPrepareWindow(params) {
+  const windowId = windowIdFrom(params);
+  const pending = pendingPrepares.get(windowId);
+  if (!pending) throw new BridgeError('PREPARE_NOT_FOUND', 'The handoff window is no longer being prepared.');
+  const { input, activeTabId } = pending;
+  const activeSource = input.tabs[input.activeIdx];
+  const ordered = [...input.tabs].sort((a, b) => a.index - b.index);
+  try {
+    const created = new Map([[activeSource, activeTabId]]);
     for (const source of ordered) {
       if (source === activeSource) continue;
       const tab = await chrome.tabs.create({
-        windowId: createdWindow.id,
+        windowId,
         url: source.url,
         active: false,
         pinned: source.pinned,
@@ -256,20 +279,28 @@ async function prepareWindow(params) {
       await chrome.tabs.update(created.get(source), { pinned: source.pinned });
     }
     for (const source of ordered) {
-      await chrome.tabs.move(created.get(source), { windowId: createdWindow.id, index: source.index });
+      await chrome.tabs.move(created.get(source), { windowId, index: source.index });
     }
     await mapConcurrent(ordered.filter((source) => source.history), HISTORY_CONCURRENCY,
       (source) => restoreHistory(created.get(source), source.history));
     await chrome.tabs.update(created.get(activeSource), { active: true });
-    await applyWindowBounds(createdWindow.id, input.bounds, input.state);
-    const prepared = await chrome.windows.get(createdWindow.id, { populate: true });
+    // The live handoff may already have repositioned the window while its tabs
+    // were restored. Do not overwrite that newer position with the initial
+    // offscreen bounds at the end of preparation.
+    if (input.state === 'maximized') await chrome.windows.update(windowId, { state: 'maximized' });
+    const prepared = await chrome.windows.get(windowId, { populate: true });
     return publicWindow(prepared);
   } catch (error) {
-    if (Number.isSafeInteger(createdWindow?.id)) {
-      try { await chrome.windows.remove(createdWindow.id); } catch { /* The failed window may already be gone. */ }
-    }
+    try { await chrome.windows.remove(windowId); } catch { /* The failed window may already be gone. */ }
     throw error;
+  } finally {
+    pendingPrepares.delete(windowId);
   }
+}
+
+async function prepareWindow(params) {
+  const begun = await beginPrepareWindow(params);
+  return finishPrepareWindow({ windowId: begun.windowId });
 }
 
 async function positionWindow(params) {
@@ -277,7 +308,8 @@ async function positionWindow(params) {
   const bounds = normalizedBounds(params?.bounds);
   const state = params?.state === undefined ? 'normal' : params.state;
   if (state !== 'normal' && state !== 'maximized') throw new BridgeError('INVALID_STATE', 'Chrome window state is invalid.');
-  await applyWindowBounds(windowId, bounds, state);
+  if (state === 'normal') await chrome.windows.update(windowId, bounds);
+  else await applyWindowBounds(windowId, bounds, state);
   return { windowId };
 }
 
@@ -297,6 +329,7 @@ async function focusWindow(params) {
 
 async function closeWindow(params) {
   const windowId = windowIdFrom(params);
+  pendingPrepares.delete(windowId);
   await chrome.windows.remove(windowId);
   return { windowId };
 }
@@ -305,6 +338,8 @@ const RPC_METHODS = Object.freeze({
   'windows.list': listWindows,
   'window.capture': captureWindow,
   'window.prepare': prepareWindow,
+  'window.prepare.begin': beginPrepareWindow,
+  'window.prepare.finish': finishPrepareWindow,
   'window.position': positionWindow,
   'window.focus': focusWindow,
   'window.close': closeWindow,
@@ -323,6 +358,7 @@ let reconnectTimer = null;
 let pingTimer = null;
 let reconnectDelay = RECONNECT_MIN_MS;
 let operationQueue = Promise.resolve();
+let liveWindowQueue = Promise.resolve();
 const incomingChunks = new Map();
 
 function clearBridgeTimers() {
@@ -381,6 +417,17 @@ async function dispatchRequest(message) {
   }
 }
 
+function enqueueRequest(message) {
+  // Position and close must stay responsive while the ordered queue is doing
+  // slower tab/history restoration for window.prepare.finish. Keep them on a
+  // separate ordered queue so rapid pointer frames cannot complete out of order.
+  if (plainObject(message) && (message.method === 'window.position' || message.method === 'window.close')) {
+    liveWindowQueue = liveWindowQueue.then(() => dispatchRequest(message), () => dispatchRequest(message));
+    return;
+  }
+  operationQueue = operationQueue.then(() => dispatchRequest(message), () => dispatchRequest(message));
+}
+
 function receiveNativeMessage(message) {
   if (plainObject(message) && message.v === PROTOCOL_VERSION && message.type === 'chunk') {
     const transferId = message.transferId;
@@ -407,7 +454,7 @@ function receiveNativeMessage(message) {
         let offset = 0;
         for (const part of byteParts) { bytes.set(part, offset); offset += part.length; }
         const decoded = JSON.parse(new TextDecoder().decode(bytes));
-        operationQueue = operationQueue.then(() => dispatchRequest(decoded), () => dispatchRequest(decoded));
+        enqueueRequest(decoded);
       } catch { /* Invalid chunks are discarded without reaching Chrome APIs. */ }
     }
     return;
@@ -416,7 +463,7 @@ function receiveNativeMessage(message) {
     postNative({ v: PROTOCOL_VERSION, type: 'pong', at: Date.now() });
     return;
   }
-  operationQueue = operationQueue.then(() => dispatchRequest(message), () => dispatchRequest(message));
+  enqueueRequest(message);
 }
 
 function connectNativeBridge() {
