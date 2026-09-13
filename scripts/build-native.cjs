@@ -80,3 +80,32 @@ if (!fs.existsSync(guardSource)) throw new Error(`Cargo did not produce the reco
 fs.copyFileSync(guardSource, guardDestination);
 if (process.platform !== 'win32') fs.chmodSync(guardDestination, 0o755);
 console.log(`Recovery guard ready: ${path.relative(projectRoot, guardDestination)}`);
+
+if (process.platform === 'win32') {
+  const chromeHostRoot = path.join(nativeRoot, 'chrome-host');
+  const chromeHostTargetRoot = path.join(targetRoot, 'chrome-host');
+  const chromeHostBuild = spawnSync(cargo, [
+    'build',
+    '--locked',
+    '--release',
+    '--manifest-path',
+    path.join(chromeHostRoot, 'Cargo.toml'),
+  ], {
+    cwd: projectRoot,
+    env: { ...process.env, CARGO_TARGET_DIR: chromeHostTargetRoot },
+    stdio: 'inherit',
+  });
+
+  if (chromeHostBuild.error) handleSpawnError(chromeHostBuild.error);
+  if (chromeHostBuild.status !== 0) process.exit(chromeHostBuild.status ?? 1);
+
+  const chromeHostName = 'compusync-chrome-host.exe';
+  const chromeHostSource = path.join(chromeHostTargetRoot, 'release', chromeHostName);
+  const chromeHostDestination = path.join(nativeRoot, chromeHostName);
+  if (!fs.existsSync(chromeHostSource)) {
+    throw new Error(`Cargo did not produce the Chrome native-messaging host: ${chromeHostSource}`);
+  }
+
+  fs.copyFileSync(chromeHostSource, chromeHostDestination);
+  console.log(`Chrome native-messaging host ready: ${path.relative(projectRoot, chromeHostDestination)}`);
+}

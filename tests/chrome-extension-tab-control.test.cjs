@@ -98,7 +98,7 @@ test('production tab bridge installs the bundled extension over existing loopbac
 test('bundled extension exposes only the local tab/debugger bridge permissions', () => {
   const manifest = require('../src/main/adapters/chrome/extension/manifest.json');
   assert.equal(manifest.manifest_version, 3);
-  assert.deepEqual(manifest.permissions, ['debugger']);
+  assert.deepEqual(manifest.permissions, ['debugger', 'nativeMessaging', 'tabs']);
   assert.equal(manifest.host_permissions, undefined);
   assert.equal(manifest.externally_connectable, undefined);
   assert.equal(manifest.content_scripts, undefined);

@@ -11,7 +11,7 @@
     "dev": "electron .",
     "test": "node --test tests/*.test.cjs",
     "test:e2e": "playwright test",
-    "test:native": "node scripts/run-cargo.cjs test --locked --manifest-path native/Cargo.toml --lib && node scripts/run-cargo.cjs test --locked --manifest-path native/recovery-guard/Cargo.toml && node --test native/index.test.cjs",
+    "test:native": "node scripts/run-cargo.cjs test --locked --manifest-path native/Cargo.toml --lib && node scripts/run-cargo.cjs test --locked --manifest-path native/recovery-guard/Cargo.toml && node scripts/run-cargo.cjs test --locked --manifest-path native/chrome-host/Cargo.toml && node --test native/index.test.cjs",
     "check": "node scripts/check.cjs",
     "native:build": "node scripts/build-native.cjs",
     "native:smoke": "node scripts/smoke-native.cjs",
@@ -67,6 +67,12 @@
       }
     ],
     "win": {
+      "extraResources": [
+        {
+          "from": "native/compusync-chrome-host.exe",
+          "to": "native/compusync-chrome-host.exe"
+        }
+      ],
       "target": [
         "nsis"
       ],

@@ -15,6 +15,7 @@ const { ClipboardSync } = require('./main/clipboard-sync.cjs');
 const { WindowHandoffRuntime } = require('./main/window-runtime.cjs');
 const { SeamOverlay } = require('./main/seam-overlay.cjs');
 const { ChromeAdapterRuntime } = require('./main/adapters/chrome/runtime.cjs');
+const { createWindowsChromeExtensionSetup } = require('./main/adapters/chrome/setup.cjs');
 const { createUpdateService } = require('./main/updates.cjs');
 const { createNativeAdapter } = require('../native/index.cjs');
 const { autoUpdater } = require('electron-updater');
@@ -78,6 +79,7 @@ function readConfig() {
     port: Number(process.env.COMPUSYNC_PORT ?? saved.port ?? 43187),
     secret: saved.secret || newSecret(), edge: saved.edge || 'right',
     autoLaunch: Boolean(saved.autoLaunch), firstRun: !saved.id,
+    chromeExtensionSetupPrompted: Boolean(saved.chromeExtensionSetupPrompted),
     clipboardSync: saved.clipboardSync !== false,
     cursorSettings: cursorSettingsFromSaved(saved.cursorSettings),
     dismissedNotices: Array.isArray(saved.dismissedNotices)
@@ -347,10 +349,10 @@ function ensureInputRuntime() {
       native: nativeInput,
       machineId: config.id,
       getPlacement: () => inputRuntime?.cursor.placementFor(config.id),
-      store: {
-        get: (key) => config[key],
-        set: async (key, value) => { config[key] = value; saveConfig(); },
-      },
+      setup: process.platform === 'win32' ? createWindowsChromeExtensionSetup({
+        app, shell, resourcesPath: process.resourcesPath,
+      }) : null,
+      promptOnStart: process.platform === 'win32' && !config.chromeExtensionSetupPrompted,
       requestAutomation: async () => {
         const result = await showMessageBox({
           type: 'info', buttons: ['Continue', 'Cancel'], defaultId: 0, cancelId: 1,
@@ -360,13 +362,15 @@ function ensureInputRuntime() {
         });
         return result.response === 0;
       },
-      requestRelaunch: async (offer) => {
+      requestExtensionSetup: async (offer) => {
         if (!offer) return false;
         const result = await showMessageBox({
-          type: 'question', buttons: [offer.confirmLabel || 'Restart Chrome', offer.cancelLabel || 'Not now'],
+          type: 'question', buttons: [offer.confirmLabel || 'Open setup', offer.cancelLabel || 'Not now'],
           defaultId: 0, cancelId: 1, title: offer.title,
           message: offer.message, detail: offer.detail || '',
         });
+        config.chromeExtensionSetupPrompted = true;
+        saveConfig();
         return result.response === 0;
       },
       onNotice: addNotice,

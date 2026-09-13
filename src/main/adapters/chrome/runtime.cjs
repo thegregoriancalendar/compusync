@@ -1,11 +1,11 @@
 'use strict';
 
 const { EventEmitter } = require('node:events');
-const { ChromeDetector } = require('./detect.cjs');
 const { createChromeHandoffAdapter, isNativeChromeWindow } = require('./index.cjs');
-const { WindowsChromeRelaunch } = require('./windows.cjs');
+const { createChromeExtensionAdapter } = require('./extension-adapter.cjs');
+const { ChromeNativeMessagingServer } = require('./native-messaging-server.cjs');
 
-const STARTUP_TIMEOUT_MS = 10_000;
+const STARTUP_TIMEOUT_MS = 30_000;
 const POLL_MS = 250;
 
 function typedError(code, message) {
@@ -21,110 +21,136 @@ class ChromeAdapterRuntime extends EventEmitter {
     this.getPlacement = options.getPlacement;
     this.onNotice = typeof options.onNotice === 'function' ? options.onNotice : () => {};
     this.logger = options.logger || null;
-    this.requestRelaunch = typeof options.requestRelaunch === 'function' ? options.requestRelaunch : async () => false;
+    this.requestExtensionSetup = typeof options.requestExtensionSetup === 'function'
+      ? options.requestExtensionSetup : async () => false;
+    this.promptOnStart = options.promptOnStart === true;
     this.sleep = options.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.now = options.now || Date.now;
     this.startupTimeoutMs = options.startupTimeoutMs || STARTUP_TIMEOUT_MS;
-    this.createAdapter = options.createAdapter || createChromeHandoffAdapter;
-    this.detector = options.detector || new ChromeDetector({ native: this.native, fetch: options.fetch, timeoutMs: options.detectionTimeoutMs });
-    this.relaunch = options.relaunch || (this.platform === 'win32' ? new WindowsChromeRelaunch({
-      platform: this.platform, store: options.store, env: options.env,
-      localAppData: options.localAppData, normalUserDataDir: options.normalUserDataDir,
-      native: this.native,
-    }) : null);
+    this.setup = options.setup || null;
+    this.bridge = this.platform === 'win32'
+      ? (options.bridge || new ChromeNativeMessagingServer(options)) : null;
+    this.createAdapter = options.createAdapter || (this.platform === 'win32'
+      ? createChromeExtensionAdapter : createChromeHandoffAdapter);
     this.adapter = this.platform === 'darwin' ? this.createAdapter({
-      ...options, platform: 'darwin', native: this.native, machineId: this.machineId, getPlacement: this.getPlacement,
+      ...options, platform: 'darwin', native: this.native, machineId: this.machineId,
+      getPlacement: this.getPlacement,
     }) : null;
-    this.connecting = null;
-    this.linked = false;
-    this._detected = (result) => { void this.#acceptDetection(result).catch((error) => this.emit('error', error)); };
-    this.detector.on?.('detected', this._detected);
+    this.started = false;
+    this.starting = null;
+    this.setupRequest = null;
+    this._bridgeReady = () => this.#acceptBridge();
+    this._bridgeDisconnect = () => { if (this.platform === 'win32') this.adapter = null; };
+    this._bridgeError = (error) => this.emit('error', error);
+    this.bridge?.on?.('ready', this._bridgeReady);
+    this.bridge?.on?.('disconnect', this._bridgeDisconnect);
+    this.bridge?.on?.('error', this._bridgeError);
     this.facade = Object.freeze({
       adapterId: 'chrome',
-      capture: async (...args) => (await this.#ensureAdapter(true)).capture(...args),
-      prepare: async (...args) => (await this.#ensureAdapter(true)).prepare(...args),
-      position: async (...args) => (await this.#ensureAdapter(false)).position(...args),
-      focus: async (...args) => (await this.#ensureAdapter(false)).focus(...args),
-      close: async (...args) => (await this.#ensureAdapter(false)).close(...args),
+      capture: async (...args) => (await this.#ensureAdapter()).capture(...args),
+      prepare: async (...args) => (await this.#ensureAdapter()).prepare(...args),
+      position: async (...args) => (await this.#ensureAdapter()).position(...args),
+      focus: async (...args) => (await this.#ensureAdapter()).focus(...args),
+      close: async (...args) => (await this.#ensureAdapter()).close(...args),
     });
   }
 
-  start() { this.setLinked(true); }
-
-  setLinked(linked) {
-    this.linked = Boolean(linked);
-    this.detector.setLinked?.(this.linked);
+  start() {
+    if (this.started) return;
+    this.started = true;
+    if (this.platform !== 'win32') return;
+    this.starting = (async () => {
+      await this.setup?.prepare?.();
+      await this.bridge.start();
+      if (this.bridge.connected) this.#acceptBridge();
+      if (this.promptOnStart && !this.bridge.connected) {
+        await this.sleep(1_000);
+        if (!this.bridge.connected) {
+          try { await this.#openSetup(); }
+          catch (error) {
+            if (error?.code !== 'CHROME_EXTENSION_SETUP_REQUIRED') throw error;
+          }
+        }
+      }
+    })();
+    this.starting.catch((error) => this.emit('error', error));
   }
+
+  setLinked() { this.start(); }
 
   adapterForWindow(window) {
     if (!isNativeChromeWindow(window)) return null;
-    if (this.platform === 'darwin') return this.adapter;
-    if (this.relaunch.decision?.() === 'declined' && !this.adapter) return null;
-    return this.facade;
+    return this.platform === 'darwin' ? this.adapter : this.facade;
   }
 
-  adapterForId(adapterId) { return adapterId === 'chrome' ? (this.platform === 'darwin' ? this.adapter : this.facade) : null; }
+  adapterForId(adapterId) {
+    if (adapterId !== 'chrome') return null;
+    return this.platform === 'darwin' ? this.adapter : this.facade;
+  }
 
   async scan() {
-    const detection = await this.detector.scan();
-    await this.#acceptDetection(detection);
-    return detection;
+    if (this.starting) await this.starting;
+    return { detected: Boolean(this.bridge?.connected), endpoint: null };
   }
 
-  async #acceptDetection(detection) {
-    if (this.platform === 'darwin' || !detection?.endpoint) return this.adapter;
-    if (this.adapter?.cdp?.port === detection.endpoint.port) return this.adapter;
-    if (this.connecting) return this.connecting;
-    this.connecting = (async () => {
-      const adapter = this.createAdapter({
-        platform: this.platform, native: this.native, machineId: this.machineId,
-        getPlacement: this.getPlacement, detection, logger: this.logger,
+  #acceptBridge() {
+    if (this.platform !== 'win32' || !this.bridge?.connected) return this.adapter;
+    if (!this.adapter) {
+      this.adapter = this.createAdapter({
+        platform: 'win32', bridge: this.bridge, native: this.native,
+        machineId: this.machineId, getPlacement: this.getPlacement, logger: this.logger,
       });
-      await adapter.cdp.connect();
-      adapter.cdp.once?.('disconnect', () => { if (this.adapter === adapter) this.adapter = null; });
-      this.adapter = adapter;
-      this.emit('ready', adapter);
-      return adapter;
-    })();
-    try { return await this.connecting; }
-    finally { this.connecting = null; }
+      this.emit('ready', this.adapter);
+    }
+    return this.adapter;
   }
 
-  async #ensureAdapter(allowRelaunch) {
-    if (this.adapter) return this.adapter;
-    let detection = await this.scan();
+  async #openSetup() {
+    if (!this.setupRequest) {
+      this.setupRequest = (async () => {
+        const offer = await this.setup?.offer?.() || {
+          id: 'chrome-extension-setup', title: 'Set up Chrome window handoff',
+          message: 'Add the CompuSync helper to Chrome to move Chrome windows between laptops.',
+          detail: 'Chrome requires one confirmation for unpublished extensions. CompuSync will open the exact helper folder and Chrome Extensions page.',
+          confirmLabel: 'Open setup', cancelLabel: 'Not now',
+        };
+        if (!await this.requestExtensionSetup(offer)) {
+          throw typedError('CHROME_EXTENSION_SETUP_REQUIRED', 'Install the CompuSync Chrome helper before handing off Chrome windows.');
+        }
+        await this.setup?.open?.();
+      })();
+    }
+    try { await this.setupRequest; }
+    finally { this.setupRequest = null; }
+  }
+
+  async #ensureAdapter() {
     if (this.adapter) return this.adapter;
     if (this.platform !== 'win32') throw typedError('CHROME_UNAVAILABLE', 'Google Chrome is not available for handoff.');
-    if (!allowRelaunch || !detection?.detected) throw typedError('CHROME_NOT_RUNNING', 'Open Google Chrome on this laptop before handing off a window.');
-    if (this.relaunch.decision() === 'declined') throw typedError('CHROME_RELAUNCH_DECLINED', 'Chrome window handoff was disabled on this laptop.');
-    let accepted = this.relaunch.decision() === 'accepted';
-    if (!accepted) {
-      const offer = this.relaunch.offer({ crossingAttempt: true, chromeRunning: true, cdpAvailable: false });
-      accepted = Boolean(await this.requestRelaunch(offer));
-      await this.relaunch.rememberDecision(accepted);
-    }
-    if (!accepted) throw typedError('CHROME_RELAUNCH_DECLINED', 'Chrome window handoff was declined.');
-    await this.relaunch.launchAccepted({ crossingAttempt: true, accepted: true });
-    const notice = this.relaunch.isolatedProfileNotice?.();
-    if (notice) {
-      this.onNotice({ ...notice, kind: 'info', dismissible: true });
-      await this.relaunch.markIsolatedProfileNoticeShown?.();
-    }
+    if (!this.started) this.start();
+    if (this.starting) await this.starting;
+    if (this.bridge.connected) return this.#acceptBridge();
+    await this.#openSetup();
     const deadline = this.now() + this.startupTimeoutMs;
     do {
-      detection = await this.detector.scan();
-      await this.#acceptDetection(detection);
-      if (this.adapter) return this.adapter;
+      if (this.bridge.connected) return this.#acceptBridge();
       await this.sleep(POLL_MS);
     } while (this.now() < deadline);
-    throw typedError('CHROME_DEBUG_START_TIMEOUT', 'Chrome restarted but its local handoff connection did not become ready.');
+    this.onNotice({
+      id: 'chrome-extension-not-connected', kind: 'warning', title: 'Chrome helper needs attention',
+      message: 'In Chrome Extensions, enable Developer mode and use Load unpacked to select the CompuSync helper folder.',
+      dismissible: true,
+    });
+    throw typedError('CHROME_EXTENSION_NOT_CONNECTED', 'The CompuSync Chrome helper did not connect. Finish Load unpacked, then try again.');
   }
 
   stop() {
-    this.setLinked(false);
-    this.detector.off?.('detected', this._detected);
-    this.adapter?.cdp?.close?.();
-    this.adapter = null;
+    this.started = false;
+    if (this.platform === 'win32') this.adapter = null;
+    this.bridge?.off?.('ready', this._bridgeReady);
+    this.bridge?.off?.('disconnect', this._bridgeDisconnect);
+    this.bridge?.off?.('error', this._bridgeError);
+    void this.bridge?.stop?.();
   }
 }
 

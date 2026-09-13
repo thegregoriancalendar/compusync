@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "name": "CompuSync Tab Bridge",
-  "version": "1.0.0",
-  "description": "Provides local tab order and pin state to CompuSync.",
+  "version": "3.0.0",
+  "description": "Moves Chrome windows between your paired CompuSync computers.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApQD15HyQNXgZHukh4cB0nyQNUl5+9JC5NTjtpCfHl1eLyQcJqkm/4fs5yV/z0FGWENcOVlZwuz4tPodDQUY3CuyKGqfcelhXMvMxj0+nWTKKYTB+NH+Kpw/3Ky4YWUyi3Myuls1PbZ0KuULwlGNRhJpOgxlaAYdO2cdQwMrOeIsYkiPxl049o9o6oOPDMBEVQkNY7lghTOcxF6JiCGbW/Eh/eiKqnlWcjElww8RX68ofM7LhCq3K2/jJwiQuVLR3w4ifSZ1Kiwdlw6ouGt18zqRWoU99bwgs7pDKHXrwLwR6sx+EqO6OtSzM5PyB/L0CD+PCvd4sQRYuKp2CbHP9lQIDAQAB",
-  "permissions": ["debugger"],
+  "permissions": ["debugger", "nativeMessaging", "tabs"],
   "action": {},
   "background": { "service_worker": "service-worker.js" }
 }

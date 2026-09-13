@@ -104,12 +104,24 @@ async function regularFile(fsLike, filename, description, maxBytes = MAX_EXTENSI
 async function atomicWrite(fsLike, filename, contents) {
   const directory = path.dirname(filename);
   const temp = path.join(directory, `.${path.basename(filename)}.${process.pid}.${randomUUID()}.tmp`);
+  const backup = path.join(directory, `.${path.basename(filename)}.${process.pid}.${randomUUID()}.old`);
   try {
     await fsLike.promises.writeFile(temp, contents, { flag: 'wx', mode: 0o600 });
-    await fsLike.promises.rename(temp, filename);
+    try { await fsLike.promises.rename(temp, filename); }
+    catch (error) {
+      if (!['EEXIST', 'EPERM'].includes(error?.code)) throw error;
+      await fsLike.promises.rename(filename, backup);
+      try { await fsLike.promises.rename(temp, filename); }
+      catch (replacementError) {
+        await fsLike.promises.rename(backup, filename).catch(() => {});
+        throw replacementError;
+      }
+      await fsLike.promises.rm(backup, { force: true });
+    }
     await fsLike.promises.chmod(filename, 0o600).catch(() => {});
   } finally {
     await fsLike.promises.rm(temp, { force: true }).catch(() => {});
+    await fsLike.promises.rm(backup, { force: true }).catch(() => {});
   }
 }
 
