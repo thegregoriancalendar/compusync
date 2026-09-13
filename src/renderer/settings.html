@@ -16,7 +16,7 @@
 
     <section class="connection" aria-live="polite">
       <span id="status-dot" class="dot"></span>
-      <div><strong id="status">Starting…</strong><p id="status-description">Getting your window ready.</p></div>
+      <div><strong id="status">Starting…</strong><p id="status-description">Getting CompuSync ready.</p></div>
     </section>
 
     <section id="notices" class="notice-list" aria-live="polite" aria-label="CompuSync notices" hidden></section>
@@ -89,25 +89,14 @@
       <p class="small field-help">Edge resistance requires an extra push before crossing. It is automatically disabled during a drag.</p>
     </section>
 
-    <section class="card legacy-window-card">
-      <h2>Sandbox window seam</h2>
-      <label for="edge">When this laptop hosts, the other laptop is</label>
-      <select id="edge"><option value="right">To my right →</option><option value="left">To my left ←</option><option value="top">Above me ↑</option><option value="bottom">Below me ↓</option></select>
-      <p class="small">The host's choice defines the shared display seam. Drag the shared top bar through that edge to move one continuous window between laptops.</p>
+    <section class="card">
+      <h2>Startup</h2>
       <label class="check"><input id="auto-launch" type="checkbox"> Start in the background when I sign in</label>
       <p id="launch-note" class="small" hidden>Available in the installed app.</p>
     </section>
 
-    <section class="actions">
-      <button id="open" class="primary">Open shared window</button>
-      <button id="place-here">Bring window here</button>
-      <button id="close">Close shared window</button>
-    </section>
-
     <footer>
-      <p>Move into the desktop to bend the grid and leave a particle trail with the shared cursor. Click the desktop to capture your trackpad; press <kbd>Esc</kbd> to release it.</p>
-      <p>Grab the bar at the very top to move the one logical window. While crossing, each laptop shows only its adjoining crop. Use “Bring window here” when the window is wholly on the other laptop.</p>
-      <p><kbd id="shortcut">Ctrl</kbd> + <kbd>,</kbd> opens these settings. Closing or reopening the shared window affects the same surface on both laptops.</p>
+      <p><kbd id="shortcut">Ctrl</kbd> + <kbd>,</kbd> opens these settings.</p>
       <details><summary>Connection help</summary><p>Allow CompuSync through the firewall on your private network. Guest Wi-Fi may block laptop-to-laptop connections. If pairing fails, check the code or generate a new one. You can also enter the address in the pairing section’s Connection help. A sleeping or fully quit app cannot receive a window; the connection returns automatically when it is available again.</p></details>
     </footer>
   </main>

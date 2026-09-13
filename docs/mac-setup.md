@@ -1,13 +1,24 @@
 # Run CompuSync on a Mac
 
-CompuSync runs locally on both computers. The Mac application presents its crop of one logical shared window and can import Mac files into the host-owned workspace. A Windows `.exe` cannot run on macOS.
+CompuSync runs natively on both computers. On the Mac it provides the menu-bar/settings UI, native shared-cursor input, and Chrome handoff. The legacy shared surface, workspace, and bundled editor are retired and are never created.
 
 ## Run from source
 
-1. Copy or clone the complete repository onto the Mac.
-2. Install Node.js 22.12 or newer, Xcode Command Line Tools (`xcode-select --install`), and the stable Rust toolchain from [rustup.rs](https://rustup.rs) if they are not already installed.
-3. Open Terminal in the repository directory containing `package.json`.
-4. Install the Mac-specific dependencies and start CompuSync:
+1. Install Node.js 22.12 or newer.
+2. Install Xcode Command Line Tools:
+
+   ```sh
+   xcode-select --install
+   ```
+
+3. Install the stable Rust toolchain from [rustup.rs](https://rustup.rs). If `npm run native:build` reports `spawnSync cargo ENOENT`, Cargo is missing or is not on the shell's `PATH`. After installing Rust, open a new Terminal or load it in the current shell:
+
+   ```sh
+   source "$HOME/.cargo/env"
+   cargo --version
+   ```
+
+4. In the repository directory, install, build, verify, and start:
 
    ```sh
    npm ci
@@ -16,47 +27,38 @@ CompuSync runs locally on both computers. The Mac application presents its crop 
    npm start
    ```
 
-Install dependencies and build the native addon on the Mac. Do not copy the Windows `node_modules` directory or native build output. Electron and the Rust build select the current Mac architecture.
+Build the native addon on the Mac. Do not copy Windows `node_modules` or native output. Apple Silicon produces `native/compusync-native.darwin-arm64.node`; Intel produces the corresponding `darwin-x64` addon. A Windows `.exe` cannot run on macOS.
 
-## Connect to Windows
+## Grant macOS permissions
 
-1. Keep both computers on the same Wi-Fi or wired local network and run CompuSync on each.
-2. Decide which computer will host. The host owns the persistent workspace and runs the bundled text editor.
-3. On the host, choose **Share from here** and copy its eight-character code.
-4. On the other computer, choose **Join other laptop**, enter the code, and select **Connect laptops**.
-5. On the host, set **Where is the other laptop?** to match the physical arrangement. If the Mac is physically right of a Windows host, choose **To my right** on Windows. The host setting defines the seam.
-6. Select **Open shared window**. The complete surface initially appears on the host; the other computer does not show a duplicate.
+CompuSync uses:
 
-Automatic discovery uses local UDP port 43188 and the direct connection normally uses TCP port 43187. If discovery is blocked, expand **Connection help** and enter the host's displayed address and port on the joiner. Allow the app's local-network connection if macOS or the network firewall prompts for it.
+- **Accessibility** to detect and position Chrome windows and to participate in native input recovery.
+- **Input Monitoring** so either computer's mouse and keyboard can drive the shared cursor.
+- **Automation** for Chrome tab handoff. This prompt is deferred until the first eligible Chrome crossing.
 
-## Use the Mac crop
+Use the action in the settings notice to open the relevant System Settings pane. If macOS still shows the old permission state after granting access, fully quit and reopen CompuSync. Do not enable Chrome's **JavaScript from Apple Events** setting; CompuSync does not require it.
 
-Grab the shared bar at the very top of the frameless surface. As it crosses the configured seam, Windows and macOS show complementary pieces of one unchanged logical scene. Continue holding the same trackpad after the Mac crop becomes narrow; Pointer Lock should allow the drag to finish. Press Escape during a bar drag to return to its starting position.
+## Connect and link
 
-When the surface is entirely on the other computer, use **Bring window here** from the Mac menu-bar item or settings. CompuSync does not capture global Mac input when it has no visible fragment.
+1. Run the same current CompuSync revision on both laptops and keep them on the same local network.
+2. On one computer, choose **Share from here** and copy its eight-character code.
+3. On the other, choose **Join other laptop**, enter the code, and select **Connect laptops**.
+4. Wait for **Connected** on both computers. A saved pairing alone is not a live connection.
+5. Under **Screen layout**, choose the arrangement matching the desk and adjust the alignment offset if needed.
+6. Select **Link cursors**.
 
-Within the desktop, moving controls the shared cursor. Click the desktop for continuous relative input and press Escape to release it. `Cmd+,` opens settings, `Cmd+W` closes the shared surface, `Cmd+Shift+O` opens it, and `Cmd+Shift+Enter` brings it to the Mac.
+Automatic discovery uses UDP port 43188 and the direct connection normally uses TCP port 43187. If discovery is blocked, use **Connection help** to enter the host address. Allow local-network access if macOS or a firewall prompts for it.
 
-## Chrome history limitation
+There is no **Open shared window** step. Starting or activating CompuSync opens only **Connection & settings**. Closing settings leaves the menu-bar process running, and Cmd+, reopens it.
 
-Chrome's public Apple Events interface exposes a tab's current URL, title, and
-loading state, but not its back/forward navigation entries or current history
-index. CompuSync does not ask you to enable Chrome's disabled-by-default
-**JavaScript from Apple Events** setting. When a history-bearing window arrives
-from Windows, CompuSync retains that bounded history metadata for a later round
-trip while each prepared tab remains at the same indexed URL. Navigating or
-rearranging a tab on the Mac discards its retained metadata instead of restoring
-a stale history. Chrome's native Back/Forward stack cannot be exactly recreated
-or inspected through Apple Events alone.
+## Use the Mac cursor and Chrome
 
-## Import and edit files
+Move through the configured left, right, or bottom seam to transfer cursor and keyboard ownership. Cmd+Shift+Y transfers ownership directly. Cmd+Shift+U unlinks immediately and restores local input.
 
-- Select **Import** to choose files from the Mac, or drop files or directories into the desktop. If Windows hosts, Mac imports are copied over the encrypted data channel into the Windows profile's workspace.
-- Use **New Folder**, **Rename**, **Delete**, and the breadcrumb controls to organize and browse the host workspace.
-- Double-click a valid UTF-8 text file no larger than 2 MiB to open the bundled host text editor. When Windows hosts, the editor runs in Windows and its JPEG interface appears in the Mac crop. Mac mouse, wheel, keyboard, and save input is validated and forwarded to it.
-- Saved document bytes persist on the host. Moving the window does not restart the running editor.
+Drag a normal Chrome window through the seam to hand it to the other computer. CompuSync prepares a native destination Chrome window, preserves its supported tab state, and commits based on which side contains most of the window when released. Maximized and fullscreen Chrome use an instant transfer; unsupported windows remain local.
 
-The text editor is the only supported program. CompuSync does not run arbitrary Windows or macOS applications, application bundles, or executables inside the surface, and it does not provide virtual-machine isolation.
+Chrome's public Apple Events interface exposes current tab state but not the complete native back/forward entry collection. CompuSync retains bounded history metadata only while the prepared tabs remain unchanged. Navigating or rearranging tabs on the Mac discards retained metadata instead of restoring stale history.
 
 ## Build a Mac application
 
@@ -71,16 +73,17 @@ npm run dist:mac -- --arm64
 npm run dist:mac -- --x64
 ```
 
-Outputs are written to `dist/`. Development packages are unsigned. Test them according to your organization's Gatekeeper policy; production distribution requires the appropriate Apple signing and notarization workflow. The offscreen bundled editor does not capture arbitrary native applications, so it should not require Screen Recording or Accessibility access for that feature.
+Outputs are written to `dist/`. Development packages are unsigned. Production distribution requires the appropriate Apple signing and notarization workflow.
 
-## Mac verification still required
+## Physical verification
 
-The implementation has Windows/local automation and a passing hosted macOS Electron suite, but it has not been physically accepted on the intended Mac. Before release, complete [the Windows and Mac acceptance checklist](testing.md), especially:
+Hosted automation cannot prove actual Windows-to-Mac behavior. Before release, complete [the acceptance checklist](testing.md), especially:
 
-- Retina and Windows mixed-scale crop alignment;
-- Pointer Lock and the transparent capture keeper after the source crop disappears;
-- top-bar dragging in both directions with macOS as host and as peer;
-- real network discovery, firewall prompts, weak Wi-Fi, and interrupted imports;
-- peer editing and saving to each host operating system;
-- sleep/wake, reconnect, menu-bar behavior, and start at sign-in;
-- DMG and ZIP launch behavior on the target Mac architecture.
+- cursor ownership and input recovery in both directions;
+- Retina and Windows mixed-scale seam alignment;
+- Accessibility, Input Monitoring, and Automation denial/remediation;
+- Chrome transfer, reversal, and failure recovery;
+- real network discovery, firewall prompts, weak Wi-Fi, and reconnect;
+- sleep/wake, display hotplug, menu-bar behavior, and start at sign-in;
+- DMG and ZIP launch behavior on the target architecture;
+- confirmation that the retired shared surface never appears.

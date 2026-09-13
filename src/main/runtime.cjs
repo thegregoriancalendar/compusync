@@ -52,6 +52,10 @@ class SharedInputRuntime extends EventEmitter {
     this.hostId = options.hostId;
     this.peerId = options.peerId;
     this.isHost = this.machineId === this.hostId;
+    // peerId always names the remote transport peer. On the join computer
+    // that is the host, so it cannot also identify the second screen in the
+    // host/join layout pair.
+    this.joinId = this.isHost ? this.peerId : this.machineId;
     this.settings = options.settings || {};
     this.native = options.native || {};
     this.globalShortcut = options.globalShortcut;
@@ -63,11 +67,12 @@ class SharedInputRuntime extends EventEmitter {
     this.onLayoutNeeded = typeof options.onLayoutNeeded === 'function' ? options.onLayoutNeeded : () => {};
     this.logger = options.logger || null;
     this.started = false;
+    this.stopping = false;
     this.peerConnected = false;
     this.desiredLinked = this.settings.linked !== false;
     this.windowController = null;
 
-    const placements = derivePairPlacements(this.layouts, this.hostId, this.peerId, this.settings);
+    const placements = derivePairPlacements(this.layouts, this.hostId, this.joinId, this.settings);
     const ownerPlacement = placements.find((placement) => placement.machineId === this.hostId) || placements[0];
     this.cursor = new CursorController({
       machineId: this.machineId,
@@ -106,6 +111,10 @@ class SharedInputRuntime extends EventEmitter {
       keyboard: this.keyboard,
       send: (message) => this.send(message),
       onUnlinked: (reason) => {
+        // An orderly session replacement still performs the full native
+        // recovery sequence, but it is not a link failure. Preserve the
+        // user's desired mode so a saved pairing can relink after reconnect.
+        if (this.stopping) return;
         this.desiredLinked = false;
         this.onModeChange(false, reason);
         this.emit('mode', { linked: false, reason });
@@ -186,7 +195,7 @@ class SharedInputRuntime extends EventEmitter {
   }
 
   broadcastLayout() {
-    const placements = derivePairPlacements(this.layouts, this.hostId, this.peerId, this.settings);
+    const placements = derivePairPlacements(this.layouts, this.hostId, this.joinId, this.settings);
     if (placements.length !== 2) return false;
     this.cursor.setPlacements(placements);
     return this.send({ type: 'layout.update', placements });
@@ -225,6 +234,7 @@ class SharedInputRuntime extends EventEmitter {
 
   stop(reason = 'stop') {
     if (!this.started) return;
+    this.stopping = true;
     this.started = false;
     this.hotkeys?.dispose?.();
     this.session.off?.('peer-message', this._peerMessage);

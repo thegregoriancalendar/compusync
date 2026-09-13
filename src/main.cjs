@@ -8,9 +8,7 @@ const { randomUUID } = require('node:crypto');
 const { Session } = require('./core/session.cjs');
 const { newSecret, parseInvitation } = require('./core/wire.cjs');
 const { pairWithCode } = require('./core/pairing.cjs');
-const { viewportsForActor } = require('./core/geometry.cjs');
 const { EDGES } = require('./core/state.cjs');
-const { DesktopService } = require('./desktop-service.cjs');
 const { cursorSettingsFromSaved, validateCursorSettings } = require('./core/cursor-preferences.cjs');
 const { SharedInputRuntime } = require('./main/runtime.cjs');
 const { WindowHandoffRuntime } = require('./main/window-runtime.cjs');
@@ -27,15 +25,14 @@ app.setName('CompuSync');
 const hasLock = app.requestSingleInstanceLock();
 if (!hasLock) app.quit();
 
-let surface, settings, tray, sync, desktopService, inputRuntime, windowRuntime, seamOverlay, nativeInput, config;
+let settings, tray, sync, inputRuntime, windowRuntime, seamOverlay, nativeInput, config;
 let quitting = false;
 let changingSession = false;
-let applyingBounds = false;
 let backgroundLaunch = false;
 let pendingActivation = false;
 let layoutRevision = 0;
 let layoutTimer;
-let lastNativeBounds = null;
+let lastInputRuntimeError = null;
 const notices = new Map();
 const rendererPath = (file) => path.join(__dirname, 'renderer', file);
 const configPath = () => path.join(app.getPath('userData'), 'settings.json');
@@ -88,8 +85,7 @@ function addresses() {
 }
 
 function selectedDisplay() {
-  if (!surface || surface.isDestroyed()) return screen.getPrimaryDisplay();
-  return screen.getDisplayMatching(surface.getBounds());
+  return screen.getPrimaryDisplay();
 }
 
 function localLayout() {
@@ -132,15 +128,6 @@ function handleDisplayChange() {
   scheduleLayoutUpdate();
 }
 
-function viewportFor(state) {
-  if (!state?.window?.rect || !state?.topology) return null;
-  return viewportsForActor(state.window.rect, state.topology, config.id)[0] || null;
-}
-
-function surfaceState(state) {
-  return state ? { ...state, viewport: viewportFor(state)?.viewport || null } : state;
-}
-
 function details() {
   const ips = addresses();
   return {
@@ -149,13 +136,15 @@ function details() {
       ...config.cursorSettings,
       linked: inputRuntime ? inputRuntime.cursor.linked : false,
     },
+    cursorLinkReady: Boolean(inputRuntime?.native?.available
+      && inputRuntime.peerConnected && inputRuntime.cursor.placements.length === 2),
     notices: [...notices.values()].filter((notice) => !config.dismissedNotices.includes(notice.id)),
     packaged: app.isPackaged,
     status: sync?.status() || { role: config.role, phase: 'starting', peers: [] },
     invitation: config.role === 'host' ? sync?.invitation() : null,
     addresses: ips.length ? ips : ['127.0.0.1'],
     host: config.host, port: sync?.port || config.port,
-    state: surfaceState(sync?.state),
+    state: sync?.state,
     clockOffsetMs: sync?.clockOffsetMs || 0,
   };
 }
@@ -180,7 +169,6 @@ function send(window, channel, value) {
 
 function refreshStatus() {
   send(settings, 'sync:details', details());
-  send(surface, 'sync:connection', sync.status());
   updateMenu();
 }
 
@@ -194,92 +182,14 @@ function secureWindow(window) {
   window.webContents.on('will-attach-webview', (event) => event.preventDefault());
 }
 
-function createSurface() {
-  surface = new BrowserWindow({
-    width: 900, height: 600,
-    title: 'CompuSync', backgroundColor: '#ffffff', show: false,
-    frame: false, resizable: false, fullscreenable: false,
-    roundedCorners: false, hasShadow: false, useContentSize: true,
-    autoHideMenuBar: true, webPreferences: webPreferences(),
-  });
-  surface.setMenuBarVisibility(false);
-  secureWindow(surface);
-  surface.loadFile(rendererPath('surface.html'));
-  surface.once('ready-to-show', () => {
-    if (sync) applyState(sync.state);
-    // The grid can finish loading after setup; keep pairing in front.
-    if (settings && !settings.isDestroyed() && settings.isVisible()) settings.focus();
-  });
-  surface.on('close', (event) => {
-    if (quitting) return;
-    event.preventDefault();
-    if (!sync.action({ type: 'close' })) { surface.hide(); showSettings(); }
-  });
-  surface.on('hide', releaseContentPointer);
-  surface.on('blur', () => {
-    releaseContentPointer();
-    cancelOwnedDrag();
-  });
-  surface.webContents.on('render-process-gone', () => cancelOwnedDrag());
-  surface.webContents.on('before-input-event', (event, input) => {
-    if (input.type !== 'keyDown') return;
-    if (input.key === 'Escape' && sync?.state.drag?.owner === config.id) {
-      event.preventDefault();
-      cancelOwnedDrag();
-      send(surface, 'sync:release', { reason: 'cancel' });
-      return;
-    }
-    if (!(input.control || input.meta)) return;
-    const key = input.key.toLowerCase();
-    if (key === ',') { event.preventDefault(); showSettings(); }
-    if (key === 'w') { event.preventDefault(); closeShared(); }
-    if (key === 'enter' && input.shift) { event.preventDefault(); bringHere(); }
-    if (key === 'o' && input.shift) { event.preventDefault(); openShared(); }
-  });
-}
-
-function releaseContentPointer() {
-  send(surface, 'sync:release', { reason: 'content' });
-  if (sync?.state.cursor.active.includes(config.id)) sync.action({ type: 'leave' });
-}
-
 function cancelOwnedDrag() {
   const drag = sync?.state.drag;
   if (drag?.owner === config.id) sync.action({ type: 'drag-cancel', id: drag.id });
 }
 
-function captureKeeperBounds() {
-  const area = selectedDisplay().workArea;
-  const previous = lastNativeBounds || { x: area.x, y: area.y };
-  return {
-    x: Math.max(area.x, Math.min(area.x + area.width - 1, previous.x)),
-    y: Math.max(area.y, Math.min(area.y + area.height - 1, previous.y)),
-    width: 1,
-    height: 1,
-  };
-}
-
 function applyState(state) {
-  if (!surface || surface.isDestroyed()) return;
-  const view = state.open ? viewportFor(state) : null;
-  const ownsDrag = state.open && state.drag?.owner === config.id;
-  applyingBounds = true;
-  if (view) {
-    lastNativeBounds = view.nativeBounds;
-    if (typeof surface.setOpacity === 'function') surface.setOpacity(1);
-    surface.setBounds(view.nativeBounds, false);
-    if (!surface.isVisible()) surface.showInactive();
-  } else if (ownsDrag) {
-    if (typeof surface.setOpacity === 'function') surface.setOpacity(.01);
-    surface.setBounds(captureKeeperBounds(), false);
-    if (!surface.isVisible()) surface.show();
-  } else if (surface.isVisible()) {
-    if (typeof surface.setOpacity === 'function') surface.setOpacity(1);
-    surface.hide();
-  }
-  applyingBounds = false;
-  send(surface, 'sync:state', { ...surfaceState(state), clockOffsetMs: sync.clockOffsetMs });
-  // Settings does not need high-frequency cursor updates.
+  // The retired shared surface is no longer created. Settings still needs
+  // placement changes so connection and cursor controls stay current.
   const placement = `${state.open}:${state.window.rect.x}:${state.window.rect.y}:${state.layouts[config.id]?.revision || 0}`;
   if (placement !== applyState.lastPlacement) {
     applyState.lastOpen = state.open;
@@ -300,14 +210,10 @@ function showSettings() {
   settings.on('closed', () => { settings = null; });
 }
 
-function openShared() {
-  if (!sync.action({ type: 'open' })) showSettings();
-  else if (surface.isVisible()) { surface.restore(); surface.focus(); }
-}
-
-function bringHere() {
-  if (!sync.action({ type: 'place-here' })) showSettings();
-  else if (surface.isVisible()) { surface.restore(); surface.focus(); }
+function showMessageBox(options) {
+  return settings && !settings.isDestroyed()
+    ? dialog.showMessageBox(settings, options)
+    : dialog.showMessageBox(options);
 }
 
 // A foreground launch is also the entry point to pairing, even with a saved
@@ -315,29 +221,21 @@ function bringHere() {
 function activateApp() {
   if (!sync) { pendingActivation = true; return; }
   pendingActivation = false;
-  if (!sync.state.open) openShared();
-  if (sync.phase !== 'connected') { showSettings(); return; }
-  if (viewportFor(sync.state)) { surface.show(); surface.focus(); }
-  else showSettings();
-}
-
-function closeShared() {
-  if (!sync.action({ type: 'close' })) { surface.hide(); showSettings(); }
+  showSettings();
 }
 
 function menuTemplate() {
+  const cursorReady = Boolean(inputRuntime?.native?.available
+    && inputRuntime.peerConnected && inputRuntime.cursor.placements.length === 2);
   return [
     { label: sync?.phase === 'connected' ? `Connected to ${sync.status().peers[0]?.name || 'laptop'}` : 'CompuSync · Waiting for connection', enabled: false },
     { type: 'separator' },
-    { label: 'Open shared window', accelerator: 'CmdOrCtrl+Shift+O', click: openShared },
-    { label: 'Bring window here', accelerator: 'CmdOrCtrl+Shift+Enter', click: bringHere },
-    { label: 'Close shared window', accelerator: 'CmdOrCtrl+W', click: closeShared },
-    { type: 'separator' },
     {
       label: inputRuntime?.cursor.linked ? 'Unlink cursors' : 'Link cursors',
+      enabled: cursorReady,
       click: () => inputRuntime?.setLinked(!inputRuntime.cursor.linked, 'menu'),
     },
-    { label: 'Move cursor to other laptop', click: () => inputRuntime?.cursor.toggleOwnership() },
+    { label: 'Move cursor to other laptop', enabled: Boolean(cursorReady && inputRuntime?.cursor.linked), click: () => inputRuntime?.cursor.toggleOwnership() },
     { type: 'separator' },
     { label: 'Connection & settings…', accelerator: 'CmdOrCtrl+,', click: showSettings },
     { type: 'separator' },
@@ -393,11 +291,17 @@ function ensureInputRuntime() {
       onNotice: addNotice,
       onModeChange: (linked, reason) => {
         config.cursorSettings.linked = linked;
-        if (!linked && reason && reason !== 'user') addNotice({
-          id: 'cursor-recovered', kind: 'warning', title: 'Cursors unlinked for safety',
-          message: `Compusync restored local input after ${reason}. Link again when both laptops are ready.`,
-          dismissible: true,
-        });
+        if (linked) {
+          notices.delete('cursor-recovered');
+          notices.delete('input-runtime-error');
+          lastInputRuntimeError = null;
+        } else if (reason && reason !== 'user') {
+          addNotice({
+            id: 'cursor-recovered', kind: 'warning', title: 'Cursors unlinked for safety',
+            message: `Compusync restored local input after ${reason}. Link again when both laptops are ready.`,
+            dismissible: true,
+          });
+        }
         saveConfig();
         refreshStatus();
       },
@@ -412,7 +316,7 @@ function ensureInputRuntime() {
         set: async (key, value) => { config[key] = value; saveConfig(); },
       },
       requestAutomation: async () => {
-        const result = await dialog.showMessageBox(settings || surface, {
+        const result = await showMessageBox({
           type: 'info', buttons: ['Continue', 'Cancel'], defaultId: 0, cancelId: 1,
           title: 'Allow Chrome Automation',
           message: 'Compusync needs macOS Automation access for this Chrome handoff.',
@@ -422,7 +326,7 @@ function ensureInputRuntime() {
       },
       requestRelaunch: async (offer) => {
         if (!offer) return false;
-        const result = await dialog.showMessageBox(settings || surface, {
+        const result = await showMessageBox({
           type: 'question', buttons: [offer.confirmLabel || 'Restart Chrome', offer.cancelLabel || 'Not now'],
           defaultId: 0, cancelId: 1, title: offer.title,
           message: offer.message, detail: offer.detail || '',
@@ -437,21 +341,24 @@ function ensureInputRuntime() {
       native: nativeInput,
       chrome,
       onNotice: addNotice,
-      setBusy: (busy) => send(surface, 'sync:handoff-busy', Boolean(busy)),
+      setBusy: () => {},
       setSeam: (state) => seamOverlay?.update(state, config.id),
       showHint: (message) => seamOverlay?.showHint(message),
       logger: applicationLogger,
     });
     windowRuntime.start();
+    lastInputRuntimeError = null;
+    notices.delete('input-runtime-error');
   } catch (error) {
     void windowRuntime?.stop('runtime-startup-failed');
     windowRuntime = null;
     nativeInput?.emergencyRecover?.('runtime startup failed');
     inputRuntime = null;
     config.cursorSettings.linked = false;
+    lastInputRuntimeError = error?.message || 'The native input layer could not start.';
     addNotice({
       id: 'input-runtime-error', kind: 'warning', title: 'Cursor linking needs attention',
-      message: error?.message || 'The native input layer could not start.', dismissible: false,
+      message: lastInputRuntimeError, dismissible: false,
     });
   }
   return inputRuntime;
@@ -468,22 +375,16 @@ function stopInputRuntime(reason = 'session-stop') {
 
 async function startSession() {
   stopInputRuntime('session-restart');
-  if (desktopService) await desktopService.stop();
   if (sync) await sync.stop();
   const layout = localLayout();
   sync = new Session({ ...config, layout, startClosed: backgroundLaunch });
-  desktopService = new DesktopService({
-    session: sync,
-    workspaceRoot: path.join(app.getPath('userData'), 'workspace'),
-    hostName: config.name,
-    BrowserWindow,
-    ipcMain,
-    programRendererPath: path.join(__dirname, 'programs'),
+  sync.on('state', (state) => {
+    applyState(state);
+    // SharedInputRuntime consumes the same state event after this listener and
+    // may gain its second screen placement. Refresh once all synchronous state
+    // listeners have run so Link cursors reflects the live layout immediately.
+    queueMicrotask(refreshStatus);
   });
-  desktopService.on('state', (value) => send(surface, 'desktop:state', value));
-  desktopService.on('frame', (value) => send(surface, 'desktop:frame', value));
-  desktopService.on('transfer', (value) => send(surface, 'desktop:transfer', value));
-  sync.on('state', applyState);
   sync.on('status', () => {
     refreshStatus();
     if (sync.phase === 'connected') {
@@ -492,7 +393,6 @@ async function startSession() {
     }
   });
   try {
-    await desktopService.start();
     await sync.start();
     if (config.role === 'host' && config.port === 0) config.port = sync.port;
     saveConfig();
@@ -504,22 +404,13 @@ async function startSession() {
 }
 
 function setupIpc() {
-  const trusted = (event) => [surface, settings].some((window) => window && !window.isDestroyed() && event.sender === window.webContents && event.senderFrame === window.webContents.mainFrame);
+  const trusted = (event) => settings && !settings.isDestroyed()
+    && event.sender === settings.webContents && event.senderFrame === settings.webContents.mainFrame;
   ipcMain.handle('sync:bootstrap', (event) => { if (!trusted(event)) throw new Error('Unknown window.'); return details(); });
-  ipcMain.on('sync:input', (event, action) => {
-    if (!trusted(event) || event.sender !== surface.webContents || ![
-      'enter', 'leave', 'move', 'button',
-      'drag-start', 'drag-move', 'drag-end', 'drag-cancel',
-    ].includes(action?.type)) return;
-    sync.action(action);
-  });
   ipcMain.handle('sync:command', async (event, command, data) => {
     if (!trusted(event)) return { ok: false, error: 'Unknown window.' };
     try {
       if (command === 'settings') showSettings();
-      else if (command === 'open') openShared();
-      else if (command === 'place-here') bringHere();
-      else if (command === 'close') closeShared();
       else if (event.sender !== settings?.webContents) throw new Error('Open settings to change this.');
       else if (command === 'copy') {
         const code = details().invitation?.code;
@@ -544,8 +435,10 @@ function setupIpc() {
           await startSession();
         } finally { changingSession = false; }
       } else if (command === 'preferences') {
-        if (!EDGES.includes(data?.edge)) throw new Error('Choose a valid screen edge.');
-        config.edge = data.edge;
+        if (data?.edge !== undefined) {
+          if (!EDGES.includes(data.edge)) throw new Error('Choose a valid screen edge.');
+          config.edge = data.edge;
+        }
         config.autoLaunch = Boolean(data.autoLaunch);
         config.cursorSettings = validateCursorSettings(data?.cursorSettings);
         inputRuntime?.updateSettings(config.cursorSettings);
@@ -557,8 +450,9 @@ function setupIpc() {
         sync.action({ type: 'layout', layout: localLayout() });
         refreshStatus();
       } else if (command === 'cursor-link') {
+        if (sync?.phase !== 'connected') throw new Error('The saved pairing is not connected yet. Keep Compusync open on both laptops.');
         const runtime = ensureInputRuntime();
-        if (!runtime) throw new Error('Connect both laptops before linking cursors.');
+        if (!runtime) throw new Error(lastInputRuntimeError || 'Cursor linking could not start. Review the notice above and try again.');
         if (!runtime.setLinked(true, 'user')) throw new Error('Native input support and a shared layout are required before linking.');
         config.cursorSettings.linked = true;
         saveConfig();
@@ -586,33 +480,6 @@ function setupIpc() {
       return { ok: true };
     } catch (error) { return { ok: false, error: error.message }; }
   });
-  ipcMain.handle('desktop:bootstrap', (event) => {
-    if (!trusted(event) || event.sender !== surface?.webContents) throw new Error('Unknown window.');
-    return desktopService?.state() || { role: config.role, hostName: config.name, workspaceSerial: 0, programs: [] };
-  });
-  ipcMain.handle('desktop:command', async (event, command, data) => {
-    if (!trusted(event) || event.sender !== surface?.webContents) return { ok: false, error: 'Unknown window.' };
-    if (!desktopService) return { ok: false, error: 'The shared workspace is still starting.' };
-    try {
-      let value;
-      if (command === 'import-picker') {
-        const result = await dialog.showOpenDialog(surface, {
-          title: 'Import into the CompuSync workspace',
-          buttonLabel: 'Import',
-          properties: ['openFile', 'multiSelections'],
-        });
-        if (result.canceled) value = { cancelled: true, count: 0 };
-        else value = await desktopService.importPaths(result.filePaths, data?.target || '');
-      } else if (command === 'import-paths') {
-        value = await desktopService.importPaths(data?.paths, data?.target || '');
-      } else {
-        value = await desktopService.handleCommand(command, data || {});
-      }
-      return { ok: true, value };
-    } catch (error) {
-      return { ok: false, error: error?.publicMessage || error?.message || 'The desktop operation failed.' };
-    }
-  });
 }
 
 app.on('second-instance', (_event, argv) => { if (!argv.includes('--background')) activateApp(); });
@@ -627,8 +494,8 @@ app.on('before-quit', (event) => {
   stopInputRuntime('process-exit');
   seamOverlay?.destroy();
   seamOverlay = null;
-  Promise.resolve(desktopService?.stop()).finally(() => sync?.stop()).finally(() => app.quit());
-  if (!sync && !desktopService) app.quit();
+  Promise.resolve(sync?.stop()).finally(() => app.quit());
+  if (!sync) app.quit();
 });
 
 if (hasLock) app.whenReady().then(async () => {
@@ -658,7 +525,8 @@ if (hasLock) app.whenReady().then(async () => {
   electronSession.defaultSession.setPermissionRequestHandler((contents, permission, callback) => callback(permissions(contents, permission)));
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
   setupIpc();
-  createSurface();
+  // The v1 shared surface is retired. Do not create its BrowserWindow, even
+  // hidden, because state updates could otherwise make it visible later.
   seamOverlay = new SeamOverlay({
     BrowserWindow, screen,
     preloadPath: path.join(__dirname, 'preload.cjs'),

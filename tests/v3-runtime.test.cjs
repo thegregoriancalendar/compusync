@@ -64,6 +64,21 @@ test('bottom layout places the peer below the host with the configured horizonta
   assert.deepEqual(placements[1].origin, { x: 250, y: 1080 });
 });
 
+test('join runtime builds distinct host and local screen placements while its transport peer is the host', () => {
+  const session = new FakeSession();
+  const native = new FakeNative();
+  const runtime = new SharedInputRuntime({
+    session, native, machineId: 'mac', hostId: 'win', peerId: 'win', settings,
+    layouts: { win: layout(1920, 1080, 1), mac: layout(1440, 900, 2) },
+  });
+  runtime.start();
+  assert.deepEqual(runtime.cursor.placements.map(({ machineId }) => machineId), ['win', 'mac']);
+  assert.equal(runtime.cursor.linked, true);
+  assert.equal(runtime.receive({ type: 'heartbeat', t: 1 }, 'win'), true);
+  assert.equal(runtime.receive({ type: 'heartbeat', t: 1 }, 'mac'), false);
+  runtime.stop('session-stop');
+});
+
 test('runtime sanitizes traffic, agrees layout, links only with peer and native support, then recovers', () => {
   const session = new FakeSession();
   const native = new FakeNative();
@@ -82,6 +97,26 @@ test('runtime sanitizes traffic, agrees layout, links only with peer and native 
   assert.equal(runtime.cursor.linked, false);
   assert.deepEqual(modes.at(-1), [false, 'test-failure']);
   runtime.stop();
+});
+
+test('orderly session restart recovers native input without reporting a failure or forgetting desired linking', () => {
+  const session = new FakeSession();
+  const native = new FakeNative();
+  const modes = [];
+  const runtime = new SharedInputRuntime({
+    session, native, machineId: 'win', hostId: 'win', peerId: 'mac', settings,
+    layouts: { win: layout(1920, 1080, 1), mac: layout(1440, 900, 2) },
+    onModeChange: (linked, reason) => modes.push([linked, reason]),
+  });
+  runtime.start();
+  assert.equal(runtime.cursor.linked, true);
+  const modesBeforeStop = modes.length;
+  runtime.stop('session-restart');
+  assert.equal(modes.length, modesBeforeStop);
+  assert.equal(modes.some(([linked, reason]) => !linked && reason === 'session-restart'), false);
+  assert.equal(runtime.desiredLinked, true);
+  assert.equal(native.calls.some(([name]) => name === 'stopCursorCapture'), true);
+  assert.equal(native.calls.some(([name, value]) => name === 'setLinked' && value === false), true);
 });
 
 test('production native owns fail-safe hotkeys without Electron registration conflicts', () => {

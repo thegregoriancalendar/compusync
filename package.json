@@ -1,7 +1,7 @@
 {
   "name": "compusync",
   "version": "0.3.0",
-  "description": "One logical window, shared workspace, and host editor across two laptops.",
+  "description": "Native cursor linking and Chrome window handoff across two laptops.",
   "private": true,
   "main": "src/main.cjs",
   "author": "CompuSync",
@@ -57,7 +57,7 @@
       "target": ["dmg", "zip"],
       "category": "public.app-category.utilities",
       "extendInfo": {
-        "NSLocalNetworkUsageDescription": "CompuSync connects to your other laptop to share its window and cursor.",
+        "NSLocalNetworkUsageDescription": "CompuSync connects to your other laptop to link cursors and hand off Chrome windows.",
         "NSAccessibilityUsageDescription": "CompuSync needs Accessibility access to move the shared cursor and position Chrome windows during handoff.",
         "NSInputMonitoringUsageDescription": "CompuSync needs Input Monitoring access so your mouse and keyboard can follow the shared cursor.",
         "NSAppleEventsUsageDescription": "CompuSync needs Automation access to read and recreate your Chrome tabs during window handoff."

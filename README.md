@@ -1,12 +1,14 @@
 # CompuSync
 
-CompuSync links a Windows 11 laptop and a Mac into one cursor space and teleports supported native Chrome windows across their configured seam. During a Chrome crossing, each machine positions a real local Chrome window from the same virtual coordinates, producing a temporary aligned straddle without streaming the browser.
+CompuSync links a Windows 11 laptop and a Mac into one native cursor space. The cursor crosses the configured screen seam, keyboard input follows cursor ownership, and supported Google Chrome windows can be handed from one computer to the other.
 
-The existing shared surface remains available with its interactive grid, persistent host-owned workspace, and bundled text editor. Files can be imported from either laptop.
+The old shared surface, sandbox/workspace, and bundled editor are retired. CompuSync never creates or opens that window. The only persistent application UI is **Connection & settings**; a temporary transparent seam overlay may appear while Chrome is crossing.
 
 ## Run on both laptops
 
-CompuSync must run on both computers on the same local network. To run from source, install Node.js 22.12 or newer, the stable Rust toolchain, and the platform compiler tools (Xcode Command Line Tools on macOS or Visual Studio Build Tools with the C++ workload on Windows). Copy or clone this repository onto each computer, then install and build separately on each operating system:
+CompuSync must run on both computers on the same local network. A source build requires Node.js 22.12 or newer, the stable Rust toolchain, and platform compiler tools: Xcode Command Line Tools on macOS or Visual Studio Build Tools with the C++ workload on Windows.
+
+Install and build independently on each computer:
 
 ```sh
 npm ci
@@ -15,76 +17,53 @@ npm run native:smoke
 npm start
 ```
 
-Do not copy `node_modules` between Windows and macOS. A packaged Windows `.exe` runs only on Windows; build the macOS app on a Mac with `npm run dist:mac`. See the [Mac setup guide](docs/mac-setup.md).
+Do not copy `node_modules` or native build output between operating systems. The build creates the platform addon used for global input, cursor recovery, native window discovery, and Chrome handoff. See the [Mac setup guide](docs/mac-setup.md) for macOS prerequisites and permissions.
 
 ## Pair the computers
 
-1. On the computer that should own the workspace and run programs, choose **Share from here**. It displays an eight-character code such as **AB7K-3M9Q**.
+1. Open **Connection & settings** on both computers. Use **Share from here** on one computer and copy its eight-character code.
 2. On the other computer, choose **Join other laptop**, enter the code, and select **Connect laptops**. Lowercase and an omitted dash are accepted.
-3. On the host, set **Where is the other laptop?** to match the physical layout. If the Mac is to the right of the Windows host, choose **To my right** on the host. The host's choice defines the shared seam.
-4. Select **Open shared window**. A newly opened surface is centered on the host. It does not open a full duplicate on the peer.
+3. Wait until each computer reports **Connected**. A saved pairing can appear in settings before its live connection has returned; cursor linking is available only after both apps reconnect.
+4. Under **Screen layout**, describe the physical arrangement. Choose which laptop is left or right, or place the other laptop below, and adjust the alignment offset if needed.
+5. Select **Link cursors**.
 
-Pairing uses local UDP discovery and an encrypted direct WebSocket connection. There is no cloud account or external server. If discovery is blocked, expand **Connection help** and enter the host's address and port manually. Discovery uses UDP port 43188; the connection normally uses TCP port 43187.
+Pairing uses local UDP discovery and an encrypted direct WebSocket connection. There is no cloud account or relay. Discovery uses UDP port 43188 and the connection normally uses TCP port 43187. If discovery is blocked, expand **Connection help** and enter the displayed host address manually.
 
-The host owns the authoritative session. It must remain running for the peer to control the surface, browse the workspace, or operate a program. A saved pairing reconnects automatically when its previous host address is reachable.
+One computer starts the saved session as the host and the other rejoins it. Both applications must remain running. Opening CompuSync from the tray or menu bar shows settings; it does not open the retired shared surface.
 
-## Move and control the shared window
+## Use the shared cursor
 
-When linked, either laptop's mouse or trackpad moves one OS cursor. Cursor ownership crosses the configured left, right, or bottom seam; keyboard input follows the owner. The settings panel controls shared acceleration, edge resistance, layout offset, and linked mode. Ctrl/Cmd+Shift+U immediately unlinks and restores local input; Ctrl/Cmd+Shift+Y moves cursor ownership to the other laptop.
+When linked, either laptop's mouse or trackpad contributes movement to one cursor. Cursor ownership crosses the configured left, right, or bottom seam, and keyboard input follows the owner. The top edge is not a crossing edge on macOS.
 
-Drag a normal, non-fullscreen Chrome window toward the shared edge to hand it off. CompuSync pre-warms a real offscreen Chrome window on the destination, preserves its tabs, order, pinning, active tab, geometry, and bounded history, and shows both native halves while the pointer crosses. Reversing keeps the prepared copy alive for three seconds; releasing before halfway keeps the source, while releasing after halfway commits the destination. Unsupported windows stay local and show one brief hint.
-
-On macOS, the first Chrome crossing requests Automation permission. On Windows, a normally launched Chrome cannot expose background tabs to CDP; the first crossing offers a one-time restart into CompuSync's isolated, signed-out browser profile. Declining is remembered and Chrome remains non-crossing. CompuSync never launches Chrome at startup.
-
-The frameless window has a 36-DIP shared bar at its top. Grab this bar to move the logical window. CompuSync captures relative pointer movement for the drag, so the same trackpad can continue moving after the physical OS cursor reaches a display edge.
+The settings panel controls common acceleration, edge resistance, alignment offset, and linked mode. Edge resistance requires an extra push at the seam when no native window is being dragged.
 
 | Action | Result |
 | --- | --- |
-| Drag the shared top bar | Moves the one logical window. At the seam, the two computers show complementary crops. |
-| Release the primary button | Commits the drag at its current position. |
-| Press Escape during a bar drag | Cancels the drag and restores its starting position. |
-| Choose **Bring window here** | Moves the window to this computer when it has no local fragment. |
-| Move within the desktop | Moves the shared application cursor and distorts the grid. |
-| Click within the desktop | Captures relative interior movement. Press Escape to restore the OS pointer. |
-| Close / Ctrl or Cmd+W | Closes the one shared surface on both computers while leaving the tray or menu process running. |
-| Open / Ctrl or Cmd+Shift+O | Reopens the shared surface. |
-| Bring here / Ctrl or Cmd+Shift+Enter | Places the shared surface on the computer where the command is invoked. |
-| Ctrl+, on Windows / Cmd+, on Mac | Opens connection and placement settings. |
+| Move through the configured seam | Transfers cursor and keyboard ownership to the other laptop. |
+| **Move cursor to other laptop** | Transfers ownership without crossing the seam. |
+| Ctrl/Cmd+Shift+Y | Transfers ownership to the other laptop. |
+| Ctrl/Cmd+Shift+U | Toggles cursor linking and immediately restores local input when unlinking. |
+| Ctrl+, on Windows / Cmd+, on Mac | Opens **Connection & settings**. |
 
-Either computer can start a bar drag from a visible fragment. If the source crop disappears while the button is held, CompuSync retains pointer capture in a tiny transparent local window until release. This behavior has automated Windows coverage; physical macOS and Retina validation remains in the [two-laptop checklist](docs/testing.md).
+Unlinking removes global input hooks, releases synthetic buttons and modifiers, restores cursor visibility, and leaves both computers fully local. The native recovery path does the same after transport loss, suspend, addon failure, or process exit.
 
-In Unlinked mode, CompuSync removes its global input hooks, releases any cursor parking and synthetic input, and leaves both computers fully local. A heartbeat watchdog performs the same recovery after transport loss, suspend, addon failure, or process exit.
+## Hand off Chrome windows
 
-## Use the workspace and text editor
+Drag a supported Chrome window through the linked seam. CompuSync prepares a real native Chrome window on the destination, preserves tab order, pinning, active tab, geometry, and the history state available on that platform, and aligns the two native windows while they straddle the seam. Releasing before halfway keeps the source; releasing after halfway commits the destination. Reversing briefly reuses the prepared copy.
 
-The desktop panel is the persistent workspace stored on the session host.
+Normal addressable Chrome windows support live straddling. Maximized or fullscreen windows transfer without a live straddle. Unsupported applications and very small windows stay local while the cursor crosses and produce a brief notice.
 
-- Choose **Import** to select local files, or drop local files into the desktop. Imports made on the peer are transferred to the host.
-- Dropped directories are imported recursively. Symbolic links and unsupported filesystem entry types are rejected.
-- Use **New Folder**, **Rename**, and **Delete** to organize the workspace. Deleting a directory removes its contents after confirmation.
-- Double-click a directory to browse it. Double-click a file to open it in the bundled text editor. The editor accepts valid UTF-8 text documents up to 2 MiB.
-- Click the rendered editor to focus it, then use the mouse, keyboard, and wheel normally. Use the editor's **Save** button or Ctrl/Cmd+S to write the document to the host workspace.
-- Moving the logical window between computers does not restart the editor. Its process and files remain on the host while its current JPEG frames are shown on whichever crop contains it.
+On macOS, the first Chrome crossing requests Automation permission. Accessibility is required for native window detection and placement, and Input Monitoring is required for shared input. On Windows, the first eligible crossing may offer to restart Chrome into CompuSync's isolated, signed-out profile because current Chrome releases do not expose the required tab state from the default profile. Declining is remembered. CompuSync never launches Chrome merely because CompuSync starts.
 
-The workspace survives application restarts. Running editor processes are session state and stop when the host session or app stops; saved file contents remain. Import name collisions receive a numbered name such as `notes (1).txt` rather than overwriting an existing entry.
+Chrome's public macOS automation API does not expose its complete back/forward stack. CompuSync retains bounded history metadata while a prepared window remains unchanged, but navigation or tab rearrangement on the Mac invalidates stale retained history.
 
-Default workspace limits are 32 path segments, 10,000 files and directories, 256 MiB per file, 1 GiB total stored file data, four concurrent incoming transfers, and 128 KiB transfer chunks. The text editor limit is 2 MiB. Public workspace operations use portable relative paths and never expose the host's absolute workspace path.
+## Recovery and privacy boundaries
 
-## Supported program scope
+Pairing settings are stored in CompuSync's OS user-data directory. Pairing secrets use Electron safe storage where available, with a restricted local-file fallback.
 
-The bundled **Text Editor** is the only supported host program in this release. It runs in a separate sandboxed, offscreen Electron window at 800x500 and publishes JPEG frames at up to 15 frames per second. CompuSync validates and forwards a small set of mouse, wheel, and keyboard events to that program.
+Control messages are authenticated and encrypted. Cursor input is not queued while disconnected. A watchdog and independent recovery guard restore local input and guarded windows if the peer, network, or app disappears. Chrome handoff logs may contain a descriptor ID, phase, duration, hostname, and tab count, but not full URLs, titles, history URLs, or session tokens.
 
-Arbitrary native Windows or macOS applications, dragged executable bundles, audio/video streaming, cross-operating-system execution, and virtual-machine isolation are unsupported. The shared surface visually contains the bundled editor, but that does not constitute a VM or an operating-system process sandbox. Renderer sandboxing limits the Electron renderer; it is not a general isolation boundary for future native programs.
-
-## Persistence, recovery, and boundaries
-
-The workspace is stored beneath CompuSync's OS user-data directory, normally `%APPDATA%\CompuSync\workspace` on Windows or `~/Library/Application Support/CompuSync/workspace` on macOS. Pairing configuration is stored alongside the app profile. Pairing secrets use Electron safe storage where available, with a restricted local-file fallback.
-
-Workspace APIs reject absolute paths, traversal, backslashes, reserved Windows device names, the internal `.compusync` directory, and symbolic-link escapes. Text saves use a temporary file and replacement. Peer imports are transferred in order, acknowledged, SHA-256 checked, and cleaned up if the peer disconnects.
-
-Control traffic and bulk data use separate authenticated channels and separate derived keys, keeping pointer and window actions from queuing behind file or frame payloads. Each data channel is bound to the already authenticated active peer. Requests use a fixed capability catalog; peers and renderers cannot submit host paths, executable paths, shell text, or unrestricted command-line arguments.
-
-Wi-Fi interruption triggers reconnect. Input is not queued while offline. The host continues locally, and its running editor remains available after a peer-only disconnect. There is no automatic host migration. If the host exits, the peer cannot operate the workspace or editor until that host returns.
+CompuSync is not remote desktop, a virtual machine, file synchronization, or application streaming. The retired workspace and editor code is outside the active v3 product surface and is never instantiated by the app.
 
 ## Build packages
 
@@ -103,33 +82,28 @@ npm run dist:mac -- --x64
 npm run build
 ```
 
-Development packages are unsigned. Build and sign macOS releases on a Mac. The GitHub Actions workflow runs syntax, unit/integration, and Electron end-to-end checks on Windows and macOS; manually dispatched runs can also produce unsigned artifacts.
+Development packages are unsigned. Build and sign macOS releases on a Mac. A Windows executable cannot run on macOS.
 
 ## Develop and verify
 
 ```sh
-npm run check       # JavaScript syntax checks
-npm test            # State, geometry, workspace, program, encryption, and network tests
-npm run test:native # Rust addon and native adapter tests
+npm run check        # JavaScript syntax checks
+npm test             # Cursor, topology, handoff, recovery, and transport tests
+npm run test:native  # Rust addon, recovery guard, and native adapter tests
 npm run native:smoke # Load and exercise the release addon
-npm run test:e2e    # Real Electron windows and local paired-process behavior
-npm run demo        # Two isolated profiles paired over loopback
+npm run test:e2e     # Real Electron pairing and lifecycle behavior
 ```
 
-The end-to-end suite covers one-window crops and cross-seam drag transactions, Pointer Lock cancellation, lifecycle and pairing, plus the host workspace/editor vertical slice. Automated local processes cannot establish actual Windows-to-Mac behavior, Retina alignment, macOS Pointer Lock retention, firewall behavior, sleep/wake, or signed-package behavior. Run the [physical acceptance checklist](docs/testing.md) before treating those paths as released.
+Automated tests cannot establish actual Windows-to-Mac input, Retina/mixed-scale alignment, operating-system permission prompts, firewall behavior, sleep/wake behavior, or signed-package behavior. Complete the [physical acceptance checklist](docs/testing.md) on the intended computers.
 
 ## Implementation map
 
-- `src/core/state.cjs` owns the version-2 logical window, drag, cursor, and lifecycle state.
-- `src/core/geometry.cjs` creates the virtual two-display topology and derives per-computer crop rectangles.
-- `src/core/session.cjs` and `src/core/wire.cjs` manage pairing and the authenticated control and bulk-data channels.
-- `src/core/workspace.cjs`, `src/core/capabilities.cjs`, and `src/core/transfer.cjs` implement bounded storage and transfer authority.
-- `src/desktop-service.cjs` coordinates local or remote desktop requests with the host-owned services.
-- `src/programs/` contains the bundled host text editor and its offscreen program manager.
-- `src/main.cjs` integrates Electron windows, display topology, tray/menu controls, the workspace picker, and program services.
-- `src/main/cursor.cjs`, `runtime.cjs`, `drag.cjs`, and `window-runtime.cjs` own v3 cursor and native Chrome handoff state.
-- `src/main/adapters/chrome/` implements Chrome detection, CDP, Apple Automation, capture, preparation, and commit.
-- `native/` contains the napi-rs cursor/window substrate and independent crash-recovery guard.
-- `src/renderer/` renders the cropped shared world, desktop browser, streamed program interface, and settings.
+- `src/core/session.cjs` and `src/core/wire.cjs` manage pairing and the authenticated connection.
+- `src/main/cursor.cjs` and `src/main/runtime.cjs` own v3 cursor topology, ownership, input routing, and recovery.
+- `src/main/drag.cjs` and `src/main/window-runtime.cjs` coordinate native-window crossing and handoff transactions.
+- `src/main/adapters/chrome/` implements Chrome detection, CDP, Apple Automation, preparation, and commit.
+- `src/main/seam-overlay.cjs` presents the temporary noninteractive Chrome seam treatment.
+- `native/` contains the napi-rs Windows/macOS substrate and independent crash-recovery guard.
+- `src/main.cjs` integrates the settings window, tray/menu controls, native runtime, display changes, and app lifecycle. It deliberately does not create the retired shared-surface `BrowserWindow`.
 
-Implementation rationale and compatibility boundaries are recorded in [docs/DESIGN_CHOICES.md](docs/DESIGN_CHOICES.md). Current validation evidence and remaining work are in [docs/IMPLEMENTATION_REPORT.md](docs/IMPLEMENTATION_REPORT.md).
+Implementation rationale and compatibility boundaries are recorded in [docs/DESIGN_CHOICES.md](docs/DESIGN_CHOICES.md). Current validation evidence is in [docs/IMPLEMENTATION_REPORT.md](docs/IMPLEMENTATION_REPORT.md).

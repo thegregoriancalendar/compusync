@@ -63,26 +63,29 @@ function render(next) {
   details = next;
   const { status } = next;
   const connected = status.phase === 'connected';
+  const cursorReady = connected && next.cursorLinkReady === true;
   const cursor = next.cursorSettings || localCursorDefaults;
   $('status-dot').className = `dot ${status.phase}`;
   $('status').textContent = connected ? `Connected to ${status.peers[0]?.name || 'your other laptop'}` : {
     starting: 'Getting ready', hosting: 'Ready to pair', connecting: 'Connecting…', reconnecting: 'Waiting for your other laptop', error: 'Connection needs attention',
   }[status.phase] || 'Not connected';
-  $('status-description').textContent = status.message || (connected ? 'One logical window is shared across the display seam.' : status.role === 'host' ? `${next.name} · Share the invitation below.` : 'Keep CompuSync open on the other laptop.');
+  $('status-description').textContent = status.message || (connected ? 'Cursor and Chrome handoff are ready between your laptops.' : status.role === 'host' ? `${next.name} · Share the invitation below.` : 'Keep CompuSync open on the other laptop.');
   $('hosting').hidden = status.role !== 'host' || status.phase === 'error';
   $('create-host').hidden = !$('hosting').hidden;
   const code = next.invitation?.code || '';
   $('invitation').value = code;
   $('copy').disabled = !code;
   $('new-code').disabled = connected;
-  $('code-status').textContent = connected ? 'Paired. This connection is saved for next time.' : code ? '' : 'Code expired or used. Choose New code to pair again.';
+  $('code-status').textContent = connected
+    ? 'Connected. This pairing is saved for next time.'
+    : status.phase === 'reconnecting'
+      ? 'Pairing saved. Waiting for the other laptop to reconnect.'
+      : code ? '' : 'Code expired or used. Choose New code to pair again.';
   $('host-addresses').textContent = next.addresses.map((host) => `${host}:${next.port}`).join(' · ');
   $('discovery-error').textContent = next.invitation?.discoveryError || '';
-  $('edge').value = next.edge;
   $('auto-launch').checked = next.autoLaunch;
   $('auto-launch').disabled = !next.packaged;
   $('launch-note').hidden = next.packaged;
-  $('place-here').disabled = !next.state?.layouts?.[next.id];
   $('screen-side').value = cursor.screenSide;
   setValueUnlessEditing('vertical-offset', cursor.verticalOffsetVU);
   setValueUnlessEditing('acceleration-base', cursor.acceleration.base);
@@ -92,9 +95,14 @@ function render(next) {
   $('cursor-mode-status').textContent = cursor.linked ? 'Linked' : 'Unlinked';
   $('cursor-mode-status').className = `mode-badge${cursor.linked ? '' : ' unlinked'}`;
   $('cursor-mode').textContent = cursor.linked ? 'Unlink cursors' : 'Link cursors';
-  $('cursor-mode-description').textContent = cursor.linked
-    ? 'One cursor can move and type across both laptops.'
-    : 'Each laptop currently has its own independent cursor.';
+  $('cursor-mode').disabled = !cursorReady;
+  $('cursor-mode-description').textContent = !connected
+    ? 'The saved pairing must reconnect before cursor linking is available.'
+    : !cursorReady
+      ? 'Cursor linking is unavailable. Review the notice above.'
+      : cursor.linked
+        ? 'One cursor can move and type across both laptops.'
+        : 'Each laptop currently has its own independent cursor.';
   $('toggle-ownership').disabled = !connected || !cursor.linked;
   renderNotices(next.notices);
   if (!selectedTab) tab(status.role === 'join');
@@ -116,7 +124,6 @@ function cursorSettingsFromForm() {
 
 function savePreferences() {
   return command('preferences', {
-    edge: $('edge').value,
     autoLaunch: $('auto-launch').checked,
     cursorSettings: cursorSettingsFromForm(),
   });
@@ -170,12 +177,11 @@ $('host').addEventListener('click', async () => {
   $('host').disabled = false;
 });
 for (const id of [
-  'edge', 'auto-launch', 'screen-side', 'vertical-offset',
+  'auto-launch', 'screen-side', 'vertical-offset',
   'acceleration-base', 'acceleration-threshold', 'acceleration-slope', 'edge-resistance',
 ]) $(id).addEventListener('change', savePreferences);
 $('cursor-mode').addEventListener('click', () => command(details?.cursorSettings?.linked === false ? 'cursor-link' : 'cursor-unlink'));
 $('toggle-ownership').addEventListener('click', () => command('cursor-toggle-ownership'));
-for (const id of ['open', 'place-here', 'close']) $(id).addEventListener('click', () => command(id));
 if (/Mac/.test(navigator.platform)) for (const id of ['shortcut', 'unlink-shortcut', 'ownership-shortcut']) $(id).textContent = '⌘';
 api.onDetails(render);
 api.bootstrap().then(render);

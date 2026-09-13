@@ -1,8 +1,51 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const path = require('node:path');
 const test = require('node:test');
-const { createNativeAdapter, NativeAdapter } = require('./index.cjs');
+const {
+  createNativeAdapter,
+  loadBinding,
+  NativeAdapter,
+  nativeCandidates,
+  REQUIRED_SUBSTRATE_METHODS,
+} = require('./index.cjs');
+
+function compatibleBinding(omittedMethod) {
+  class NativeSubstrate {}
+  for (const method of REQUIRED_SUBSTRATE_METHODS) {
+    if (method !== omittedMethod) NativeSubstrate.prototype[method] = () => {};
+  }
+  return { NativeSubstrate };
+}
+
+test('development loader prefers the platform-qualified addon over stale generic builds', () => {
+  const nativeDirectory = path.join('checkout', 'native');
+  const candidates = nativeCandidates({
+    envPath: null,
+    resourcesPath: null,
+    platform: 'win32',
+    arch: 'x64',
+    nativeDirectory,
+  });
+  assert.equal(candidates[0], path.join(nativeDirectory, 'compusync-native.win32-x64.node'));
+  assert.equal(candidates[1], path.join(nativeDirectory, 'compusync-native.node'));
+});
+
+test('loader skips an obsolete addon that lacks the recovery guard API', () => {
+  const obsolete = compatibleBinding('installRecoveryGuard');
+  const current = compatibleBinding();
+  const loaded = loadBinding({
+    candidates: ['obsolete.node', 'current.node'],
+    requireBinding: (candidate) => candidate === 'obsolete.node' ? obsolete : current,
+  });
+
+  assert.equal(loaded.binding, current);
+  assert.equal(loaded.path, 'current.node');
+  assert.equal(loaded.failures.length, 1);
+  assert.equal(loaded.failures[0].code, 'COMPUSYNC_NATIVE_INCOMPATIBLE');
+  assert.match(loaded.failures[0].message, /installRecoveryGuard/);
+});
 
 test('loader has a behavior-compatible fallback when the binary is absent', () => {
   const adapter = createNativeAdapter();

@@ -3,14 +3,43 @@
 const { EventEmitter } = require('node:events');
 const path = require('node:path');
 
-const CANDIDATES = [
-  process.env.COMPUSYNC_NATIVE_PATH,
-  process.resourcesPath && path.join(process.resourcesPath, 'native', `compusync-native.${process.platform}-${process.arch}.node`),
-  path.join(__dirname, 'compusync-native.node'),
-  path.join(__dirname, `compusync-native.${process.platform}-${process.arch}.node`),
-  path.join(__dirname, 'index.node'),
-  path.join(__dirname, 'target', 'release', 'compusync_native.node'),
-].filter(Boolean);
+function nativeCandidates({
+  envPath = process.env.COMPUSYNC_NATIVE_PATH,
+  resourcesPath = process.resourcesPath,
+  platform = process.platform,
+  arch = process.arch,
+  nativeDirectory = __dirname,
+} = {}) {
+  const platformFile = `compusync-native.${platform}-${arch}.node`;
+  return [
+    envPath,
+    resourcesPath && path.join(resourcesPath, 'native', platformFile),
+    // Prefer the platform-qualified development build. An unqualified addon
+    // may be left over from an older checkout and expose an obsolete API.
+    path.join(nativeDirectory, platformFile),
+    path.join(nativeDirectory, 'compusync-native.node'),
+    path.join(nativeDirectory, 'index.node'),
+    path.join(nativeDirectory, 'target', 'release', 'compusync_native.node'),
+  ].filter(Boolean);
+}
+
+const CANDIDATES = nativeCandidates();
+
+const REQUIRED_SUBSTRATE_METHODS = Object.freeze([
+  'configureAcceleration', 'setEventCallback', 'startCapture', 'stopCapture',
+  'showCursor', 'hideCursor', 'parkCursor', 'releaseCursor', 'warpCursor',
+  'cursorPosition', 'assumeInputState', 'synthesizeButton', 'synthesizeKey',
+  'foregroundIsElevated', 'releaseInputState', 'installRecoveryGuard',
+  'setLinked', 'recover', 'heartbeat', 'displayMetrics', 'enumerateWindows',
+  'setWindowBounds', 'focusWindow', 'closeWindow', 'guardWindow',
+  'releaseWindowGuard', 'terminateMoveLoop',
+]);
+
+function missingSubstrateMethods(binding) {
+  const prototype = binding?.NativeSubstrate?.prototype;
+  if (!prototype) return [...REQUIRED_SUBSTRATE_METHODS];
+  return REQUIRED_SUBSTRATE_METHODS.filter((name) => typeof prototype[name] !== 'function');
+}
 
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);
 
@@ -78,10 +107,24 @@ function toPlatformBounds(bounds, space) {
   return { ...origin, width: bounds.width / space.scale, height: bounds.height / space.scale };
 }
 
-function loadBinding() {
+function loadBinding(options = {}) {
   const failures = [];
-  for (const candidate of CANDIDATES) {
-    try { return { binding: require(candidate), path: candidate, failures }; }
+  const candidates = options.candidates || CANDIDATES;
+  const requireBinding = options.requireBinding || require;
+  for (const candidate of candidates) {
+    try {
+      const binding = requireBinding(candidate);
+      const missingMethods = missingSubstrateMethods(binding);
+      if (missingMethods.length) {
+        failures.push({
+          path: candidate,
+          code: 'COMPUSYNC_NATIVE_INCOMPATIBLE',
+          message: `Native addon is missing required methods: ${missingMethods.join(', ')}`,
+        });
+        continue;
+      }
+      return { binding, path: candidate, failures };
+    }
     catch (error) {
       if (error?.code !== 'MODULE_NOT_FOUND' && error?.code !== 'ERR_DLOPEN_FAILED') throw error;
       failures.push({ path: candidate, code: error.code, message: error.message });
@@ -254,4 +297,7 @@ module.exports = {
   toPlatformPoint,
   toNormalizedBounds,
   toPlatformBounds,
+  nativeCandidates,
+  missingSubstrateMethods,
+  REQUIRED_SUBSTRATE_METHODS,
 };

@@ -18,9 +18,10 @@ test('short code pairs two laptops through automatic discovery', async () => {
     app.on('window', (page) => page.on('pageerror', (error) => errors.push(error.message)));
     await expect.poll(() => {
       const urls = app.windows().map((page) => page.url());
-      return ['surface.html', 'settings.html', 'handoff-overlay.html']
+      return ['settings.html', 'handoff-overlay.html']
         .every((file) => urls.some((url) => url.endsWith(file)));
     }, { timeout: 15_000 }).toBe(true);
+    expect(app.windows().some((page) => page.url().endsWith('surface.html'))).toBe(false);
     const settings = app.windows().find((page) => page.url().endsWith('settings.html'));
     await expect(settings.locator('#status')).toHaveText('Ready to pair');
     return { app, settings };
@@ -28,6 +29,8 @@ test('short code pairs two laptops through automatic discovery', async () => {
   try {
     const host = await launch('host');
     const peer = await launch('peer');
+    await expect(host.settings.locator('#cursor-mode')).toBeDisabled();
+    await expect(peer.settings.locator('#cursor-mode')).toBeDisabled();
     const original = await host.settings.locator('#invitation').inputValue();
     await host.settings.locator('#new-code').click();
     await expect(host.settings.locator('#invitation')).not.toHaveValue(original);
@@ -47,6 +50,12 @@ test('short code pairs two laptops through automatic discovery', async () => {
     await peer.settings.locator('#join-code').press('Enter');
     await expect(peer.settings.locator('#status')).toContainText('Connected to', { timeout: 15000 });
     await expect(host.settings.locator('#status')).toContainText('Connected to');
+    await expect(host.settings.locator('#cursor-mode')).toBeEnabled();
+    await expect(peer.settings.locator('#cursor-mode')).toBeEnabled();
+    await expect(host.settings.locator('#code-status')).toContainText('Connected. This pairing is saved');
+    await expect(peer.settings.locator('#code-status')).toContainText('Connected. This pairing is saved');
+    await expect(host.settings.locator('#notices')).not.toContainText('Cursor linking needs attention');
+    await expect(peer.settings.locator('#notices')).not.toContainText('Cursor linking needs attention');
     await expect(host.settings.locator('#invitation')).toHaveValue('');
     await expect(host.settings.locator('#copy')).toBeDisabled();
     expect(errors).toEqual([]);
