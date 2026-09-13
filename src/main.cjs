@@ -11,6 +11,7 @@ const { pairWithCode } = require('./core/pairing.cjs');
 const { EDGES } = require('./core/state.cjs');
 const { cursorSettingsFromSaved, validateCursorSettings } = require('./core/cursor-preferences.cjs');
 const { SharedInputRuntime } = require('./main/runtime.cjs');
+const { ClipboardSync } = require('./main/clipboard-sync.cjs');
 const { WindowHandoffRuntime } = require('./main/window-runtime.cjs');
 const { SeamOverlay } = require('./main/seam-overlay.cjs');
 const { ChromeAdapterRuntime } = require('./main/adapters/chrome/runtime.cjs');
@@ -27,7 +28,7 @@ app.setName('CompuSync');
 const hasLock = app.requestSingleInstanceLock();
 if (!hasLock) app.quit();
 
-let settings, tray, sync, inputRuntime, windowRuntime, seamOverlay, nativeInput, updateService, config;
+let settings, tray, sync, inputRuntime, windowRuntime, clipboardSync, seamOverlay, nativeInput, updateService, config;
 let quitting = false;
 let changingSession = false;
 let backgroundLaunch = false;
@@ -48,7 +49,8 @@ const applicationLogger = {
       host: typeof details?.host === 'string' ? details.host.slice(0, 253) : '',
       tabCount: Number.isSafeInteger(details?.tabCount) ? details.tabCount : 0,
     } : details;
-    const scope = String(event).startsWith('cursor.') ? 'cursor-link' : 'window-handoff';
+    const scope = String(event).startsWith('cursor.') ? 'cursor-link'
+      : String(event).startsWith('clipboard.') ? 'clipboard-sync' : 'window-handoff';
     console.info(JSON.stringify({ scope, event, ...safe }));
   },
   warn(event, details) { this.info(event, details); },
@@ -76,6 +78,7 @@ function readConfig() {
     port: Number(process.env.COMPUSYNC_PORT ?? saved.port ?? 43187),
     secret: saved.secret || newSecret(), edge: saved.edge || 'right',
     autoLaunch: Boolean(saved.autoLaunch), firstRun: !saved.id,
+    clipboardSync: saved.clipboardSync !== false,
     cursorSettings: cursorSettingsFromSaved(saved.cursorSettings),
     dismissedNotices: Array.isArray(saved.dismissedNotices)
       ? saved.dismissedNotices.filter((id) => typeof id === 'string' && id.length <= 100).slice(0, 100) : [],
@@ -155,6 +158,7 @@ function details() {
   const ips = addresses();
   return {
     id: config.id, name: config.name, platform: process.platform, edge: config.edge, autoLaunch: config.autoLaunch,
+    clipboardSync: config.clipboardSync,
     cursorSettings: {
       ...config.cursorSettings,
       linked: inputRuntime ? inputRuntime.cursor.linked : false,
@@ -408,9 +412,16 @@ function stopInputRuntime(reason = 'session-stop') {
 
 async function startSession() {
   stopInputRuntime('session-restart');
+  clipboardSync?.stop();
+  clipboardSync = null;
   if (sync) await sync.stop();
   const layout = localLayout();
   sync = new Session({ ...config, layout, startClosed: backgroundLaunch });
+  clipboardSync = new ClipboardSync({
+    session: sync, clipboard, role: config.role, enabled: config.clipboardSync,
+    logger: applicationLogger,
+  });
+  clipboardSync.start();
   sync.on('state', (state) => {
     applyState(state);
     // SharedInputRuntime consumes the same state event after this listener and
@@ -468,12 +479,16 @@ function setupIpc() {
           await startSession();
         } finally { changingSession = false; }
       } else if (command === 'preferences') {
+        const nextClipboardSync = data?.clipboardSync !== false;
+        const nextCursorSettings = validateCursorSettings(data?.cursorSettings);
         if (data?.edge !== undefined) {
           if (!EDGES.includes(data.edge)) throw new Error('Choose a valid screen edge.');
           config.edge = data.edge;
         }
         config.autoLaunch = Boolean(data.autoLaunch);
-        config.cursorSettings = validateCursorSettings(data?.cursorSettings);
+        config.clipboardSync = nextClipboardSync;
+        clipboardSync?.setEnabled(config.clipboardSync);
+        config.cursorSettings = nextCursorSettings;
         inputRuntime?.updateSettings(config.cursorSettings);
         if (app.isPackaged) app.setLoginItemSettings({
           openAtLogin: config.autoLaunch, args: ['--background'],
@@ -530,6 +545,8 @@ app.on('before-quit', (event) => {
   clearTimeout(layoutTimer);
   cancelOwnedDrag();
   stopInputRuntime('process-exit');
+  clipboardSync?.stop();
+  clipboardSync = null;
   seamOverlay?.destroy();
   seamOverlay = null;
   Promise.resolve(sync?.stop()).finally(() => app.quit());

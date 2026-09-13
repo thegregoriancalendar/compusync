@@ -123,6 +123,7 @@ function render(next) {
   $('host-addresses').textContent = next.addresses.map((host) => `${host}:${next.port}`).join(' · ');
   $('discovery-error').textContent = next.invitation?.discoveryError || '';
   $('auto-launch').checked = next.autoLaunch;
+  $('clipboard-sync').checked = next.clipboardSync !== false;
   $('auto-launch').disabled = !next.packaged;
   $('launch-note').hidden = next.packaged;
   const update = next.update || {
@@ -173,6 +174,7 @@ function cursorSettingsFromForm() {
 function savePreferences() {
   return command('preferences', {
     autoLaunch: $('auto-launch').checked,
+    clipboardSync: $('clipboard-sync').checked,
     cursorSettings: cursorSettingsFromForm(),
   });
 }
@@ -225,7 +227,7 @@ $('host').addEventListener('click', async () => {
   $('host').disabled = false;
 });
 for (const id of [
-  'auto-launch',
+  'auto-launch', 'clipboard-sync',
   'acceleration-base', 'acceleration-threshold', 'acceleration-slope', 'edge-resistance',
 ]) $(id).addEventListener('change', savePreferences);
 

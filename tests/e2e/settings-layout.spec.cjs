@@ -35,6 +35,12 @@ test('screen editor snaps two laptops without permitting the Mac top seam', asyn
     await expect(page.locator('#layout-description')).toContainText('Mac is above Windows');
     await expect.poll(() => page.evaluate(() => window.compusync.bootstrap().then((value) => value.cursorSettings.macPosition)))
       .toBe('top');
+
+    const clipboardSync = page.locator('#clipboard-sync');
+    await expect(clipboardSync).toBeChecked();
+    await clipboardSync.uncheck();
+    await expect.poll(() => page.evaluate(() => window.compusync.bootstrap().then((value) => value.clipboardSync)))
+      .toBe(false);
   } finally {
     await app.close();
     fs.rmSync(profile, { recursive: true, force: true });
