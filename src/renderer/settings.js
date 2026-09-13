@@ -64,6 +64,7 @@ function render(next) {
   const { status } = next;
   const connected = status.phase === 'connected';
   const cursorReady = connected && next.cursorLinkReady === true;
+  const cursorPending = next.cursorLinkPending === true;
   const cursor = next.cursorSettings || localCursorDefaults;
   $('pairing-card').hidden = connected;
   $('status-dot').className = `dot ${status.phase}`;
@@ -103,12 +104,14 @@ function render(next) {
   setValueUnlessEditing('edge-resistance', cursor.edgeResistanceVU);
   $('cursor-mode-status').textContent = cursor.linked ? 'Linked' : 'Unlinked';
   $('cursor-mode-status').className = `mode-badge${cursor.linked ? '' : ' unlinked'}`;
-  $('cursor-mode').textContent = cursor.linked ? 'Unlink cursors' : 'Link cursors';
-  $('cursor-mode').disabled = !cursorReady;
+  $('cursor-mode').textContent = cursor.linked ? 'Unlink cursors' : cursorPending ? 'Linking…' : 'Link cursors';
+  $('cursor-mode').disabled = !cursorReady || cursorPending;
   $('cursor-mode-description').textContent = !connected
     ? 'The saved pairing must reconnect before cursor linking is available.'
     : !cursorReady
       ? 'Cursor linking is unavailable. Review the notice above.'
+      : cursorPending
+        ? 'Waiting for the other laptop to enter shared-cursor mode.'
       : cursor.linked
         ? 'One cursor can move and type across both laptops.'
         : 'Each laptop currently has its own independent cursor.';

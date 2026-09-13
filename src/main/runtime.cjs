@@ -70,6 +70,8 @@ class SharedInputRuntime extends EventEmitter {
     this.stopping = false;
     this.peerConnected = false;
     this.desiredLinked = this.settings.linked !== false;
+    this.localLinkRequested = false;
+    this.peerLinkRequested = false;
     this.windowController = null;
 
     const placements = derivePairPlacements(this.layouts, this.hostId, this.joinId, this.settings);
@@ -116,6 +118,9 @@ class SharedInputRuntime extends EventEmitter {
         // user's desired mode so a saved pairing can relink after reconnect.
         if (this.stopping) return;
         this.desiredLinked = false;
+        this.localLinkRequested = false;
+        this.peerLinkRequested = false;
+        this.send({ type: 'cursor.mode', linked: false });
         this.onModeChange(false, reason);
         this.emit('mode', { linked: false, reason });
       },
@@ -177,6 +182,7 @@ class SharedInputRuntime extends EventEmitter {
   receive(message, peerMachineId) {
     const clean = sanitizePeerMessage(message, { logger: this.logger });
     if (!clean || peerMachineId !== this.peerId) return false;
+    if (clean.type === 'cursor.mode') return this.#receiveCursorMode(clean.linked);
     if (clean.type.startsWith('window.')) return this.windowController?.receive(clean) || false;
     const handled = routePeerInput({ cursor: this.cursor, keyboard: this.keyboard, watchdog: this.watchdog }, clean, peerMachineId);
     if (clean.type === 'layout.update' && handled) this.#applyDesiredLink();
@@ -185,6 +191,7 @@ class SharedInputRuntime extends EventEmitter {
 
   setPeerConnected(connected) {
     this.peerConnected = Boolean(connected);
+    if (!this.peerConnected) this.peerLinkRequested = false;
     this.watchdog.setPeerConnected(this.peerConnected);
     if (!this.peerConnected) return;
     if (this.isHost) this.broadcastLayout();
@@ -212,7 +219,8 @@ class SharedInputRuntime extends EventEmitter {
   }
 
   setLinked(linked, reason = 'user') {
-    this.desiredLinked = Boolean(linked);
+    const next = Boolean(linked);
+    this.desiredLinked = next;
     if (linked && (!this.peerConnected || !this.native.available || this.cursor.placements.length !== 2)) {
       if (!this.native.available) this.onNotice({
         id: 'native-unavailable', kind: 'warning', title: 'Native input support unavailable',
@@ -220,11 +228,19 @@ class SharedInputRuntime extends EventEmitter {
       });
       return false;
     }
-    if (linked) this.watchdog.arm();
-    this.cursor.setLinked(Boolean(linked), reason);
-    this.onModeChange(this.cursor.linked, reason);
-    this.emit('mode', { linked: this.cursor.linked, reason });
-    return this.cursor.linked === Boolean(linked);
+    this.localLinkRequested = next;
+    if (!next) this.peerLinkRequested = false;
+    this.#logMode('cursor.mode.request', { linked: next, reason });
+    if (!this.send({ type: 'cursor.mode', linked: next }) && next) {
+      this.localLinkRequested = false;
+      this.desiredLinked = false;
+      this.#logMode('cursor.mode.send-failed', { linked: next, reason });
+      return false;
+    }
+    if (!next) return this.#applyLinked(false, reason);
+    if (this.peerLinkRequested) return this.#applyLinked(true, reason);
+    this.emit('mode-pending', { linked: true, reason });
+    return true;
   }
 
   setDragging(dragging) { this.cursor.setDragging(dragging); }
@@ -253,6 +269,45 @@ class SharedInputRuntime extends EventEmitter {
   #applyDesiredLink() {
     if (!this.desiredLinked || !this.peerConnected || this.cursor.placements.length !== 2 || !this.native.available) return;
     this.setLinked(true, 'connected');
+  }
+
+  #receiveCursorMode(linked) {
+    this.#logMode('cursor.mode.received', { linked });
+    if (!linked) {
+      const shouldAcknowledge = this.localLinkRequested || this.cursor.linked;
+      this.desiredLinked = false;
+      this.localLinkRequested = false;
+      this.peerLinkRequested = false;
+      this.#applyLinked(false, 'peer');
+      if (shouldAcknowledge) this.send({ type: 'cursor.mode', linked: false });
+      return true;
+    }
+    const acceptedPeerRequest = !this.localLinkRequested;
+    this.desiredLinked = true;
+    this.localLinkRequested = true;
+    this.peerLinkRequested = true;
+    const linkedLocally = this.#applyLinked(true, 'peer');
+    if (acceptedPeerRequest) this.send({ type: 'cursor.mode', linked: linkedLocally });
+    return true;
+  }
+
+  #applyLinked(linked, reason) {
+    if (linked) this.watchdog.arm();
+    this.cursor.setLinked(linked, reason);
+    this.#logMode('cursor.mode.applied', {
+      requested: linked,
+      linked: this.cursor.linked,
+      reason,
+      ownerMachineId: this.cursor.ownerMachineId,
+    });
+    this.onModeChange(this.cursor.linked, reason);
+    this.emit('mode', { linked: this.cursor.linked, reason });
+    return this.cursor.linked === linked;
+  }
+
+  #logMode(event, details) {
+    const method = typeof this.logger === 'function' ? this.logger : this.logger?.info;
+    try { method?.call(this.logger, event, details); } catch { /* Logging cannot interrupt input recovery. */ }
   }
 }
 

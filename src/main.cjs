@@ -48,7 +48,8 @@ const applicationLogger = {
       host: typeof details?.host === 'string' ? details.host.slice(0, 253) : '',
       tabCount: Number.isSafeInteger(details?.tabCount) ? details.tabCount : 0,
     } : details;
-    console.info(JSON.stringify({ scope: 'window-handoff', event, ...safe }));
+    const scope = String(event).startsWith('cursor.') ? 'cursor-link' : 'window-handoff';
+    console.info(JSON.stringify({ scope, event, ...safe }));
   },
   warn(event, details) { this.info(event, details); },
 };
@@ -159,6 +160,7 @@ function details() {
     },
     cursorLinkReady: Boolean(inputRuntime?.native?.available
       && inputRuntime.peerConnected && inputRuntime.cursor.placements.length === 2),
+    cursorLinkPending: Boolean(inputRuntime?.localLinkRequested && !inputRuntime.cursor.linked),
     notices: [...notices.values()].filter((notice) => !config.dismissedNotices.includes(notice.id)),
     update: updateService?.status() || null,
     packaged: app.isPackaged,
@@ -318,7 +320,7 @@ function ensureInputRuntime() {
           notices.delete('cursor-recovered');
           notices.delete('input-runtime-error');
           lastInputRuntimeError = null;
-        } else if (reason && reason !== 'user') {
+        } else if (reason && reason !== 'user' && reason !== 'peer') {
           addNotice({
             id: 'cursor-recovered', kind: 'warning', title: 'Cursors unlinked for safety',
             message: `Compusync restored local input after ${reason}. Link again when both laptops are ready.`,

@@ -105,6 +105,9 @@ test('crossing finds left, right and bottom peers but never the top edge', () =>
 test('message validation classifies realtime traffic and bounds input', () => {
   assert.deepEqual(policyForMessage('cursor.delta'), { reliable: false, ordered: false, priority: 'realtime' });
   assert.deepEqual(policyForMessage('cursor.handoff'), { reliable: true, ordered: true, priority: 'control' });
+  assert.deepEqual(sanitizePeerMessage({ type: 'cursor.mode', linked: true, junk: true }),
+    { type: 'cursor.mode', linked: true });
+  assert.equal(sanitizePeerMessage({ type: 'cursor.mode', linked: 'yes' }), null);
   assert.deepEqual(sanitizePeerMessage({ type: 'cursor.delta', dx: 2, dy: -1, t: 8, junk: true }),
     { type: 'cursor.delta', dx: 2, dy: -1, t: 8 });
   assert.equal(sanitizePeerMessage({ type: 'cursor.delta', dx: Infinity, dy: 0, t: 1 }), null);

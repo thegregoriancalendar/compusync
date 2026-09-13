@@ -73,6 +73,8 @@ test('join runtime builds distinct host and local screen placements while its tr
   });
   runtime.start();
   assert.deepEqual(runtime.cursor.placements.map(({ machineId }) => machineId), ['win', 'mac']);
+  assert.equal(runtime.cursor.linked, false);
+  assert.equal(runtime.receive({ type: 'cursor.mode', linked: true }, 'win'), true);
   assert.equal(runtime.cursor.linked, true);
   assert.equal(runtime.receive({ type: 'heartbeat', t: 1 }, 'win'), true);
   assert.equal(runtime.receive({ type: 'heartbeat', t: 1 }, 'mac'), false);
@@ -89,6 +91,9 @@ test('runtime sanitizes traffic, agrees layout, links only with peer and native 
     onModeChange: (linked, reason) => modes.push([linked, reason]),
   });
   runtime.start();
+  assert.equal(runtime.cursor.linked, false);
+  assert.equal(session.sent.some(({ message }) => message.type === 'cursor.mode' && message.linked), true);
+  assert.equal(runtime.receive({ type: 'cursor.mode', linked: true }, 'mac'), true);
   assert.equal(runtime.cursor.linked, true);
   assert.equal(session.sent.some(({ message }) => message.type === 'layout.update'), true);
   assert.equal(runtime.receive({ type: 'cursor.delta', dx: Infinity, dy: 0, t: 1 }, 'mac'), false);
@@ -97,6 +102,39 @@ test('runtime sanitizes traffic, agrees layout, links only with peer and native 
   assert.equal(runtime.cursor.linked, false);
   assert.deepEqual(modes.at(-1), [false, 'test-failure']);
   runtime.stop();
+});
+
+test('one peer-wide link request activates both runtimes and unlink propagates', () => {
+  const unlinkedSettings = { ...settings, linked: false };
+  const winSession = new FakeSession(), macSession = new FakeSession();
+  const layouts = { win: layout(1920, 1080, 1), mac: layout(1440, 900, 2) };
+  const win = new SharedInputRuntime({
+    session: winSession, native: new FakeNative(), machineId: 'win', hostId: 'win', peerId: 'mac',
+    settings: unlinkedSettings, layouts,
+  });
+  const mac = new SharedInputRuntime({
+    session: macSession, native: new FakeNative(), machineId: 'mac', hostId: 'win', peerId: 'win',
+    settings: unlinkedSettings, layouts,
+  });
+  win.start();
+  mac.start();
+
+  assert.equal(win.setLinked(true, 'user'), true);
+  assert.equal(win.cursor.linked, false);
+  const request = winSession.sent.at(-1).message;
+  assert.deepEqual(request, { type: 'cursor.mode', linked: true });
+  assert.equal(mac.receive(request, 'win'), true);
+  assert.equal(mac.cursor.linked, true);
+  assert.equal(win.receive(macSession.sent.at(-1).message, 'mac'), true);
+  assert.equal(win.cursor.linked, true);
+
+  assert.equal(mac.setLinked(false, 'user'), true);
+  assert.equal(win.receive(macSession.sent.at(-1).message, 'mac'), true);
+  assert.equal(win.cursor.linked, false);
+  assert.equal(mac.receive(winSession.sent.at(-1).message, 'win'), true);
+  assert.equal(mac.cursor.linked, false);
+  win.stop();
+  mac.stop();
 });
 
 test('orderly session restart recovers native input without reporting a failure or forgetting desired linking', () => {
@@ -109,6 +147,7 @@ test('orderly session restart recovers native input without reporting a failure 
     onModeChange: (linked, reason) => modes.push([linked, reason]),
   });
   runtime.start();
+  runtime.receive({ type: 'cursor.mode', linked: true }, 'mac');
   assert.equal(runtime.cursor.linked, true);
   const modesBeforeStop = modes.length;
   runtime.stop('session-restart');
@@ -158,6 +197,7 @@ test('a denied macOS event tap reports persistent Input Monitoring remediation',
     onNotice: (notice) => notices.push(notice),
   });
   runtime.start();
+  runtime.receive({ type: 'cursor.mode', linked: true }, 'mac');
   assert.equal(runtime.cursor.linked, false);
   assert.equal(notices[0].action, 'open-input-monitoring');
   assert.equal(notices[0].dismissible, false);
