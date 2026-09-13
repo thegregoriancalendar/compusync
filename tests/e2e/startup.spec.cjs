@@ -63,11 +63,16 @@ test('background launch stays hidden until the user activates it', async () => {
   try {
     app = await electron.launch({ args: [path.resolve('.'), '--background'], env: environment(profile) });
     await expect.poll(() => app.evaluate(({ BrowserWindow }) => {
-      const overlay = BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith('handoff-overlay.html'));
-      return overlay ? { visible: overlay.isVisible(), focusable: overlay.isFocusable() } : null;
-    })).toEqual({ visible: false, focusable: false });
+      const windows = BrowserWindow.getAllWindows();
+      const overlay = windows.find((window) => window.webContents.getURL().endsWith('handoff-overlay.html'));
+      return overlay ? {
+        count: windows.length,
+        visible: overlay.isVisible(),
+        focusable: overlay.isFocusable(),
+        retiredSurface: windows.some((window) => window.webContents.getURL().endsWith('surface.html')),
+      } : null;
+    })).toEqual({ count: 1, visible: false, focusable: false, retiredSurface: false });
     expect(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().some((window) => window.isVisible()))).toBe(false);
-    expect(app.windows().length).toBe(1);
     await app.evaluate(({ app: application }) => application.emit('activate'));
     await setupWindow(app);
   } finally {
