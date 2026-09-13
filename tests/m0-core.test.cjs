@@ -191,7 +191,7 @@ test('the owner sums local and remote deltas and edge resistance delays handoff'
   assert.equal(handoff.type, 'cursor.handoff');
   assert.ok(Math.abs(handoff.x - 107) < 1e-5);
   assert.deepEqual({ y: handoff.y, buttons: handoff.buttons, modifiers: handoff.modifiers }, { y: 20, buttons: 1, modifiers: 3 });
-  assert.deepEqual(aNative.calls.slice(-3), [['hide'], ['park'], ['release-input']]);
+  assert.deepEqual(aNative.calls.slice(-3), [['release-input'], ['hide'], ['park']]);
 });
 
 test('a drag disables resistance and the destination assumes held input state', () => {
@@ -217,6 +217,35 @@ test('a drag disables resistance and the destination assumes held input state', 
   assert.deepEqual(native.calls, [
     ['release'], ['warp', { x: 2, y: 100 }], ['show'], ['assume', 1, 7],
   ]);
+});
+
+test('the source trackpad drives a round trip after ownership moves to its peer', () => {
+  const spaces = [placement('mac', 0, 0, 100, 100), placement('win', 100, 0, 100, 100)];
+  let now = 0;
+  let mac;
+  const win = new CursorController({
+    machineId: 'win', placements: spaces, initialPosition: { x: 99, y: 50 }, ownerMachineId: 'mac',
+    native: mockNative(), now: () => now,
+    send: (message) => mac.receive(message, 'win'),
+    acceleration: { base: 1, threshold: 1000, slope: 0 },
+  });
+  mac = new CursorController({
+    machineId: 'mac', placements: spaces, initialPosition: { x: 99, y: 50 }, ownerMachineId: 'mac',
+    native: mockNative(), now: () => now,
+    send: (message) => win.receive(message, 'mac'),
+    acceleration: { base: 1, threshold: 1000, slope: 0 },
+  });
+
+  mac.localDelta(2, 0, 1, now);
+  mac.flush(now);
+  assert.equal(mac.ownerMachineId, 'win');
+  assert.equal(win.ownerMachineId, 'win');
+
+  now += 10;
+  mac.localDelta(-4, 0, 1, now);
+  win.flush(now);
+  assert.equal(mac.ownerMachineId, 'mac');
+  assert.equal(win.ownerMachineId, 'mac');
 });
 
 test('top movement clamps, non-owner follows authority, and ownership hotkey preserves relative position', () => {
@@ -260,7 +289,7 @@ test('ownership hotkey on the non-owner updates both peers without split brain',
   assert.equal(oldOwner.receive(claim, 'b'), true);
   assert.equal(oldOwner.ownerMachineId, 'b');
   assert.equal(oldOwner.isOwner(), false);
-  assert.deepEqual(oldOwnerNative.calls.slice(-3), [['hide'], ['park'], ['release-input']]);
+  assert.deepEqual(oldOwnerNative.calls.slice(-3), [['release-input'], ['hide'], ['park']]);
 });
 
 test('failed reliable handoff keeps ownership and invokes fail-closed recovery', () => {
@@ -321,7 +350,7 @@ test('button reconciliation synthesizes only aggregate transitions and releases 
   cursor.localDelta(2, 0, 1);
   cursor.flush();
   assert.equal(cursor.ownerMachineId, 'b');
-  assert.deepEqual(native.calls.slice(-3), [['hide'], ['park'], ['release-input']]);
+  assert.deepEqual(native.calls.slice(-3), [['release-input'], ['hide'], ['park']]);
 });
 
 test('handoff into a locally held button synthesizes only the remote remainder', () => {

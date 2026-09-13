@@ -384,11 +384,13 @@ class CursorController extends EventEmitter {
     this.virtualCursor = position;
     this.ownerMachineId = target.machineId;
     this.edgePressure = null;
-    if (!this.#nativeCall('hideCursor') || !this.#nativeCall('parkCursor')) return false;
     // This machine is no longer authoritative. Release every injected hold;
     // its physical device remains tracked and continues forwarding events.
     if (!this.#nativeCall('releaseInputState')) return false;
     this.syntheticButtons = 0;
+    // Hide last so releasing a genuine held input cannot make a stale cursor
+    // visible again at the source handoff point.
+    if (!this.#nativeCall('hideCursor') || !this.#nativeCall('parkCursor')) return false;
     this.emit('ownership', { ownerMachineId: target.machineId, reason, virtualCursor: { ...position }, buttons, modifiers: this.modifiers });
     return true;
   }
@@ -413,8 +415,8 @@ class CursorController extends EventEmitter {
         || !this.#nativeCall('assumeInputState', desiredSynthetic, message.modifiers)) return false;
       this.syntheticButtons = desiredSynthetic;
     } else {
-      if (!this.#nativeCall('hideCursor') || !this.#nativeCall('parkCursor')
-        || !this.#nativeCall('releaseInputState')) return false;
+      if (!this.#nativeCall('releaseInputState')
+        || !this.#nativeCall('hideCursor') || !this.#nativeCall('parkCursor')) return false;
       this.syntheticButtons = 0;
     }
     this.emit('ownership', {

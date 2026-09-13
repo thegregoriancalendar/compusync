@@ -34,6 +34,25 @@ static RECOVERY_HOOKS_INSTALLED: OnceCell<()> = OnceCell::new();
 const EVENT_QUEUE_CAPACITY: usize = 8192;
 // USB HID keyboard usages; platform backends translate these to native codes.
 const SYNTHETIC_MODIFIERS: [u32; 8] = [0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7];
+const SYNTHETIC_BUTTONS: [(u32, &str); 5] = [
+    (1, "left"),
+    (2, "right"),
+    (4, "middle"),
+    (8, "x1"),
+    (16, "x2"),
+];
+
+fn held_buttons(mask: u32) -> impl Iterator<Item = &'static str> {
+    SYNTHETIC_BUTTONS
+        .into_iter()
+        .filter_map(move |(bit, button)| (mask & bit != 0).then_some(button))
+}
+
+fn held_modifier_codes(mask: u32) -> impl Iterator<Item = u32> {
+    SYNTHETIC_MODIFIERS
+        .into_iter()
+        .filter(move |code| modifier_bit(*code).is_some_and(|bit| mask & bit != 0))
+}
 
 fn button_bit(button: &str) -> Option<u32> {
     Some(match button {
@@ -786,15 +805,26 @@ impl NativeSubstrate {
 
     #[napi]
     pub fn release_input_state(&self) {
+        let buttons = self.inner.synthetic_buttons.load(Ordering::Acquire);
+        let modifiers = self.inner.synthetic_modifiers.load(Ordering::Acquire);
         let mut platform = self.inner.platform.lock();
-        for button in ["left", "right", "middle", "x1", "x2"] {
-            let _ = platform.synthesize_button(button, false);
+        // Normal ownership transfer must not inject unmatched mouse-up events.
+        // A bare right-up opens a context menu on macOS even though the user
+        // never clicked. The broader all-input release remains in recover().
+        for button in held_buttons(buttons) {
+            if platform.synthesize_button(button, false).is_ok() {
+                self.inner
+                    .synthetic_buttons
+                    .fetch_and(!button_bit(button).unwrap_or(0), Ordering::AcqRel);
+            }
         }
-        for code in SYNTHETIC_MODIFIERS {
-            let _ = platform.synthesize_key(code, false, 0);
+        for code in held_modifier_codes(modifiers) {
+            if platform.synthesize_key(code, false, 0).is_ok() {
+                self.inner
+                    .synthetic_modifiers
+                    .fetch_and(!modifier_bit(code).unwrap_or(0), Ordering::AcqRel);
+            }
         }
-        self.inner.synthetic_buttons.store(0, Ordering::Release);
-        self.inner.synthetic_modifiers.store(0, Ordering::Release);
         drop(platform);
         let _ = self.inner.persist_guard_state();
     }
@@ -828,4 +858,20 @@ impl Drop for NativeSubstrate {
 #[napi]
 pub fn platform_name() -> String {
     HostPlatform::new().name().into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{held_buttons, held_modifier_codes};
+
+    #[test]
+    fn normal_input_release_selects_only_synthetic_holds() {
+        assert_eq!(held_buttons(0).collect::<Vec<_>>(), Vec::<&str>::new());
+        assert_eq!(held_buttons(2 | 8).collect::<Vec<_>>(), ["right", "x1"]);
+        assert_eq!(
+            held_modifier_codes(0).collect::<Vec<_>>(),
+            Vec::<u32>::new()
+        );
+        assert_eq!(held_modifier_codes(1).collect::<Vec<_>>(), [0xE1, 0xE5]);
+    }
 }
