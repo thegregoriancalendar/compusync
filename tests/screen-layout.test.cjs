@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   monitorGroup, monitorGroups, arrangeDiagram, snapDragged, arrangementText,
+  viewportToDiagram, viewportRect, zoomViewAt,
 } = require('../src/renderer/screen-layout.js');
 
 test('screen layout editor preserves every monitor inside its computer group', () => {
@@ -58,4 +59,16 @@ test('screen layout editor clamps sliding to retain a usable shared edge', () =>
   const snapped = snapDragged('mac', { x: rects.windows.x - 600, y: -100 }, rects);
   assert.equal(snapped.macPosition, 'left');
   assert.equal(snapped.displayOffset, -1);
+});
+
+test('layout viewport pans, zooms, and preserves the point under the zoom anchor', () => {
+  const view = { zoom: 2, panX: 10, panY: -5 };
+  assert.deepEqual(viewportRect({ x: 100, y: 50, w: 20, h: 10 }, 400, 200, view), {
+    x: 10, y: -5, w: 40, h: 20,
+  });
+  assert.deepEqual(viewportToDiagram({ x: 10, y: -5 }, 400, 200, view), { x: 100, y: 50 });
+
+  const anchored = zoomViewAt({ zoom: 1, panX: 0, panY: 0 }, 2, { x: 300, y: 150 }, 400, 200);
+  assert.deepEqual(anchored, { zoom: 2, panX: -100, panY: -50 });
+  assert.deepEqual(viewportToDiagram({ x: 300, y: 150 }, 400, 200, anchored), { x: 300, y: 150 });
 });

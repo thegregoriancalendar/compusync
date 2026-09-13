@@ -9,6 +9,8 @@
   const MIN_OVERLAP = 24;
   const MAX_GROUP_WIDTH = 152;
   const MAX_GROUP_HEIGHT = 104;
+  const MIN_ZOOM = .5;
+  const MAX_ZOOM = 3;
   const clamp = (value, minimum, maximum) => Math.min(maximum, Math.max(minimum, value));
 
   function size(value, fallback) {
@@ -95,6 +97,55 @@
     };
   }
 
+  function normalizeView(value = {}) {
+    return {
+      zoom: clamp(Number.isFinite(value.zoom) ? value.zoom : 1, MIN_ZOOM, MAX_ZOOM),
+      panX: Number.isFinite(value.panX) ? value.panX : 0,
+      panY: Number.isFinite(value.panY) ? value.panY : 0,
+    };
+  }
+
+  function diagramToViewport(point, width, height, view) {
+    const next = normalizeView(view);
+    const centerX = width / 2, centerY = height / 2;
+    return {
+      x: centerX + next.panX + (point.x - centerX) * next.zoom,
+      y: centerY + next.panY + (point.y - centerY) * next.zoom,
+    };
+  }
+
+  function viewportToDiagram(point, width, height, view) {
+    const next = normalizeView(view);
+    const centerX = width / 2, centerY = height / 2;
+    return {
+      x: centerX + (point.x - centerX - next.panX) / next.zoom,
+      y: centerY + (point.y - centerY - next.panY) / next.zoom,
+    };
+  }
+
+  function viewportRect(rect, width, height, view) {
+    const next = normalizeView(view);
+    return {
+      ...diagramToViewport(rect, width, height, next),
+      w: rect.w * next.zoom,
+      h: rect.h * next.zoom,
+    };
+  }
+
+  function zoomViewAt(view, zoom, anchor, width, height) {
+    const current = normalizeView(view);
+    const nextZoom = clamp(Number.isFinite(zoom) ? zoom : current.zoom, MIN_ZOOM, MAX_ZOOM);
+    const centerX = width / 2, centerY = height / 2;
+    const point = anchor && Number.isFinite(anchor.x) && Number.isFinite(anchor.y)
+      ? anchor : { x: centerX, y: centerY };
+    const ratio = nextZoom / current.zoom;
+    return {
+      zoom: nextZoom,
+      panX: point.x - centerX - (point.x - centerX - current.panX) * ratio,
+      panY: point.y - centerY - (point.y - centerY - current.panY) * ratio,
+    };
+  }
+
   function relativeRects(macPosition, displayOffset, sizes = {}) {
     const macSize = size(sizes.mac, { w: 126, h: 78 });
     const winSize = size(sizes.windows, { w: 132, h: 78 });
@@ -174,8 +225,15 @@
     MIN_OVERLAP,
     MAX_GROUP_WIDTH,
     MAX_GROUP_HEIGHT,
+    MIN_ZOOM,
+    MAX_ZOOM,
     monitorGroup,
     monitorGroups,
+    normalizeView,
+    diagramToViewport,
+    viewportToDiagram,
+    viewportRect,
+    zoomViewAt,
     arrangeDiagram,
     snapDragged,
     arrangementText,

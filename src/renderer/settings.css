@@ -26,8 +26,13 @@ header p { margin: 0; }
 .hotkeys { padding-top: 4px; }
 .control-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
 .field-help { margin-top: -4px; }
-.screen-layout-editor { position: relative; height: 238px; margin: 15px 0 10px; overflow: hidden; border: 1px solid #dde3ec; border-radius: 10px; background: radial-gradient(circle at 1px 1px, #dfe5ee 1px, transparent 1px) 0 0 / 18px 18px, #f8fafc; user-select: none; touch-action: none; }
-.layout-screen { position: absolute; margin: 0; padding: 0; border: 0; border-radius: 7px; background: transparent; color: #2f4568; cursor: grab; transition: left 100ms ease, top 100ms ease; touch-action: none; }
+.screen-layout-editor { position: relative; height: 238px; margin: 15px 0 10px; overflow: hidden; border: 1px solid #dde3ec; border-radius: 10px; background: radial-gradient(circle at 1px 1px, #dfe5ee 1px, transparent 1px) 0 0 / 18px 18px, #f8fafc; cursor: grab; user-select: none; touch-action: none; }
+.screen-layout-editor.panning { cursor: grabbing; }
+.layout-viewport-controls { position: absolute; z-index: 5; top: 8px; right: 8px; display: flex; align-items: center; gap: 3px; padding: 3px; border: 1px solid #dce1e9; border-radius: 7px; background: #fffffff0; box-shadow: 0 2px 8px #253a5915; }
+.layout-viewport-controls button { min-width: 27px; padding: 4px 7px; border-radius: 4px; font-size: 11px; line-height: 1.2; }
+.layout-viewport-controls span { min-width: 38px; color: #657080; font-size: 9px; text-align: center; }
+.layout-screen { position: absolute; margin: 0; padding: 0; border: 0; border-radius: 7px; background: transparent; color: #2f4568; cursor: grab; transition: left 100ms ease, top 100ms ease, transform 100ms ease; touch-action: none; }
+.screen-layout-editor.panning .layout-screen { transition: none; }
 .layout-monitor { position: absolute; display: flex; align-items: center; justify-content: center; min-width: 12px; min-height: 12px; overflow: visible; border: 2px solid #60789f; border-radius: 5px; background: #eaf0fa; box-shadow: 0 3px 8px #253a5918; pointer-events: none; transition: background 100ms ease, box-shadow 100ms ease; }
 .layout-screen.windows .layout-monitor { border-color: #597c9d; background: #e9f3f7; color: #31556e; }
 .layout-screen:hover .layout-monitor { background: #e3ebf8; }
