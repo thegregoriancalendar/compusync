@@ -79,13 +79,16 @@ class TransferReceiver {
   }
 
   async _cleanup(record) {
-    if (this.transfers.get(record.id) === record) this.transfers.delete(record.id);
     if (record.handle) {
       const handle = record.handle;
       record.handle = null;
       await handle.close().catch(() => {});
     }
     await fsp.rm(record.partialPath, { force: true }).catch(() => {});
+    // Keep the transfer active until its file is actually closed and removed.
+    // Callers use active() to know when disconnect cleanup is complete; deleting
+    // the record first exposed a race where a stale .part file was still present.
+    if (this.transfers.get(record.id) === record) this.transfers.delete(record.id);
   }
 
   async start(payload, owner = 'peer') {
