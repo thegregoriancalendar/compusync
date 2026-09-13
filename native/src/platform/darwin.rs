@@ -158,7 +158,6 @@ unsafe extern "C" {
     fn CFRunLoopStop(run_loop: CfRunLoop);
 
     fn CGMainDisplayID() -> CgDisplay;
-    fn CGCursorIsVisible() -> i32;
     fn CGDisplayHideCursor(display: CgDisplay) -> i32;
     fn CGDisplayShowCursor(display: CgDisplay) -> i32;
     fn CGAssociateMouseAndMouseCursorPosition(connected: bool) -> i32;
@@ -492,23 +491,29 @@ fn tap_is_non_owner(context: &TapContext) -> bool {
     )
 }
 
-unsafe fn reinforce_non_owner_cursor_barrier(context: &TapContext) -> bool {
+unsafe fn reinforce_non_owner_motion_barrier(context: &TapContext) -> bool {
     if !tap_is_non_owner(context) {
         return false;
     }
-    // macOS can restore the mouse/cursor association or cursor visibility
-    // after display/session transitions. Reassert association on physical
-    // motion, and repair visibility without accumulating hide calls.
+    // macOS can restore the mouse/cursor association after display/session
+    // transitions. Reassert it on physical motion, but never issue another
+    // counted cursor hide: HostPlatform owns the one matching hide/show pair.
     let _ = unsafe { CGAssociateMouseAndMouseCursorPosition(false) };
-    if unsafe { CGCursorIsVisible() } != 0 && tap_is_non_owner(context) {
-        let hid = unsafe { CGDisplayHideCursor(CGMainDisplayID()) } == 0;
-        // Ownership may change on the JS thread while this callback is active.
-        // Undo only the hide performed above if the Mac became owner meanwhile.
-        if hid && !tap_is_non_owner(context) {
-            let _ = unsafe { CGDisplayShowCursor(CGMainDisplayID()) };
-        }
-    }
     tap_is_non_owner(context)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CursorVisibilityAction {
+    Hide,
+    Show,
+}
+
+fn cursor_visibility_action(hidden: bool, target_hidden: bool) -> Option<CursorVisibilityAction> {
+    match (hidden, target_hidden) {
+        (false, true) => Some(CursorVisibilityAction::Hide),
+        (true, false) => Some(CursorVisibilityAction::Show),
+        _ => None,
+    }
 }
 
 struct AxDragWatch {
@@ -847,7 +852,7 @@ unsafe fn event_tap_inner(
             // Forward the raw delta to the shared owner, but do not also move
             // the non-owner Mac cursor. Owner motion continues to applications
             // normally so native hover and drag behavior remain intact.
-            if unsafe { reinforce_non_owner_cursor_barrier(context) } {
+            if unsafe { reinforce_non_owner_motion_barrier(context) } {
                 return null_mut();
             }
         }
@@ -997,9 +1002,7 @@ impl Platform for HostPlatform {
         "darwin"
     }
     fn hide_cursor(&mut self) -> Result<(), String> {
-        // `hidden` tracks our balancing hide call, while CGCursorIsVisible
-        // catches macOS or another process making the cursor visible again.
-        if self.hidden && unsafe { CGCursorIsVisible() } == 0 {
+        if cursor_visibility_action(self.hidden, true) != Some(CursorVisibilityAction::Hide) {
             return Ok(());
         }
         let code = unsafe { CGDisplayHideCursor(CGMainDisplayID()) };
@@ -1011,7 +1014,7 @@ impl Platform for HostPlatform {
         }
     }
     fn show_cursor(&mut self) -> Result<(), String> {
-        if !self.hidden {
+        if cursor_visibility_action(self.hidden, false) != Some(CursorVisibilityAction::Show) {
             return Ok(());
         }
         let code = unsafe { CGDisplayShowCursor(CGMainDisplayID()) };
@@ -1349,9 +1352,9 @@ impl Drop for HostPlatform {
 #[cfg(test)]
 mod tests {
     use super::{
-        activate_drag_watch, geometry_changed, suppress_for_non_owner, take_run_loop,
-        AxWindowGeometry, CfRunLoop, CgPoint, CgSize, CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_X,
-        CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_Y,
+        activate_drag_watch, cursor_visibility_action, geometry_changed, suppress_for_non_owner,
+        take_run_loop, AxWindowGeometry, CfRunLoop, CgPoint, CgSize, CursorVisibilityAction,
+        CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_X, CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_Y,
     };
 
     #[test]
@@ -1411,5 +1414,19 @@ mod tests {
         assert!(!suppress_for_non_owner(false, false));
         assert!(!suppress_for_non_owner(true, true));
         assert!(suppress_for_non_owner(true, false));
+    }
+
+    #[test]
+    fn cursor_visibility_uses_one_balanced_hide_show_pair() {
+        assert_eq!(
+            cursor_visibility_action(false, true),
+            Some(CursorVisibilityAction::Hide)
+        );
+        assert_eq!(cursor_visibility_action(true, true), None);
+        assert_eq!(
+            cursor_visibility_action(true, false),
+            Some(CursorVisibilityAction::Show)
+        );
+        assert_eq!(cursor_visibility_action(false, false), None);
     }
 }
