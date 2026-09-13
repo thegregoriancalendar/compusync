@@ -650,18 +650,35 @@ impl NativeSubstrate {
     #[napi]
     pub fn hide_cursor(&self) -> Result<()> {
         let mut platform = self.inner.platform.lock();
-        platform.hide_cursor().map_err(napi_error)?;
-        platform.set_capture_mode(true, false);
+        let linked = self.linked();
+        let previous_owner = self.owner();
+        // Publish non-ownership before changing global cursor state so the
+        // capture thread cannot let a physical sample through during handoff.
+        platform.set_capture_mode(linked, false);
         self.inner.owner.store(false, Ordering::Release);
+        if let Err(error) = platform.hide_cursor() {
+            self.inner.owner.store(previous_owner, Ordering::Release);
+            platform.set_capture_mode(linked, previous_owner);
+            return Err(napi_error(error));
+        }
         Ok(())
     }
 
     #[napi]
     pub fn show_cursor(&self) -> Result<()> {
         let mut platform = self.inner.platform.lock();
-        platform.show_cursor().map_err(napi_error)?;
-        platform.set_capture_mode(true, true);
+        let linked = self.linked();
+        let previous_owner = self.owner();
+        // Publish ownership first. The macOS event-tap barrier rechecks this
+        // atomic after every hide, so it cannot race a handoff and hide the
+        // newly authoritative cursor.
+        platform.set_capture_mode(linked, true);
         self.inner.owner.store(true, Ordering::Release);
+        if let Err(error) = platform.show_cursor() {
+            self.inner.owner.store(previous_owner, Ordering::Release);
+            platform.set_capture_mode(linked, previous_owner);
+            return Err(napi_error(error));
+        }
         Ok(())
     }
 

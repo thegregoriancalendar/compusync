@@ -149,6 +149,7 @@ unsafe extern "C" {
     fn CFRunLoopStop(run_loop: CfRunLoop);
 
     fn CGMainDisplayID() -> CgDisplay;
+    fn CGCursorIsVisible() -> i32;
     fn CGDisplayHideCursor(display: CgDisplay) -> i32;
     fn CGDisplayShowCursor(display: CgDisplay) -> i32;
     fn CGAssociateMouseAndMouseCursorPosition(connected: bool) -> i32;
@@ -459,6 +460,32 @@ fn suppress_for_non_owner(linked: bool, owner: bool) -> bool {
     linked && !owner
 }
 
+fn tap_is_non_owner(context: &TapContext) -> bool {
+    suppress_for_non_owner(
+        context.linked.load(Ordering::Acquire),
+        context.owner.load(Ordering::Acquire),
+    )
+}
+
+unsafe fn reinforce_non_owner_cursor_barrier(context: &TapContext) -> bool {
+    if !tap_is_non_owner(context) {
+        return false;
+    }
+    // macOS can restore the mouse/cursor association or cursor visibility
+    // after display/session transitions. Reassert association on physical
+    // motion, and repair visibility without accumulating hide calls.
+    let _ = unsafe { CGAssociateMouseAndMouseCursorPosition(false) };
+    if unsafe { CGCursorIsVisible() } != 0 && tap_is_non_owner(context) {
+        let hid = unsafe { CGDisplayHideCursor(CGMainDisplayID()) } == 0;
+        // Ownership may change on the JS thread while this callback is active.
+        // Undo only the hide performed above if the Mac became owner meanwhile.
+        if hid && !tap_is_non_owner(context) {
+            let _ = unsafe { CGDisplayShowCursor(CGMainDisplayID()) };
+        }
+    }
+    tap_is_non_owner(context)
+}
+
 struct AxDragWatch {
     observer: AxObserver,
     element: AxElement,
@@ -663,10 +690,7 @@ unsafe fn event_tap_inner(
             // Forward the raw delta to the shared owner, but do not also move
             // the non-owner Mac cursor. Owner motion continues to applications
             // normally so native hover and drag behavior remain intact.
-            if suppress_for_non_owner(
-                context.linked.load(Ordering::Acquire),
-                context.owner.load(Ordering::Acquire),
-            ) {
+            if unsafe { reinforce_non_owner_cursor_barrier(context) } {
                 return null_mut();
             }
         }
@@ -817,7 +841,9 @@ impl Platform for HostPlatform {
         "darwin"
     }
     fn hide_cursor(&mut self) -> Result<(), String> {
-        if self.hidden {
+        // `hidden` tracks our balancing hide call, while CGCursorIsVisible
+        // catches macOS or another process making the cursor visible again.
+        if self.hidden && unsafe { CGCursorIsVisible() } == 0 {
             return Ok(());
         }
         let code = unsafe { CGDisplayHideCursor(CGMainDisplayID()) };
