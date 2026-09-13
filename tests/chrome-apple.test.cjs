@@ -32,6 +32,17 @@ const capturedWindow = {
   ],
 };
 
+function handoffDescriptor(id = 'cold-handoff') {
+  return {
+    schemaVersion: 1, id, adapterId: 'chrome', origin: 'win-a', capturedAt: 1,
+    geometryVU: { x: 0, y: 0, w: 800, h: 600 }, state: 'normal',
+    payload: { activeIdx: 0, tabs: [
+      { url: 'https://active.example/', title: 'Active', pinned: false, index: 0 },
+      { url: 'https://background.example/', title: 'Background', pinned: true, index: 1 },
+    ] },
+  };
+}
+
 test('Apple Chrome detection is native-only and ignores helpers and hidden windows', async () => {
   let automationCalls = 0;
   let scriptCalls = 0;
@@ -193,12 +204,89 @@ test('prepare creates active URL first, finds the real native window, and moves 
   assert.equal(createSource.includes('first.example'), false);
   assert.match(populateSource, /\\\";Application\(\\\"Finder/);
   assert.equal(calls[0].options.shell, undefined);
+  assert.equal(calls.some(({ file }) => file === '/usr/bin/open'), false);
   await adapter.position(handle, { x: -500, y: 30, w: 800, h: 600 });
   await adapter.focus(handle);
   assert.deepEqual(boundsCalls.slice(-2), [
     { id: 'ax:2:0', bounds: { x: -500, y: 30, width: 800, height: 600 } },
     { focus: 'ax:2:0' },
   ]);
+});
+
+test('cold destination launch opens normal-profile Chrome once, then preloads the handoff window', async () => {
+  const calls = [];
+  let createAttempts = 0;
+  let enumerations = 0;
+  const preparedNative = {
+    id: 'ax:9:0', processName: 'Google Chrome', visible: true, title: 'Active',
+    bounds: { x: 10, y: 20, width: 800, height: 600 },
+  };
+  const adapter = createAppleChromeAdapter({
+    machineId: 'mac-b', sleep: async () => {}, requestAutomation: () => true,
+    native: {
+      enumerateWindows: () => (++enumerations < 3 ? [] : [preparedNative]),
+      setWindowBoundsNormalized() {},
+    },
+    execFile: (file, args, options, callback) => {
+      calls.push({ file, args, options });
+      if (file === '/usr/bin/open') { callback(null, '', ''); return; }
+      const script = args[3];
+      if (script.includes('compusync:chrome:prepare:create') && ++createAttempts === 1) {
+        callback(Object.assign(new Error('Chrome is not running'), { stderr: 'COMPUSYNC_CHROME_NOT_RUNNING' }));
+        return;
+      }
+      callback(null, resultFor(script, {
+        prepare: { chromeWindowId: '90', chromeWindowIndex: 1, title: 'Active', bounds: [10, 20, 810, 620] },
+      }), '');
+    },
+  });
+
+  const handle = await adapter.prepare(handoffDescriptor(), { x: -900, y: 20, width: 800, height: 600 });
+  assert.equal(handle.nativeWindowId, 'ax:9:0');
+  assert.equal(createAttempts, 2);
+  const launch = calls.find(({ file }) => file === '/usr/bin/open');
+  assert.deepEqual(launch.args, [
+    '-g', '-a', 'Google Chrome', '--args', '--no-startup-window', '--no-first-run', '--no-default-browser-check',
+  ]);
+  assert.equal(launch.options.shell, undefined);
+  assert.doesNotMatch(launch.args.join(' '), /user-data-dir|profile-directory/i);
+  const programs = calls.map(({ file, args }) => file === '/usr/bin/open'
+    ? 'launch' : (args[3].includes('prepare:populate') ? 'populate' : 'create'));
+  assert.deepEqual(programs, ['create', 'launch', 'create', 'populate']);
+  assert.match(calls.filter(({ file, args }) => file === '/usr/bin/osascript'
+    && args[3].includes('prepare:create'))[1].args[3], /chromeLaunchDeadline = Date\.now\(\) \+ 5000/);
+});
+
+test('cold destination launch failure is typed and capture never launches Chrome', async () => {
+  const notRunning = () => Object.assign(new Error('Chrome is not running'), { stderr: 'COMPUSYNC_CHROME_NOT_RUNNING' });
+  const prepareCalls = [];
+  const prepareAdapter = createAppleChromeAdapter({
+    native: { enumerateWindows: () => [] }, requestAutomation: () => true,
+    execFile: (file, args, options, callback) => {
+      prepareCalls.push({ file, args, options });
+      if (file === '/usr/bin/open') callback(new Error('LaunchServices rejected Chrome'));
+      else callback(notRunning());
+    },
+  });
+  await assert.rejects(
+    () => prepareAdapter.prepare(handoffDescriptor('launch-failure'), { x: -900, y: 20, width: 800, height: 600 }),
+    { code: 'CHROME_LAUNCH_FAILED' },
+  );
+  assert.deepEqual(prepareCalls.map(({ file }) => file), ['/usr/bin/osascript', '/usr/bin/open']);
+
+  const captureCalls = [];
+  const captureAdapter = createAppleChromeAdapter({
+    requestAutomation: () => true,
+    execFile: (file, args, options, callback) => {
+      captureCalls.push({ file, args, options });
+      callback(notRunning());
+    },
+  });
+  await assert.rejects(
+    () => captureAdapter.capture({}, { x: 0, y: 0, w: 800, h: 600 }),
+    { code: 'CHROME_NOT_RUNNING' },
+  );
+  assert.deepEqual(captureCalls.map(({ file }) => file), ['/usr/bin/osascript']);
 });
 
 test('prepare exposes and positions the native Apple window before tab population finishes', async () => {

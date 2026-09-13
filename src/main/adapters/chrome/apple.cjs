@@ -11,6 +11,7 @@ const CREATE_MARKER = '/* compusync:chrome:prepare:create */';
 const POPULATE_MARKER = '/* compusync:chrome:prepare:populate */';
 const CLOSE_MARKER = '/* compusync:chrome:close */';
 const MAX_PREPARED_DESCRIPTORS = 200;
+const CHROME_LAUNCH_WAIT_MS = 5_000;
 
 class AppleChromeError extends Error {
   constructor(code, message) {
@@ -27,11 +28,18 @@ function scriptLiteral(value) {
   return JSON.stringify(value).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
 }
 
+function runningChromeScript(waitMs = 0) {
+  const boundedWait = Number.isFinite(waitMs) ? Math.max(0, Math.min(CHROME_LAUNCH_WAIT_MS, waitMs)) : 0;
+  return `var chrome = Application(${scriptLiteral(APP_NAME)});
+var chromeLaunchDeadline = Date.now() + ${boundedWait};
+while (!chrome.running() && Date.now() < chromeLaunchDeadline) delay(0.05);
+if (!chrome.running()) throw new Error('COMPUSYNC_CHROME_NOT_RUNNING');`;
+}
+
 function captureScript() {
   return `${CAPTURE_MARKER}
 function safe(read, fallback) { try { var value = read(); return value === undefined ? fallback : value; } catch (_) { return fallback; } }
-var chrome = Application(${scriptLiteral(APP_NAME)});
-if (!chrome.running()) throw new Error('COMPUSYNC_CHROME_NOT_RUNNING');
+${runningChromeScript()}
 var output = chrome.windows().map(function (win, windowIndex) {
   var bounds = safe(function () { return win.bounds(); }, null);
   var tabs = win.tabs().map(function (tab, tabIndex) {
@@ -70,12 +78,11 @@ JSON.stringify({
 });`;
 }
 
-function createWindowScript(descriptor) {
+function createWindowScript(descriptor, waitMs = 0) {
   const activeUrl = descriptor.payload.tabs[descriptor.payload.activeIdx].url;
   return `${CREATE_MARKER}
 var activeUrl = ${scriptLiteral(activeUrl)};
-var chrome = Application(${scriptLiteral(APP_NAME)});
-if (!chrome.running()) throw new Error('COMPUSYNC_CHROME_NOT_RUNNING');
+${runningChromeScript(waitMs)}
 var win = chrome.Window().make();
 win.activeTab().url = activeUrl;
 ${createdWindowResultScript()}`;
@@ -94,8 +101,7 @@ function populateWindowScript(descriptor, handle) {
   };
   return `${POPULATE_MARKER}
 var input = ${scriptLiteral(input)};
-var chrome = Application(${scriptLiteral(APP_NAME)});
-if (!chrome.running()) throw new Error('COMPUSYNC_CHROME_NOT_RUNNING');
+${runningChromeScript()}
 var windows = chrome.windows();
 var win = null;
 if (input.chromeWindowId) {
@@ -252,7 +258,7 @@ function normalizeExecResult(stdout, stderr) {
   return { stdout: String(stdout ?? ''), stderr: String(stderr ?? '') };
 }
 
-function invokeExecFile(execFile, args, options) {
+function invokeExecFile(execFile, file, args, options) {
   return new Promise((resolve, reject) => {
     let settled = false;
     const finish = (error, stdout, stderr) => {
@@ -262,7 +268,7 @@ function invokeExecFile(execFile, args, options) {
       else resolve(normalizeExecResult(stdout, stderr));
     };
     let returned;
-    try { returned = execFile('/usr/bin/osascript', args, options, finish); }
+    try { returned = execFile(file, args, options, finish); }
     catch (error) { finish(error); return; }
     if (returned && typeof returned.then === 'function') {
       returned.then((result) => {
@@ -325,7 +331,7 @@ function createAppleChromeAdapter(options = {}) {
   async function runJxa(script, failureCode) {
     await ensureAutomation();
     try {
-      const result = await invokeExecFile(execFile, ['-l', 'JavaScript', '-e', script], {
+      const result = await invokeExecFile(execFile, '/usr/bin/osascript', ['-l', 'JavaScript', '-e', script], {
         encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, timeout: 10000,
       });
       return result.stdout;
@@ -338,6 +344,16 @@ function createAppleChromeAdapter(options = {}) {
         throw new AppleChromeError('CHROME_NOT_RUNNING', 'Google Chrome closed before the window handoff. Reopen Chrome and try again.');
       }
       throw new AppleChromeError(failureCode, 'macOS could not control the selected Google Chrome window. Try the handoff again.');
+    }
+  }
+
+  async function launchChrome() {
+    try {
+      await invokeExecFile(execFile, '/usr/bin/open', [
+        '-g', '-a', APP_NAME, '--args', '--no-startup-window', '--no-first-run', '--no-default-browser-check',
+      ], { encoding: 'utf8', maxBuffer: 64 * 1024, timeout: 5_000 });
+    } catch {
+      throw new AppleChromeError('CHROME_LAUNCH_FAILED', 'Compusync could not open Google Chrome on this Mac.');
     }
   }
 
@@ -439,6 +455,39 @@ function createAppleChromeAdapter(options = {}) {
     return normalized;
   }
 
+  async function createPreparedWindow(descriptor, existingIds) {
+    try {
+      return {
+        stdout: await runJxa(createWindowScript(descriptor), 'CHROME_PREPARE_FAILED'),
+        existingIds,
+      };
+    } catch (error) {
+      if (error?.code !== 'CHROME_NOT_RUNNING') throw error;
+    }
+
+    await launchChrome();
+    // Chrome is launched without a startup window. Still refresh the baseline
+    // before creating ours so a restored/profile window can never be mistaken
+    // for the handoff target if Chrome ignores that flag.
+    const launchedIds = new Set((await nativeWindows()).map((window) => String(window.id)));
+    try {
+      return {
+        stdout: await runJxa(createWindowScript(descriptor, CHROME_LAUNCH_WAIT_MS), 'CHROME_PREPARE_FAILED'),
+        existingIds: launchedIds,
+      };
+    } catch (error) {
+      if (error?.code === 'CHROME_NOT_RUNNING') {
+        throw new AppleChromeError('CHROME_LAUNCH_FAILED', 'Google Chrome did not finish opening for the window handoff.');
+      }
+      throw error;
+    }
+  }
+
+  async function discardPreparedWindow(handle) {
+    try { await runJxa(closeScript(handle), 'CHROME_CLOSE_FAILED'); }
+    catch { /* Best-effort cleanup. */ }
+  }
+
   async function prepare(inputDescriptor, offscreenBoundsPx, options = {}) {
     const descriptor = sanitizeWindowDescriptor(inputDescriptor);
     if (!descriptor) throw new AppleChromeError('CHROME_INVALID_DESCRIPTOR', 'The Chrome window handoff data is invalid.');
@@ -448,13 +497,13 @@ function createAppleChromeAdapter(options = {}) {
     // Return after opening only the active URL so the native adapter can hide
     // the real window before background tabs are created (the spec's ordering
     // is visible here and avoids flashing a populated window on the desktop).
-    const stdout = await runJxa(createWindowScript(descriptor), 'CHROME_PREPARE_FAILED');
-    const appleResult = parseScriptJson(stdout, 'CHROME_PREPARE_FAILED');
-    const preparedWindow = await findPreparedNativeWindow(beforeIds, appleResult);
+    const created = await createPreparedWindow(descriptor, beforeIds);
+    const appleResult = parseScriptJson(created.stdout, 'CHROME_PREPARE_FAILED');
+    const preparedWindow = await findPreparedNativeWindow(created.existingIds, appleResult);
     if (!preparedWindow) {
       // The Chrome window exists, but proceeding without a native handle could
       // expose it on-screen or later close the wrong window.
-      try { await runJxa(closeScript(appleResult), 'CHROME_CLOSE_FAILED'); } catch { /* Best-effort cleanup. */ }
+      await discardPreparedWindow(appleResult);
       throw new AppleChromeError('CHROME_NATIVE_WINDOW_UNAVAILABLE', 'Compusync created the Chrome window but could not address it through Accessibility. Check Accessibility permission and try again.');
     }
     await setNativeBounds(preparedWindow.id, bounds);
@@ -474,7 +523,7 @@ function createAppleChromeAdapter(options = {}) {
       }
       await runJxa(populateWindowScript(descriptor, handle), 'CHROME_PREPARE_FAILED');
     } catch (error) {
-      try { await runJxa(closeScript(handle), 'CHROME_CLOSE_FAILED'); } catch { /* Best-effort cleanup. */ }
+      await discardPreparedWindow(handle);
       throw error;
     }
     descriptorIds.set(String(preparedWindow.id), descriptor.id);
