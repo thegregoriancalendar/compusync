@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Messages Companion</title>
+  <link rel="stylesheet" href="messages.css">
+</head>
+<body>
+  <main class="app-shell">
+    <aside class="sidebar">
+      <header>
+        <h1>Messages</h1>
+        <input id="search" type="search" placeholder="Search conversations" aria-label="Search conversations">
+      </header>
+      <div id="conversation-list" class="conversation-list" role="listbox" aria-label="Conversations"></div>
+    </aside>
+    <section class="conversation">
+      <header id="conversation-header" class="conversation-header">
+        <div>
+          <h2 id="conversation-title">Messages Companion</h2>
+          <p id="conversation-subtitle">Select a conversation</p>
+        </div>
+      </header>
+      <div id="status" class="status" role="status"></div>
+      <div id="messages" class="messages" aria-live="polite"></div>
+      <button id="older" class="older" type="button" hidden>Load earlier messages</button>
+      <form id="composer" class="composer" hidden>
+        <textarea id="draft" rows="1" maxlength="32768" placeholder="Message" aria-label="Message"></textarea>
+        <button id="send" type="submit">Send</button>
+      </form>
+    </section>
+  </main>
+  <script src="messages.js"></script>
+</body>
+</html>

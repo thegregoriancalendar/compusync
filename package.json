@@ -97,7 +97,7 @@
         "NSLocalNetworkUsageDescription": "CompuSync connects to your other laptop to link cursors and hand off Chrome windows.",
         "NSAccessibilityUsageDescription": "CompuSync needs Accessibility access to move the shared cursor and position Chrome windows during handoff.",
         "NSInputMonitoringUsageDescription": "CompuSync needs Input Monitoring access so your mouse and keyboard can follow the shared cursor.",
-        "NSAppleEventsUsageDescription": "CompuSync needs Automation access to read and recreate your Chrome tabs during window handoff."
+        "NSAppleEventsUsageDescription": "CompuSync needs Automation access to read and recreate Chrome tabs and to send messages you compose in Messages Companion."
       }
     }
   }

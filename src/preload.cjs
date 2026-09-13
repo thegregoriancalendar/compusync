@@ -13,3 +13,9 @@ contextBridge.exposeInMainWorld('compusync', {
   onDetails: (callback) => subscribe('sync:details', callback),
   onHandoffOverlay: (callback) => subscribe('sync:handoff-overlay', callback),
 });
+
+contextBridge.exposeInMainWorld('compusyncMessages', {
+  bootstrap: () => ipcRenderer.invoke('messages:bootstrap'),
+  command: (method, payload) => ipcRenderer.invoke('messages:command', method, payload),
+  onState: (callback) => subscribe('messages:state', callback),
+});
