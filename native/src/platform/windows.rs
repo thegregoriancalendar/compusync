@@ -28,6 +28,7 @@ type Lresult = isize;
 
 const WM_DESTROY: u32 = 0x0002;
 const WM_CLOSE: u32 = 0x0010;
+const WM_CANCELMODE: u32 = 0x001F;
 const WM_QUIT: u32 = 0x0012;
 const WM_DISPLAYCHANGE: u32 = 0x007E;
 const WM_INPUT: u32 = 0x00FF;
@@ -498,7 +499,12 @@ fn should_suppress_left_up(
     if extra_info == COMPUSYNC_EXTRA_INFO {
         if suppress_move_loop_up.swap(false, Ordering::AcqRel) {
             suppress_physical_left_up.store(true, Ordering::Release);
-            return true;
+            // This is the synthetic release whose whole purpose is to reach
+            // the foreground window and end its modal move/size loop. Raw
+            // input already filters our tagged events, so swallowing it here
+            // would leave Windows in the native drag (and let Snap take over).
+            // Only the later hardware release is hidden from the window.
+            return false;
         }
         return false;
     }
@@ -1259,8 +1265,15 @@ impl Platform for HostPlatform {
             *context.lock() = None;
         }
     }
-    fn terminate_move_loop(&mut self, _: &str) -> Result<(), String> {
+    fn terminate_move_loop(&mut self, id: &str) -> Result<(), String> {
+        let hwnd = parse_hwnd(id)?;
         let context = hook_context().ok_or_else(|| "input hook is not active".to_string())?;
+        // Queue cancellation on the window thread before injecting the
+        // release. This dismisses Windows' move/snap mode instead of letting a
+        // release at the monitor edge commit an Aero Snap layout.
+        if unsafe { PostMessageW(hwnd, WM_CANCELMODE, 0, 0) } == 0 {
+            return Err(os_error("PostMessage(WM_CANCELMODE)"));
+        }
         context.suppress_move_loop_up.store(true, Ordering::Release);
         if let Err(error) = self.synthesize_button("left", false) {
             context
@@ -1289,10 +1302,10 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
-    fn move_loop_up_and_later_physical_up_are_each_suppressed_once() {
+    fn move_loop_up_reaches_window_and_later_physical_up_is_suppressed_once() {
         let injected = AtomicBool::new(true);
         let physical = AtomicBool::new(false);
-        assert!(should_suppress_left_up(
+        assert!(!should_suppress_left_up(
             0x0202,
             COMPUSYNC_EXTRA_INFO,
             &injected,
