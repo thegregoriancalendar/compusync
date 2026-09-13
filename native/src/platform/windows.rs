@@ -1055,9 +1055,7 @@ impl Platform for HostPlatform {
         }
     }
     fn synthesize_scroll(&mut self, dy: f64) -> Result<(), String> {
-        let wheel = (dy * 40.0)
-            .round()
-            .clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+        let wheel = (dy * 40.0).round().clamp(i32::MIN as f64, i32::MAX as f64) as i32;
         if wheel == 0 {
             return Ok(());
         }

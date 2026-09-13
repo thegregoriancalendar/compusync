@@ -26,6 +26,28 @@ pub trait Platform: Send {
     fn terminate_move_loop(&mut self, id: &str) -> Result<(), String>;
 }
 
+/// Permission probes live outside `Platform` because they are process-level
+/// macOS TCC state, not state owned by an input-capture instance.
+#[cfg(target_os = "macos")]
+pub fn input_monitoring_access(request: bool) -> bool {
+    darwin::input_monitoring_access(request)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn input_monitoring_access(_: bool) -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+pub fn chrome_automation_access(request: bool) -> &'static str {
+    darwin::chrome_automation_access(request)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn chrome_automation_access(_: bool) -> &'static str {
+    "unavailable"
+}
+
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "windows")]

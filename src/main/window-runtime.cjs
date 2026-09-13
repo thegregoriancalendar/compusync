@@ -4,6 +4,7 @@ const { EventEmitter } = require('node:events');
 const { DragController } = require('./drag.cjs');
 
 const WINDOW_FRAME_MS = 1000 / 60;
+const CURSOR_EDGE_CAPTURE_VU = 12;
 const HANDOFF_LOG_FIELDS = new Set([
   'type', 'event', 'name', 'id', 'role', 'phase', 'at', 'elapsedMs', 'durationMs',
   'status', 'winner', 'reason', 'instant', 'waitMs', 'keepaliveMs',
@@ -57,16 +58,30 @@ function geometryToVU(window, placement) {
   };
 }
 
-function cursorAtSharedEdge(cursor, source, target) {
+function cursorAtSharedEdge(cursor, source, target, margin = CURSOR_EDGE_CAPTURE_VU) {
   if (!cursor || !source || !target) return false;
+  const sourceRight = source.origin.x + source.size.w;
+  const sourceBottom = source.origin.y + source.size.h;
+  const targetRight = target.origin.x + target.size.w;
+  const targetBottom = target.origin.y + target.size.h;
   if (target.origin.x >= source.origin.x + source.size.w) {
-    return cursor.x >= source.origin.x + source.size.w;
+    const sharedTop = Math.max(source.origin.y, target.origin.y);
+    const sharedBottom = Math.min(sourceBottom, targetBottom);
+    return cursor.y >= sharedTop && cursor.y < sharedBottom && cursor.x >= sourceRight - margin;
   }
-  if (target.origin.x + target.size.w <= source.origin.x) return cursor.x <= source.origin.x;
+  if (targetRight <= source.origin.x) {
+    const sharedTop = Math.max(source.origin.y, target.origin.y);
+    const sharedBottom = Math.min(sourceBottom, targetBottom);
+    return cursor.y >= sharedTop && cursor.y < sharedBottom && cursor.x <= source.origin.x + margin;
+  }
   if (target.origin.y >= source.origin.y + source.size.h) {
-    return cursor.y >= source.origin.y + source.size.h;
+    const sharedLeft = Math.max(source.origin.x, target.origin.x);
+    const sharedRight = Math.min(sourceRight, targetRight);
+    return cursor.x >= sharedLeft && cursor.x < sharedRight && cursor.y >= sourceBottom - margin;
   }
-  return cursor.y <= source.origin.y;
+  const sharedLeft = Math.max(source.origin.x, target.origin.x);
+  const sharedRight = Math.min(sourceRight, targetRight);
+  return cursor.x >= sharedLeft && cursor.x < sharedRight && cursor.y <= source.origin.y + margin;
 }
 
 class WindowHandoffRuntime extends EventEmitter {
@@ -246,10 +261,14 @@ class WindowHandoffRuntime extends EventEmitter {
     try {
       await this.native.guardWindow?.(id, this.sourceStartBounds);
       this.guardedWindowId = id;
-      await this.native.terminateMoveLoop?.(id);
+      // The synthetic native mouse-up can synchronously emit MOVESIZEEND.
+      // Mark it as the modal-loop terminator before asking the OS to release
+      // the drag, otherwise that event is mistaken for the user's real drop.
       this.nativeLoopTerminated = true;
+      await this.native.terminateMoveLoop?.(id);
       return true;
     } catch (error) {
+      this.nativeLoopTerminated = false;
       try { await this.drag.abort(error?.code || 'native-move-loop-failed'); } catch { /* abort still clears its state */ }
       return false;
     }
@@ -290,6 +309,7 @@ class WindowHandoffRuntime extends EventEmitter {
 }
 
 module.exports = {
+  CURSOR_EDGE_CAPTURE_VU,
   WINDOW_FRAME_MS,
   sanitizeHandoffLog,
   writeHandoffLog,

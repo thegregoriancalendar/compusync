@@ -450,6 +450,21 @@ impl NativeSubstrate {
         self.inner.owner.load(Ordering::Acquire)
     }
 
+    /// Check or request macOS Input Monitoring access. Other platforms return
+    /// false so callers can retain one platform-neutral adapter shape.
+    #[napi]
+    pub fn input_monitoring_access(&self, request: Option<bool>) -> bool {
+        platform::input_monitoring_access(request.unwrap_or(false))
+    }
+
+    /// Return `granted`, `denied`, or `unavailable` for Chrome Automation.
+    /// Passing true may display the standard macOS TCC prompt, without opening
+    /// Chrome. Other platforms return `unavailable`.
+    #[napi]
+    pub fn chrome_automation_access(&self, request: Option<bool>) -> String {
+        platform::chrome_automation_access(request.unwrap_or(false)).into()
+    }
+
     /// Native events are delivered as compact JSON to avoid allocating a JS
     /// object graph on the input thread. Queue draining remains available for
     /// startup and test harnesses.
@@ -811,7 +826,9 @@ impl NativeSubstrate {
     #[napi]
     pub fn synthesize_scroll(&self, dy: f64) -> Result<()> {
         if !dy.is_finite() || dy == 0.0 || dy.abs() > 1000.0 {
-            return Err(napi_error("scroll delta must be finite, non-zero, and at most 1000"));
+            return Err(napi_error(
+                "scroll delta must be finite, non-zero, and at most 1000",
+            ));
         }
         self.inner
             .platform
@@ -923,7 +940,6 @@ mod tests {
         );
         assert_eq!(held_modifier_codes(1).collect::<Vec<_>>(), [0xE1, 0xE5]);
     }
-
 
     #[test]
     fn source_event_cadence_wins_over_bursty_callback_delivery() {

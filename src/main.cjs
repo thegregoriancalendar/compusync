@@ -16,6 +16,7 @@ const { WindowHandoffRuntime } = require('./main/window-runtime.cjs');
 const { SeamOverlay } = require('./main/seam-overlay.cjs');
 const { ChromeAdapterRuntime } = require('./main/adapters/chrome/runtime.cjs');
 const { createWindowsChromeExtensionSetup } = require('./main/adapters/chrome/setup.cjs');
+const { runMacPermissionPreflight } = require('./main/macos-permissions.cjs');
 const { createUpdateService } = require('./main/updates.cjs');
 const { createNativeAdapter } = require('../native/index.cjs');
 const { autoUpdater } = require('electron-updater');
@@ -80,6 +81,7 @@ function readConfig() {
     secret: saved.secret || newSecret(), edge: saved.edge || 'right',
     autoLaunch: Boolean(saved.autoLaunch), firstRun: !saved.id,
     chromeExtensionSetupPrompted: Boolean(saved.chromeExtensionSetupPrompted),
+    macPermissionsPromptedV3: Boolean(saved.macPermissionsPromptedV3),
     clipboardSync: saved.clipboardSync !== false,
     cursorSettings: cursorSettingsFromSaved(saved.cursorSettings),
     dismissedNotices: Array.isArray(saved.dismissedNotices)
@@ -353,15 +355,8 @@ function ensureInputRuntime() {
         app, shell, resourcesPath: process.resourcesPath,
       }) : null,
       promptOnStart: process.platform === 'win32' && !config.chromeExtensionSetupPrompted,
-      requestAutomation: async () => {
-        const result = await showMessageBox({
-          type: 'info', buttons: ['Continue', 'Cancel'], defaultId: 0, cancelId: 1,
-          title: 'Allow Chrome Automation',
-          message: 'Compusync needs macOS Automation access for this Chrome handoff.',
-          detail: 'macOS will ask you to allow Compusync to read and recreate this window’s tabs.',
-        });
-        return result.response === 0;
-      },
+      // All TCC access is requested together during first-run preflight.
+      requestAutomation: async () => true,
       requestExtensionSetup: async (offer) => {
         if (!offer) return false;
         const result = await showMessageBox({
@@ -566,17 +561,23 @@ if (hasLock) app.whenReady().then(async () => {
     dismissible: false,
   });
   if (process.platform === 'darwin') {
-    const accessibility = systemPreferences.isTrustedAccessibilityClient(config.firstRun);
-    if (!accessibility) notices.set('accessibility-permission', {
-      id: 'accessibility-permission', kind: 'permission', title: 'Allow Accessibility',
-      message: 'Compusync needs Accessibility access to detect and position Chrome windows and share input.',
-      actionLabel: 'Open Accessibility Settings', action: 'open-accessibility', dismissible: false,
+    const requestMacPermissions = !config.macPermissionsPromptedV3;
+    const permissionState = await runMacPermissionPreflight({
+      firstRun: requestMacPermissions,
+      systemPreferences,
+      native: nativeInput,
+      onNotice: (notice) => notices.set(notice.id, notice),
+      clearNotice: (id) => notices.delete(id),
     });
-    if (config.firstRun) notices.set('input-monitoring-permission', {
-      id: 'input-monitoring-permission', kind: 'permission', title: 'Allow Input Monitoring',
-      message: 'Compusync needs Input Monitoring access so either mouse and keyboard can drive the shared cursor.',
-      actionLabel: 'Open Input Monitoring Settings', action: 'open-input-monitoring', dismissible: false,
-    });
+    // An old/missing addon cannot raise the Input Monitoring or Automation
+    // prompts. Retry onboarding after the addon is built instead of recording
+    // a preflight that never actually happened.
+    if (requestMacPermissions
+      && nativeInput?.permissionPreflightAvailable?.()
+      && permissionState.automation !== 'unavailable') {
+      config.macPermissionsPromptedV3 = true;
+      saveConfig();
+    }
   }
   backgroundLaunch = app.commandLine.hasSwitch('background') || (process.platform === 'darwin' && app.getLoginItemSettings().wasOpenedAtLogin);
   const permissions = (_contents, permission) => permission === 'pointerLock';

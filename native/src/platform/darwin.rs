@@ -26,6 +26,12 @@ type CgEvent = *mut c_void;
 type CgEventTapProxy = *mut c_void;
 type CgDisplay = u32;
 
+#[repr(C)]
+struct AeDesc {
+    descriptor_type: u32,
+    data_handle: *mut c_void,
+}
+
 const CG_EVENT_LEFT_DOWN: u32 = 1;
 const CG_EVENT_LEFT_UP: u32 = 2;
 const CG_EVENT_RIGHT_DOWN: u32 = 3;
@@ -59,6 +65,9 @@ const CG_FLAG_ALTERNATE: u64 = 1 << 19;
 const CG_FLAG_COMMAND: u64 = 1 << 20;
 const AX_VALUE_POINT: u32 = 1;
 const AX_VALUE_SIZE: u32 = 2;
+const TYPE_APPLICATION_BUNDLE_ID: u32 = u32::from_be_bytes(*b"bund");
+const TYPE_WILDCARD: u32 = u32::from_be_bytes(*b"****");
+const ERR_AE_EVENT_NOT_PERMITTED: i32 = -1743;
 
 struct AxConstants {
     windows: usize,
@@ -191,6 +200,22 @@ unsafe extern "C" {
     fn CGDisplayBounds(display: CgDisplay) -> CgRect;
     fn CGDisplayPixelsWide(display: CgDisplay) -> usize;
     fn CGWindowListCopyWindowInfo(options: u32, relative: u32) -> CfArray;
+    fn CGPreflightListenEventAccess() -> bool;
+    fn CGRequestListenEventAccess() -> bool;
+
+    fn AECreateDesc(
+        descriptor_type: u32,
+        data: *const c_void,
+        size: isize,
+        result: *mut AeDesc,
+    ) -> i32;
+    fn AEDisposeDesc(descriptor: *mut AeDesc) -> i32;
+    fn AEDeterminePermissionToAutomateTarget(
+        target: *const AeDesc,
+        event_class: u32,
+        event_id: u32,
+        ask_user_if_needed: bool,
+    ) -> i32;
 
     fn AXIsProcessTrusted() -> bool;
     fn AXUIElementCreateSystemWide() -> AxElement;
@@ -493,9 +518,113 @@ struct AxDragWatch {
     run_loop: CfRunLoop,
     id: String,
     active: bool,
+    initial_geometry: Option<AxWindowGeometry>,
     resize_subscribed: bool,
 }
+
+pub(super) fn input_monitoring_access(request: bool) -> bool {
+    // CGRequestListenEventAccess is the only supported way to raise the Input
+    // Monitoring TCC prompt. It returns the current decision and macOS itself
+    // suppresses repeat prompts after a denial.
+    unsafe {
+        if CGPreflightListenEventAccess() {
+            true
+        } else if request {
+            CGRequestListenEventAccess()
+        } else {
+            false
+        }
+    }
+}
+
+pub(super) fn chrome_automation_access(request: bool) -> &'static str {
+    // Ask TCC about Chrome by bundle id. Unlike executing AppleScript, this
+    // does not launch Chrome or inspect any browser data; it only obtains the
+    // Automation decision needed by later window handoffs.
+    const CHROME_BUNDLE_ID: &[u8] = b"com.google.Chrome";
+    let mut target = AeDesc {
+        descriptor_type: 0,
+        data_handle: null_mut(),
+    };
+    let created = unsafe {
+        AECreateDesc(
+            TYPE_APPLICATION_BUNDLE_ID,
+            CHROME_BUNDLE_ID.as_ptr().cast(),
+            CHROME_BUNDLE_ID.len() as isize,
+            &mut target,
+        )
+    };
+    if created != 0 {
+        return "unavailable";
+    }
+    let result = unsafe {
+        AEDeterminePermissionToAutomateTarget(&target, TYPE_WILDCARD, TYPE_WILDCARD, request)
+    };
+    unsafe {
+        AEDisposeDesc(&mut target);
+    }
+    match result {
+        0 => "granted",
+        ERR_AE_EVENT_NOT_PERMITTED => "denied",
+        _ => "unavailable",
+    }
+}
 unsafe impl Send for AxDragWatch {}
+
+#[derive(Clone, Copy)]
+struct AxWindowGeometry {
+    position: CgPoint,
+    size: CgSize,
+}
+
+fn ax_window_geometry(element: AxElement) -> Option<AxWindowGeometry> {
+    Some(AxWindowGeometry {
+        position: ax_value::<CgPoint>(element, ax(AX.position), AX_VALUE_POINT)?,
+        size: ax_value::<CgSize>(element, ax(AX.size), AX_VALUE_SIZE)?,
+    })
+}
+
+fn geometry_changed(initial: AxWindowGeometry, current: AxWindowGeometry) -> bool {
+    const AX_GEOMETRY_EPSILON: f64 = 0.5;
+    (initial.position.x - current.position.x).abs() >= AX_GEOMETRY_EPSILON
+        || (initial.position.y - current.position.y).abs() >= AX_GEOMETRY_EPSILON
+        || (initial.size.width - current.size.width).abs() >= AX_GEOMETRY_EPSILON
+        || (initial.size.height - current.size.height).abs() >= AX_GEOMETRY_EPSILON
+}
+
+fn emit_move_size_start(context: &TapContext, id: String) {
+    let mut event = NativeEvent::simple("moveSizeStart");
+    event.window_id = Some(id);
+    (context.sink)(event);
+}
+
+// Chrome commonly coalesces AXMoved notifications until the native drag ends.
+// The AXPosition value itself is live, so sample it from the event tap while the
+// physical button is moving. This starts JS's 60 Hz geometry polling as soon as
+// the window has actually moved without mistaking tab/text drags for window
+// drags.
+fn poll_drag_watch(context: &TapContext) {
+    let id = {
+        let mut watch = context.drag_watch.lock();
+        let Some(watch) = watch.as_mut() else {
+            return;
+        };
+        if watch.active || !context.left_down.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(initial) = watch.initial_geometry else {
+            return;
+        };
+        let Some(current) = ax_window_geometry(watch.element) else {
+            return;
+        };
+        if !geometry_changed(initial, current) || !activate_drag_watch(true, &mut watch.active) {
+            return;
+        }
+        watch.id.clone()
+    };
+    emit_move_size_start(context, id);
+}
 
 fn focused_window() -> Option<(String, i32, OwnedCf)> {
     let system = OwnedCf(unsafe { AXUIElementCreateSystemWide() });
@@ -546,9 +675,7 @@ unsafe extern "C" fn ax_window_moved(_: AxObserver, _: AxElement, _: CfString, u
         }
         watch.id.clone()
     };
-    let mut event = NativeEvent::simple("moveSizeStart");
-    event.window_id = Some(id);
-    (context.sink)(event);
+    emit_move_size_start(context, id);
 }
 
 fn activate_drag_watch(left_down: bool, active: &mut bool) -> bool {
@@ -618,6 +745,7 @@ fn begin_drag_watch(context: &TapContext) {
         CFRunLoopAddSource(run_loop, source, kCFRunLoopCommonModes);
     }
     let raw_element = element.0 as AxElement;
+    let initial_geometry = ax_window_geometry(raw_element);
     std::mem::forget(element);
     *context.drag_watch.lock() = Some(AxDragWatch {
         observer,
@@ -626,8 +754,19 @@ fn begin_drag_watch(context: &TapContext) {
         run_loop,
         id,
         active: false,
+        initial_geometry,
         resize_subscribed,
     });
+}
+
+fn ensure_drag_watch(context: &TapContext) {
+    let watching = context.drag_watch.lock().is_some();
+    if !watching {
+        // The event tap runs before the clicked window receives focus. Waiting
+        // until the first drag event makes focused_window() select the window
+        // the user actually grabbed instead of the previously active window.
+        begin_drag_watch(context);
+    }
 }
 
 unsafe extern "C" fn event_tap(
@@ -663,9 +802,23 @@ unsafe fn event_tap_inner(
         }
         return event;
     }
-    if unsafe { CGEventGetIntegerValueField(event, CG_FIELD_SOURCE_USER_DATA) }
-        == COMPUSYNC_SOURCE_TAG
-    {
+    let compusync_event = unsafe {
+        CGEventGetIntegerValueField(event, CG_FIELD_SOURCE_USER_DATA) == COMPUSYNC_SOURCE_TAG
+    };
+    if compusync_event {
+        // Do not echo injected peer input back across the transport, but keep
+        // the local drag watcher in sync so a peer-driven Chrome drag can
+        // still become a live cross-screen handoff.
+        if kind == CG_EVENT_LEFT_DOWN {
+            context.left_down.store(true, Ordering::Release);
+            clear_drag_watch(context, false);
+        } else if kind == CG_EVENT_LEFT_DRAGGED {
+            ensure_drag_watch(context);
+            poll_drag_watch(context);
+        } else if kind == CG_EVENT_LEFT_UP {
+            context.left_down.store(false, Ordering::Release);
+            clear_drag_watch(context, true);
+        }
         return event;
     }
     let flags = unsafe { CGEventGetFlags(event) };
@@ -678,6 +831,10 @@ unsafe fn event_tap_inner(
         | CG_EVENT_LEFT_DRAGGED
         | CG_EVENT_RIGHT_DRAGGED
         | CG_EVENT_OTHER_DRAGGED => {
+            if kind == CG_EVENT_LEFT_DRAGGED {
+                ensure_drag_watch(context);
+                poll_drag_watch(context);
+            }
             let mut native = NativeEvent::simple("cursorDelta");
             native.timestamp = unsafe { CGEventGetTimestamp(event) } as f64 / 1_000_000.0;
             native.dx = Some(unsafe {
@@ -729,9 +886,8 @@ unsafe fn event_tap_inner(
             }
         }
         CG_EVENT_SCROLL_WHEEL => {
-            let fixed = unsafe {
-                CGEventGetIntegerValueField(event, CG_FIELD_SCROLL_FIXED_DELTA_AXIS_1)
-            };
+            let fixed =
+                unsafe { CGEventGetIntegerValueField(event, CG_FIELD_SCROLL_FIXED_DELTA_AXIS_1) };
             let dy = if fixed != 0 {
                 fixed as f64 / 65_536.0
             } else {
@@ -765,7 +921,7 @@ unsafe fn event_tap_inner(
             native.modifiers = Some(modifiers);
             if kind == CG_EVENT_LEFT_DOWN {
                 context.left_down.store(true, Ordering::Release);
-                begin_drag_watch(context);
+                clear_drag_watch(context, false);
             } else if kind == CG_EVENT_LEFT_UP {
                 context.left_down.store(false, Ordering::Release);
                 clear_drag_watch(context, true);
@@ -1193,8 +1349,9 @@ impl Drop for HostPlatform {
 #[cfg(test)]
 mod tests {
     use super::{
-        activate_drag_watch, suppress_for_non_owner, take_run_loop, CfRunLoop,
-        CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_X, CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_Y,
+        activate_drag_watch, geometry_changed, suppress_for_non_owner, take_run_loop,
+        AxWindowGeometry, CfRunLoop, CgPoint, CgSize, CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_X,
+        CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_Y,
     };
 
     #[test]
@@ -1215,6 +1372,31 @@ mod tests {
         assert!(activate_drag_watch(true, &mut active));
         assert!(active);
         assert!(!activate_drag_watch(true, &mut active));
+    }
+
+    #[test]
+    fn live_ax_geometry_starts_drag_only_after_the_window_moves() {
+        let initial = AxWindowGeometry {
+            position: CgPoint { x: 100.0, y: 40.0 },
+            size: CgSize {
+                width: 900.0,
+                height: 700.0,
+            },
+        };
+        let stationary = AxWindowGeometry {
+            position: CgPoint {
+                x: 100.25,
+                y: 40.25,
+            },
+            size: initial.size,
+        };
+        let moved = AxWindowGeometry {
+            position: CgPoint { x: 102.0, y: 40.0 },
+            size: initial.size,
+        };
+
+        assert!(!geometry_changed(initial, stationary));
+        assert!(geometry_changed(initial, moved));
     }
 
     #[test]

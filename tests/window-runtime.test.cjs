@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
-const { sanitizeHandoffLog, geometryToVU, processIdOf, WindowHandoffRuntime } = require('../src/main/window-runtime.cjs');
+const { sanitizeHandoffLog, geometryToVU, processIdOf, cursorAtSharedEdge, WindowHandoffRuntime } = require('../src/main/window-runtime.cjs');
 
 function runtimeFixture(options = {}) {
   const native = new EventEmitter();
@@ -49,6 +49,14 @@ function runtimeFixture(options = {}) {
     setWindow(value) { window = value; },
   };
 }
+
+test('pre-edge capture applies only along the laptops shared seam', () => {
+  const source = { origin: { x: 0, y: 0 }, size: { w: 1000, h: 800 } };
+  const target = { origin: { x: 1000, y: 200 }, size: { w: 900, h: 600 } };
+  assert.equal(cursorAtSharedEdge({ x: 989, y: 300 }, source, target), true);
+  assert.equal(cursorAtSharedEdge({ x: 989, y: 100 }, source, target), false);
+  assert.equal(cursorAtSharedEdge({ x: 980, y: 300 }, source, target), false);
+});
 
 test('CompuSync never hands one of its own Electron windows to an adapter', async () => {
   const ownPid = 4242;
@@ -145,7 +153,9 @@ test('source edge contact terminates the Windows native move loop exactly once a
 
   input.cursor.virtualCursor = { x: 900, y: 150 };
   await runtime.poll();
-  input.cursor.virtualCursor = { x: 1000, y: 150 };
+  // Capture slightly before the physical edge so Windows Snap never takes
+  // ownership of the native drag.
+  input.cursor.virtualCursor = { x: 989, y: 150 };
   await runtime.poll();
   assert.deepEqual(nativeCalls.slice(0, 2), [
     ['guard', 'hwnd', { x: -1220, y: -800, width: 400, height: 300 }],
@@ -160,6 +170,19 @@ test('source edge contact terminates the Windows native move loop exactly once a
   input.cursor.virtualCursor = { x: 1100, y: 150 };
   await runtime.poll();
   assert.equal(nativeCalls.filter(([kind]) => kind === 'terminate').length, 1);
+  await runtime.stop();
+});
+
+test('synchronous MOVESIZEEND from terminating the modal drag cannot roll back the prepared peer', async () => {
+  const fixture = runtimeFixture();
+  const { runtime, input, native } = fixture;
+  native.terminateMoveLoop = (id) => native.emit('moveSizeEnd', id);
+  assert.equal(await runtime.handleMoveStart('hwnd'), true);
+  input.cursor.virtualCursor = { x: 989, y: 150 };
+  await runtime.poll();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(runtime.drag.active?.role, 'source');
+  assert.notEqual(runtime.drag.active?.phase, 'dropping');
   await runtime.stop();
 });
 

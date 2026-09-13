@@ -172,6 +172,9 @@ class FallbackNativeAdapter extends EventEmitter {
   guardWindow() {}
   releaseWindowGuard() {}
   terminateMoveLoop() {}
+  inputMonitoringAccess() { return false; }
+  chromeAutomationAccess() { return 'unavailable'; }
+  permissionPreflightAvailable() { return false; }
   refreshCoordinateSpace() { return null; }
   toNormalizedPoint(point) { return { ...validPoint(point) }; }
   toPlatformPoint(point) { return { ...validPoint(point) }; }
@@ -302,6 +305,18 @@ class NativeAdapter extends EventEmitter {
   guardWindow(id, bounds) { return this.substrate.guardWindow(id, bounds); }
   releaseWindowGuard(id) { return this.substrate.releaseWindowGuard(id); }
   terminateMoveLoop(id) { return this.substrate.terminateMoveLoop(id); }
+  inputMonitoringAccess(request = false) {
+    return typeof this.substrate.inputMonitoringAccess === 'function'
+      && this.substrate.inputMonitoringAccess(Boolean(request));
+  }
+  chromeAutomationAccess(request = false) {
+    return typeof this.substrate.chromeAutomationAccess === 'function'
+      ? this.substrate.chromeAutomationAccess(Boolean(request)) : 'unavailable';
+  }
+  permissionPreflightAvailable() {
+    return typeof this.substrate.inputMonitoringAccess === 'function'
+      && typeof this.substrate.chromeAutomationAccess === 'function';
+  }
 }
 
 function createNativeAdapter(options = {}) {

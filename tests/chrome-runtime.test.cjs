@@ -31,7 +31,7 @@ test('macOS runtime never constructs the Windows extension bridge', () => {
   runtime.stop();
 });
 
-test('first Windows capture opens guided extension setup and connects without relaunching Chrome', async () => {
+test('missing Windows helper stays non-crossing while explicit setup connects without relaunching Chrome', async () => {
   const events = [];
   const bridge = new Bridge();
   const adapter = { capture: async () => 'captured' };
@@ -45,7 +45,8 @@ test('first Windows capture opens guided extension setup and connects without re
     createAdapter: () => adapter, sleep: async () => {},
   });
   runtime.start();
-  const value = await runtime.adapterForWindow({ processName: 'chrome.exe' })
+  assert.equal(runtime.adapterForWindow({ processName: 'chrome.exe' }), null);
+  const value = await runtime.adapterForId('chrome')
     .capture({ id: 'window' }, { x: 0, y: 0, w: 800, h: 600 });
   assert.equal(value, 'captured');
   assert.deepEqual(events, ['prepare', 'consent', 'open']);

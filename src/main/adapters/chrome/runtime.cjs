@@ -80,7 +80,7 @@ class ChromeAdapterRuntime extends EventEmitter {
 
   adapterForWindow(window) {
     if (!isNativeChromeWindow(window)) return null;
-    return this.platform === 'darwin' ? this.adapter : this.facade;
+    return this.platform === 'darwin' ? this.adapter : (this.adapter ? this.facade : null);
   }
 
   adapterForId(adapterId) {
