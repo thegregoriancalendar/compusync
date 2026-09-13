@@ -28,7 +28,7 @@ const CANDIDATES = nativeCandidates();
 const REQUIRED_SUBSTRATE_METHODS = Object.freeze([
   'configureAcceleration', 'setEventCallback', 'startCapture', 'stopCapture',
   'showCursor', 'hideCursor', 'parkCursor', 'releaseCursor', 'warpCursor',
-  'cursorPosition', 'assumeInputState', 'synthesizeButton', 'synthesizeKey',
+  'cursorPosition', 'assumeInputState', 'synthesizeButton', 'synthesizeKey', 'synthesizeScroll',
   'foregroundIsElevated', 'releaseInputState', 'installRecoveryGuard',
   'setLinked', 'recover', 'heartbeat', 'displayMetrics', 'enumerateWindows',
   'setWindowBounds', 'focusWindow', 'closeWindow', 'guardWindow',
@@ -153,6 +153,7 @@ class FallbackNativeAdapter extends EventEmitter {
   assumeInputState() {}
   synthesizeButton() {}
   synthesizeKey() {}
+  synthesizeScroll() {}
   isForegroundElevated() { return false; }
   releaseInputState() {}
   installRecoveryGuard() {}
@@ -212,6 +213,7 @@ class NativeAdapter extends EventEmitter {
           this.handlers.onModifiers?.(event.modifiers || 0);
           this.emit('key', event);
         } else if (event.kind === 'recovered') this.emit('recovered', event);
+        else if (event.kind === 'scrollDelta') this.emit('scroll', event);
         else if (event.kind === 'unlinkHotkey') this.emit('unlinkHotkey');
         else if (event.kind === 'toggleOwnershipHotkey') this.emit('toggleOwnershipHotkey');
         else if (event.kind === 'displayChanged') {
@@ -248,6 +250,7 @@ class NativeAdapter extends EventEmitter {
   assumeInputState(buttons, modifiers) { return this.substrate.assumeInputState(buttons >>> 0, modifiers >>> 0); }
   synthesizeButton(button, down) { return this.substrate.synthesizeButton(button, Boolean(down)); }
   synthesizeKey(code, down, modifiers = 0) { return this.substrate.synthesizeKey(code >>> 0, Boolean(down), modifiers >>> 0); }
+  synthesizeScroll(dy) { return this.substrate.synthesizeScroll(Number(dy)); }
   isForegroundElevated() { return this.substrate.foregroundIsElevated(); }
   releaseInputState() { return this.substrate.releaseInputState(); }
   installRecoveryGuard() { return this.substrate.installRecoveryGuard(this.guardPath); }

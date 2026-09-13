@@ -792,6 +792,18 @@ impl NativeSubstrate {
     }
 
     #[napi]
+    pub fn synthesize_scroll(&self, dy: f64) -> Result<()> {
+        if !dy.is_finite() || dy == 0.0 || dy.abs() > 1000.0 {
+            return Err(napi_error("scroll delta must be finite, non-zero, and at most 1000"));
+        }
+        self.inner
+            .platform
+            .lock()
+            .synthesize_scroll(dy)
+            .map_err(napi_error)
+    }
+
+    #[napi]
     pub fn assume_input_state(&self, buttons: u32, modifiers: u32) -> Result<()> {
         self.inner
             .synthetic_buttons

@@ -13,6 +13,7 @@ function routePeerInput(components, message, peerMachineId = null) {
       return true;
     }
     if (message.type === 'key.event') return components.keyboard?.receive(message) || false;
+    if (message.type === 'scroll.delta') return components.scroll?.receive(message) || false;
     if (message.type.startsWith('cursor.')) return components.cursor?.receive(message, peerMachineId) || false;
     return false;
   } catch {

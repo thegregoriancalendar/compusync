@@ -51,6 +51,9 @@ impl Platform for HostPlatform {
     fn synthesize_key(&mut self, _: u32, _: bool, _: u32) -> Result<(), String> {
         Err("input synthesis is unavailable".into())
     }
+    fn synthesize_scroll(&mut self, _: f64) -> Result<(), String> {
+        Err("input synthesis is unavailable".into())
+    }
     fn foreground_is_elevated(&self) -> Result<bool, String> {
         Ok(false)
     }

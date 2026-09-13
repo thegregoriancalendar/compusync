@@ -18,6 +18,7 @@ pub trait Platform: Send {
     fn close_window(&mut self, id: &str) -> Result<(), String>;
     fn synthesize_button(&mut self, button: &str, down: bool) -> Result<(), String>;
     fn synthesize_key(&mut self, code: u32, down: bool, modifiers: u32) -> Result<(), String>;
+    fn synthesize_scroll(&mut self, dy: f64) -> Result<(), String>;
     fn foreground_is_elevated(&self) -> Result<bool, String>;
     fn start_capture(&mut self, sink: EventSink) -> Result<(), String>;
     fn set_capture_mode(&mut self, linked: bool, owner: bool);

@@ -36,6 +36,7 @@ const CG_EVENT_RIGHT_DRAGGED: u32 = 7;
 const CG_EVENT_KEY_DOWN: u32 = 10;
 const CG_EVENT_KEY_UP: u32 = 11;
 const CG_EVENT_FLAGS_CHANGED: u32 = 12;
+const CG_EVENT_SCROLL_WHEEL: u32 = 22;
 const CG_EVENT_OTHER_DOWN: u32 = 25;
 const CG_EVENT_OTHER_UP: u32 = 26;
 const CG_EVENT_OTHER_DRAGGED: u32 = 27;
@@ -48,6 +49,8 @@ const CG_FIELD_MOUSE_BUTTON: u32 = 3;
 const CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_X: u32 = 170;
 const CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_Y: u32 = 171;
 const CG_FIELD_KEYCODE: u32 = 9;
+const CG_FIELD_SCROLL_DELTA_AXIS_1: u32 = 11;
+const CG_FIELD_SCROLL_FIXED_DELTA_AXIS_1: u32 = 93;
 const CG_FIELD_SOURCE_USER_DATA: u32 = 42;
 const COMPUSYNC_SOURCE_TAG: i64 = 0x4353_594E;
 const CG_FLAG_SHIFT: u64 = 1 << 17;
@@ -163,6 +166,13 @@ unsafe extern "C" {
         button: u32,
     ) -> CgEvent;
     fn CGEventCreateKeyboardEvent(source: CfType, keycode: u16, down: bool) -> CgEvent;
+    fn CGEventCreateScrollWheelEvent(
+        source: CfType,
+        units: u32,
+        wheel_count: u32,
+        wheel_1: i32,
+        ...
+    ) -> CgEvent;
     fn CGEventSetFlags(event: CgEvent, flags: u64);
     fn CGEventPost(location: u32, event: CgEvent);
     fn CGEventTapCreate(
@@ -694,6 +704,24 @@ unsafe fn event_tap_inner(
                 return null_mut();
             }
         }
+        CG_EVENT_SCROLL_WHEEL => {
+            let fixed = unsafe {
+                CGEventGetIntegerValueField(event, CG_FIELD_SCROLL_FIXED_DELTA_AXIS_1)
+            };
+            let dy = if fixed != 0 {
+                fixed as f64 / 65_536.0
+            } else {
+                (unsafe { CGEventGetIntegerValueField(event, CG_FIELD_SCROLL_DELTA_AXIS_1) }) as f64
+            };
+            if dy != 0.0 {
+                let mut native = NativeEvent::simple("scrollDelta");
+                native.dy = Some(dy);
+                (context.sink)(native);
+            }
+            if context.linked.load(Ordering::Acquire) && !context.owner.load(Ordering::Acquire) {
+                return null_mut();
+            }
+        }
         CG_EVENT_LEFT_DOWN | CG_EVENT_LEFT_UP | CG_EVENT_RIGHT_DOWN | CG_EVENT_RIGHT_UP
         | CG_EVENT_OTHER_DOWN | CG_EVENT_OTHER_UP => {
             let button = match unsafe { CGEventGetIntegerValueField(event, CG_FIELD_MOUSE_BUTTON) }
@@ -769,6 +797,7 @@ impl Drop for CaptureRuntime {
 pub struct HostPlatform {
     hidden: bool,
     decoupled: bool,
+    scroll_remainder: f64,
     capture: Option<CaptureRuntime>,
 }
 unsafe impl Send for HostPlatform {}
@@ -777,6 +806,7 @@ impl HostPlatform {
         Self {
             hidden: false,
             decoupled: false,
+            scroll_remainder: 0.0,
             capture: None,
         }
     }
@@ -1058,6 +1088,25 @@ impl Platform for HostPlatform {
         }
         Ok(())
     }
+    fn synthesize_scroll(&mut self, dy: f64) -> Result<(), String> {
+        self.scroll_remainder += dy;
+        let whole = self.scroll_remainder.trunc();
+        if whole == 0.0 {
+            return Ok(());
+        }
+        self.scroll_remainder -= whole;
+        let amount = whole.clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+        let event = unsafe { CGEventCreateScrollWheelEvent(null(), 1, 1, amount) };
+        if event.is_null() {
+            return Err("CGEventCreateScrollWheelEvent failed".into());
+        }
+        unsafe {
+            CGEventSetIntegerValueField(event, CG_FIELD_SOURCE_USER_DATA, COMPUSYNC_SOURCE_TAG);
+            CGEventPost(0, event);
+            CFRelease(event)
+        }
+        Ok(())
+    }
     fn foreground_is_elevated(&self) -> Result<bool, String> {
         Ok(false)
     }
@@ -1078,7 +1127,7 @@ impl Platform for HostPlatform {
         });
         let user = Arc::into_raw(context.clone()) as usize;
         let (sender, receiver) = std::sync::mpsc::sync_channel::<Result<usize, String>>(1);
-        let thread=thread::Builder::new().name("compusync-mac-input".into()).spawn(move||unsafe{let mask=[CG_EVENT_LEFT_DOWN,CG_EVENT_LEFT_UP,CG_EVENT_RIGHT_DOWN,CG_EVENT_RIGHT_UP,CG_EVENT_MOUSE_MOVED,CG_EVENT_LEFT_DRAGGED,CG_EVENT_RIGHT_DRAGGED,CG_EVENT_KEY_DOWN,CG_EVENT_KEY_UP,CG_EVENT_FLAGS_CHANGED,CG_EVENT_OTHER_DOWN,CG_EVENT_OTHER_UP,CG_EVENT_OTHER_DRAGGED].iter().fold(0u64,|m,v|m|(1u64<<v));let tap=CGEventTapCreate(1,0,0,mask,Some(event_tap),user as *mut c_void);if tap.is_null(){let _=sender.send(Err("CGEventTapCreate failed; grant Accessibility and Input Monitoring permissions".into()));drop(Arc::from_raw(user as *const TapContext));return}*(*(user as *const TapContext)).tap.lock()=tap;let source=CFMachPortCreateRunLoopSource(null(),tap,0);let run_loop=CFRunLoopGetCurrent();CFRunLoopAddSource(run_loop,source,kCFRunLoopCommonModes);CGEventTapEnable(tap,true);let _=sender.send(Ok(run_loop as usize));CFRunLoopRun();CFRelease(source);CFRelease(tap);drop(Arc::from_raw(user as *const TapContext));}).map_err(|e|e.to_string())?;
+        let thread=thread::Builder::new().name("compusync-mac-input".into()).spawn(move||unsafe{let mask=[CG_EVENT_LEFT_DOWN,CG_EVENT_LEFT_UP,CG_EVENT_RIGHT_DOWN,CG_EVENT_RIGHT_UP,CG_EVENT_MOUSE_MOVED,CG_EVENT_LEFT_DRAGGED,CG_EVENT_RIGHT_DRAGGED,CG_EVENT_KEY_DOWN,CG_EVENT_KEY_UP,CG_EVENT_FLAGS_CHANGED,CG_EVENT_SCROLL_WHEEL,CG_EVENT_OTHER_DOWN,CG_EVENT_OTHER_UP,CG_EVENT_OTHER_DRAGGED].iter().fold(0u64,|m,v|m|(1u64<<v));let tap=CGEventTapCreate(1,0,0,mask,Some(event_tap),user as *mut c_void);if tap.is_null(){let _=sender.send(Err("CGEventTapCreate failed; grant Accessibility and Input Monitoring permissions".into()));drop(Arc::from_raw(user as *const TapContext));return}*(*(user as *const TapContext)).tap.lock()=tap;let source=CFMachPortCreateRunLoopSource(null(),tap,0);let run_loop=CFRunLoopGetCurrent();CFRunLoopAddSource(run_loop,source,kCFRunLoopCommonModes);CGEventTapEnable(tap,true);let _=sender.send(Ok(run_loop as usize));CFRunLoopRun();CFRelease(source);CFRelease(tap);drop(Arc::from_raw(user as *const TapContext));}).map_err(|e|e.to_string())?;
         let run_loop = receiver
             .recv_timeout(std::time::Duration::from_secs(2))
             .map_err(|_| "event tap thread did not start".to_string())??
@@ -1091,6 +1140,7 @@ impl Platform for HostPlatform {
         Ok(())
     }
     fn set_capture_mode(&mut self, linked: bool, owner: bool) {
+        self.scroll_remainder = 0.0;
         if let Some(runtime) = &self.capture {
             runtime.context.linked.store(linked, Ordering::Release);
             runtime.context.owner.store(owner, Ordering::Release)

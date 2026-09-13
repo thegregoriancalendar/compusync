@@ -55,6 +55,7 @@ const MOUSEEVENTF_MIDDLEDOWN: u32 = 0x0020;
 const MOUSEEVENTF_MIDDLEUP: u32 = 0x0040;
 const MOUSEEVENTF_XDOWN: u32 = 0x0080;
 const MOUSEEVENTF_XUP: u32 = 0x0100;
+const MOUSEEVENTF_WHEEL: u32 = 0x0800;
 const KEYEVENTF_KEYUP: u32 = 0x0002;
 const WH_KEYBOARD_LL: i32 = 13;
 const WH_MOUSE_LL: i32 = 14;
@@ -81,6 +82,7 @@ const RI_MOUSE_BUTTON_4_DOWN: u16 = 0x0040;
 const RI_MOUSE_BUTTON_4_UP: u16 = 0x0080;
 const RI_MOUSE_BUTTON_5_DOWN: u16 = 0x0100;
 const RI_MOUSE_BUTTON_5_UP: u16 = 0x0200;
+const RI_MOUSE_WHEEL: u16 = 0x0400;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -559,6 +561,19 @@ unsafe extern "system" fn window_proc(
                         // left-up must not make JS believe the held button was
                         // released before the hardware-up arrives.
                         if mouse.extra_information as usize != COMPUSYNC_EXTRA_INFO {
+                            if flags & RI_MOUSE_WHEEL != 0 {
+                                let wheel = ((mouse.buttons >> 16) as u16) as i16;
+                                if wheel != 0 {
+                                    let mut event = NativeEvent::simple("scrollDelta");
+                                    event.timestamp = event_time();
+                                    // Use abstract line units on the wire. One
+                                    // Windows detent (120) is conventionally three lines.
+                                    event.dy = Some(f64::from(wheel) / 40.0);
+                                    if let Some(context) = hook_context() {
+                                        (context.sink)(event);
+                                    }
+                                }
+                            }
                             for (flag, button, down) in [
                                 (RI_MOUSE_LEFT_BUTTON_DOWN, "left", true),
                                 (RI_MOUSE_LEFT_BUTTON_UP, "left", false),
@@ -654,7 +669,7 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: Wparam, lparam: Lparam) 
     if code == HC_ACTION
         && matches!(
             wparam as u32,
-            0x0201 | 0x0202 | 0x0204 | 0x0205 | 0x0207 | 0x0208 | 0x020B | 0x020C
+            0x0201 | 0x0202 | 0x0204 | 0x0205 | 0x0207 | 0x0208 | 0x020A | 0x020B | 0x020C
         )
     {
         let mouse = unsafe { &*(lparam as *const MouseHook) };
@@ -1029,6 +1044,32 @@ impl Platform for HostPlatform {
         };
         if unsafe { SendInput(1, &input, size_of::<Input>() as i32) } != 1 {
             Err(os_error("SendInput(keyboard)"))
+        } else {
+            Ok(())
+        }
+    }
+    fn synthesize_scroll(&mut self, dy: f64) -> Result<(), String> {
+        let wheel = (dy * 40.0)
+            .round()
+            .clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+        if wheel == 0 {
+            return Ok(());
+        }
+        let input = Input {
+            kind: INPUT_MOUSE,
+            data: InputData {
+                mouse: MouseInput {
+                    dx: 0,
+                    dy: 0,
+                    mouse_data: wheel as u32,
+                    flags: MOUSEEVENTF_WHEEL,
+                    time: 0,
+                    extra_info: COMPUSYNC_EXTRA_INFO,
+                },
+            },
+        };
+        if unsafe { SendInput(1, &input, size_of::<Input>() as i32) } != 1 {
+            Err(os_error("SendInput(scroll)"))
         } else {
             Ok(())
         }

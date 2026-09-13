@@ -19,6 +19,7 @@ const text = (value, maximum) => typeof value === 'string' && value.length <= ma
 const MESSAGE_POLICIES = Object.freeze({
   'cursor.delta': { reliable: false, ordered: false, priority: 'realtime' },
   'cursor.position': { reliable: false, ordered: false, priority: 'realtime' },
+  'scroll.delta': { reliable: false, ordered: false, priority: 'realtime' },
   'window.position': { reliable: false, ordered: false, priority: 'realtime' },
   'cursor.handoff': { reliable: true, ordered: true, priority: 'control' },
   'cursor.mode': { reliable: true, ordered: true, priority: 'control' },
@@ -116,6 +117,11 @@ function sanitizePeerMessage(value, options = {}) {
       if (finite(value.x) && finite(value.y) && finite(value.t)
         && Math.abs(value.x) <= MAX_COORDINATE && Math.abs(value.y) <= MAX_COORDINATE) {
         result = { type: value.type, x: value.x, y: value.y, t: value.t };
+      }
+      break;
+    case 'scroll.delta':
+      if (finite(value.dy) && value.dy !== 0 && Math.abs(value.dy) <= 1000) {
+        result = { type: value.type, dy: value.dy };
       }
       break;
     case 'cursor.handoff':
