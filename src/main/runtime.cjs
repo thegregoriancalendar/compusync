@@ -3,6 +3,7 @@
 const { EventEmitter } = require('node:events');
 const { CursorController } = require('./cursor.cjs');
 const { KeyboardRouter } = require('./keyboard.cjs');
+const { mapModifiers, mapKeyEvent } = require('./key-mapping.cjs');
 const { RecoveryWatchdog } = require('./watchdog.cjs');
 const { registerCursorHotkeys } = require('./hotkeys.cjs');
 const { sanitizePeerMessage, policyForMessage } = require('./messages.cjs');
@@ -88,6 +89,10 @@ class SharedInputRuntime extends EventEmitter {
     this.localLinkRequested = false;
     this.peerLinkRequested = false;
     this.windowController = null;
+    const inputPlatforms = () => ({
+      source: this.layouts?.[this.peerId]?.platform,
+      destination: this.layouts?.[this.machineId]?.platform || this.native.platformName || process.platform,
+    });
 
     const placements = derivePairPlacements(this.layouts, this.hostId, this.joinId, this.settings);
     const ownerPlacement = placements.find((placement) => placement.machineId === this.hostId) || placements[0];
@@ -101,6 +106,10 @@ class SharedInputRuntime extends EventEmitter {
       edgeResistanceVU: this.settings.edgeResistanceVU,
       linked: false,
       send: (message) => this.send(message),
+      mapRemoteModifiers: (modifiers) => {
+        const platforms = inputPlatforms();
+        return mapModifiers(modifiers, platforms.source, platforms.destination);
+      },
       onFailure: (reason, error) => {
         if ((this.native.platformName === 'darwin' || process.platform === 'darwin')
           && /input monitoring|event tap|accessibility/i.test(String(error?.message || error))) {
@@ -123,6 +132,10 @@ class SharedInputRuntime extends EventEmitter {
       cursor: this.cursor,
       native: this.native,
       send: (message) => this.send(message),
+      mapRemoteEvent: (message) => {
+        const platforms = inputPlatforms();
+        return mapKeyEvent(message, platforms.source, platforms.destination);
+      },
       notice: (message) => this.onNotice({
         id: 'elevated-window', kind: 'warning', title: 'Administrator window', message,
         dismissible: true,

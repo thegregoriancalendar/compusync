@@ -51,6 +51,8 @@ class CursorController extends EventEmitter {
     this.machineId = options.machineId;
     this.native = options.native || {};
     this.send = typeof options.send === 'function' ? options.send : () => false;
+    this.mapRemoteModifiers = typeof options.mapRemoteModifiers === 'function'
+      ? options.mapRemoteModifiers : (modifiers) => modifiers;
     this.onFailure = typeof options.onFailure === 'function' ? options.onFailure : null;
     this.now = typeof options.now === 'function' ? options.now : Date.now;
     this.frameMs = finite(options.frameMs) && options.frameMs > 0 ? options.frameMs : DEFAULT_FRAME_MS;
@@ -297,7 +299,7 @@ class CursorController extends EventEmitter {
       this.edgePressure = null;
       if (!this.#applyPhysicalOwnership()) return false;
       const desiredSynthetic = this.remoteButtons & ~this.localButtons;
-      if (!this.#nativeCall('assumeInputState', desiredSynthetic, this.modifiers)) return false;
+      if (!this.#nativeCall('assumeInputState', desiredSynthetic, this.#mappedRemoteModifiers(this.modifiers))) return false;
       this.syntheticButtons = desiredSynthetic;
       this.emit('ownership', { ownerMachineId: target.machineId, reason: 'hotkey', virtualCursor: { ...position }, buttons, modifiers: this.modifiers });
     }
@@ -425,7 +427,7 @@ class CursorController extends EventEmitter {
         || !this.#nativeCall('warpCursor', toLocal(this.virtualCursor, target))
         || !this.#nativeCall('showCursor')
         || !this.#nativeCall('parkCursor')
-        || !this.#nativeCall('assumeInputState', desiredSynthetic, message.modifiers)) return false;
+        || !this.#nativeCall('assumeInputState', desiredSynthetic, this.#mappedRemoteModifiers(message.modifiers))) return false;
       this.syntheticButtons = desiredSynthetic;
     } else {
       if (!this.#nativeCall('releaseInputState')
@@ -440,6 +442,13 @@ class CursorController extends EventEmitter {
       modifiers: message.modifiers,
     });
     return true;
+  }
+
+  #mappedRemoteModifiers(modifiers) {
+    try {
+      const mapped = this.mapRemoteModifiers(modifiers);
+      return Number.isSafeInteger(mapped) && mapped >= 0 && mapped <= 65535 ? mapped : modifiers;
+    } catch { return modifiers; }
   }
 
   #flushOutboundDelta() {

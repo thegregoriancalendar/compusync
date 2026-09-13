@@ -9,6 +9,8 @@ class KeyboardRouter extends EventEmitter {
     this.cursor = options.cursor;
     this.native = options.native || {};
     this.send = typeof options.send === 'function' ? options.send : () => false;
+    this.mapRemoteEvent = typeof options.mapRemoteEvent === 'function'
+      ? options.mapRemoteEvent : (message) => message;
     this.notice = typeof options.notice === 'function' ? options.notice : () => {};
     this.elevationNoticeShown = false;
     this.remotePressed = new Set();
@@ -27,16 +29,21 @@ class KeyboardRouter extends EventEmitter {
       || !Number.isSafeInteger(message.code) || message.code < 0 || message.code > 65535
       || typeof message.down !== 'boolean' || !Number.isSafeInteger(message.modifiers)
       || message.modifiers < 0 || message.modifiers > 65535) return false;
-    if (message.down) this.remotePressed.add(message.code);
-    else this.remotePressed.delete(message.code);
+    const mapped = this.mapRemoteEvent(message);
+    if (!mapped || !Number.isSafeInteger(mapped.code) || mapped.code < 0 || mapped.code > 65535
+      || !Number.isSafeInteger(mapped.modifiers) || mapped.modifiers < 0 || mapped.modifiers > 65535) return false;
+    if (mapped.down) this.remotePressed.add(mapped.code);
+    else this.remotePressed.delete(mapped.code);
+    this.cursor.setModifiers?.(message.modifiers);
     this.#checkElevation();
-    this.native.synthesizeKey?.(message.code, message.down, message.modifiers);
+    this.native.synthesizeKey?.(mapped.code, mapped.down, mapped.modifiers);
     return true;
   }
 
   releaseAll() {
     for (const code of this.remotePressed) this.native.synthesizeKey?.(code, false, 0);
     this.remotePressed.clear();
+    this.cursor.setModifiers?.(0);
     this.native.releaseInputState?.();
   }
 
