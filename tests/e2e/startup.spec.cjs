@@ -16,6 +16,8 @@ async function setupWindow(app) {
   await expect.poll(() => app.windows().some((page) => page.url().endsWith('settings.html')), { timeout: 15_000 }).toBe(true);
   const page = app.windows().find((window) => window.url().endsWith('settings.html'));
   await expect(page.locator('#invitation')).toHaveValue(/^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/);
+  await expect(page.locator('#update-status')).toContainText('installed Windows and macOS apps');
+  await expect(page.locator('#update-check')).toBeDisabled();
   await expect.poll(() => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find((window) => window.webContents.getURL().endsWith('settings.html'))?.isVisible())).toBe(true);
   return page;
 }
@@ -75,6 +77,36 @@ test('background launch stays hidden until the user activates it', async () => {
     expect(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().some((window) => window.isVisible()))).toBe(false);
     await app.evaluate(({ app: application }) => application.emit('activate'));
     await setupWindow(app);
+  } finally {
+    if (app) await app.close();
+    fs.rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+test('an unreadable saved secret preserves the rest of the profile', async () => {
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'compusync-secret-recovery-'));
+  const settingsPath = path.join(profile, 'settings.json');
+  const id = '18b84eb8-0c6e-47da-94d8-90db93fcedaa';
+  let app;
+  try {
+    fs.writeFileSync(settingsPath, JSON.stringify({
+      id,
+      name: 'Preserved laptop',
+      role: 'host',
+      port: 43187,
+      autoLaunch: true,
+      encryptedSecret: 'AA==',
+    }));
+    app = await electron.launch({ args: [path.resolve('.')], env: environment(profile) });
+    await setupWindow(app);
+    await app.close();
+    app = null;
+
+    const saved = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    expect(saved.id).toBe(id);
+    expect(saved.name).toBe('Preserved laptop');
+    expect(saved.autoLaunch).toBe(true);
+    expect(fs.readdirSync(profile).filter((entry) => entry.endsWith('.tmp'))).toEqual([]);
   } finally {
     if (app) await app.close();
     fs.rmSync(profile, { recursive: true, force: true });

@@ -1,6 +1,7 @@
 name: Desktop checks and builds
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
     inputs:
@@ -48,5 +49,7 @@ jobs:
           name: compusync-${{ matrix.os }}
           path: |
             dist/*.exe
+            dist/*.blockmap
             dist/*.dmg
             dist/*.zip
+            dist/latest*.yml

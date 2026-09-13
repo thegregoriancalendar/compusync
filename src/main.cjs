@@ -14,7 +14,9 @@ const { SharedInputRuntime } = require('./main/runtime.cjs');
 const { WindowHandoffRuntime } = require('./main/window-runtime.cjs');
 const { SeamOverlay } = require('./main/seam-overlay.cjs');
 const { ChromeAdapterRuntime } = require('./main/adapters/chrome/runtime.cjs');
+const { createUpdateService } = require('./main/updates.cjs');
 const { createNativeAdapter } = require('../native/index.cjs');
+const { autoUpdater } = require('electron-updater');
 
 if (process.env.COMPUSYNC_PROFILE) {
   const profile = path.resolve(process.env.COMPUSYNC_PROFILE);
@@ -25,7 +27,7 @@ app.setName('CompuSync');
 const hasLock = app.requestSingleInstanceLock();
 if (!hasLock) app.quit();
 
-let settings, tray, sync, inputRuntime, windowRuntime, seamOverlay, nativeInput, config;
+let settings, tray, sync, inputRuntime, windowRuntime, seamOverlay, nativeInput, updateService, config;
 let quitting = false;
 let changingSession = false;
 let backgroundLaunch = false;
@@ -55,8 +57,18 @@ function readConfig() {
   let saved = {};
   try {
     saved = JSON.parse(fs.readFileSync(configPath(), 'utf8'));
-    if (saved.encryptedSecret) saved.secret = safeStorage.decryptString(Buffer.from(saved.encryptedSecret, 'base64'));
   } catch { saved = {}; }
+  if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {};
+  if (saved.encryptedSecret) {
+    try {
+      saved.secret = safeStorage.decryptString(Buffer.from(saved.encryptedSecret, 'base64'));
+    } catch (error) {
+      // A keychain/key-store reset can make only the secret unreadable. Keep
+      // identity and preferences instead of silently resetting the profile.
+      console.warn('CompuSync could not decrypt the saved pairing secret:', error?.message || error);
+      delete saved.secret;
+    }
+  }
   return {
     id: saved.id || randomUUID(), name: saved.name || os.hostname(),
     role: saved.role === 'join' ? 'join' : 'host', host: saved.host || '',
@@ -77,7 +89,16 @@ function saveConfig() {
     saved.encryptedSecret = safeStorage.encryptString(config.secret).toString('base64');
     delete saved.secret;
   }
-  fs.writeFileSync(configPath(), JSON.stringify(saved, null, 2), { mode: 0o600 });
+  const destination = configPath();
+  const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(temporary, JSON.stringify(saved, null, 2), { mode: 0o600 });
+    fs.renameSync(temporary, destination);
+  } finally {
+    try { fs.unlinkSync(temporary); } catch (error) {
+      if (error?.code !== 'ENOENT') console.warn('CompuSync could not remove a temporary settings file:', error?.message || error);
+    }
+  }
 }
 
 function addresses() {
@@ -139,6 +160,7 @@ function details() {
     cursorLinkReady: Boolean(inputRuntime?.native?.available
       && inputRuntime.peerConnected && inputRuntime.cursor.placements.length === 2),
     notices: [...notices.values()].filter((notice) => !config.dismissedNotices.includes(notice.id)),
+    update: updateService?.status() || null,
     packaged: app.isPackaged,
     status: sync?.status() || { role: config.role, phase: 'starting', peers: [] },
     invitation: config.role === 'host' ? sync?.invitation() : null,
@@ -275,8 +297,9 @@ function ensureInputRuntime() {
   const peer = sync.members.find((member) => member.id !== config.id);
   if (!peer) return null;
   const hostId = config.role === 'host' ? config.id : peer.id;
+  let startingInputRuntime = null;
   try {
-    inputRuntime = new SharedInputRuntime({
+    startingInputRuntime = new SharedInputRuntime({
       session: sync,
       native: nativeInput,
       machineId: config.id,
@@ -306,6 +329,7 @@ function ensureInputRuntime() {
         refreshStatus();
       },
     });
+    inputRuntime = startingInputRuntime;
     inputRuntime.start();
     const chrome = new ChromeAdapterRuntime({
       native: nativeInput,
@@ -352,6 +376,7 @@ function ensureInputRuntime() {
   } catch (error) {
     void windowRuntime?.stop('runtime-startup-failed');
     windowRuntime = null;
+    try { startingInputRuntime?.stop('runtime-startup-failed'); } catch { /* Continue fail-closed recovery below. */ }
     nativeInput?.emergencyRecover?.('runtime startup failed');
     inputRuntime = null;
     config.cursorSettings.linked = false;
@@ -464,6 +489,10 @@ function setupIpc() {
         refreshStatus();
       } else if (command === 'cursor-toggle-ownership') {
         if (!inputRuntime?.cursor.toggleOwnership()) throw new Error('Link both cursors before changing ownership.');
+      } else if (command === 'update-check') {
+        if (!await updateService?.check()) throw new Error('Could not check for updates right now.');
+      } else if (command === 'update-install') {
+        if (!updateService?.install()) throw new Error('No downloaded update is ready to install.');
       } else if (command === 'dismiss-notice') {
         if (!dismissNotice(data?.id)) throw new Error('Unknown notice.');
       } else if (command === 'notice-action') {
@@ -489,6 +518,7 @@ app.on('before-quit', (event) => {
   if (quitting) return;
   event.preventDefault();
   quitting = true;
+  updateService?.stop();
   clearTimeout(layoutTimer);
   cancelOwnedDrag();
   stopInputRuntime('process-exit');
@@ -539,6 +569,8 @@ if (hasLock) app.whenReady().then(async () => {
   screen.on('display-removed', handleDisplayChange);
   screen.on('display-metrics-changed', handleDisplayChange);
   await startSession();
+  updateService = createUpdateService({ app, updater: autoUpdater, addNotice, onStatus: refreshStatus });
+  updateService.start();
   if (!backgroundLaunch || pendingActivation) activateApp();
   else if (sync.phase === 'error') showSettings();
 }).catch((error) => { console.error(error); app.quit(); });

@@ -86,6 +86,14 @@ function render(next) {
   $('auto-launch').checked = next.autoLaunch;
   $('auto-launch').disabled = !next.packaged;
   $('launch-note').hidden = next.packaged;
+  const update = next.update || {
+    phase: 'disabled', currentVersion: '', canCheck: false, canRestart: false,
+    message: 'Automatic updates are available in the installed Windows and macOS apps.',
+  };
+  $('update-status').textContent = update.message;
+  $('update-check').disabled = !update.canCheck;
+  $('update-install').hidden = !update.canRestart;
+  $('app-version').textContent = update.currentVersion ? `Current version ${update.currentVersion}` : '';
   $('screen-side').value = cursor.screenSide;
   setValueUnlessEditing('vertical-offset', cursor.verticalOffsetVU);
   setValueUnlessEditing('acceleration-base', cursor.acceleration.base);
@@ -182,6 +190,8 @@ for (const id of [
 ]) $(id).addEventListener('change', savePreferences);
 $('cursor-mode').addEventListener('click', () => command(details?.cursorSettings?.linked === false ? 'cursor-link' : 'cursor-unlink'));
 $('toggle-ownership').addEventListener('click', () => command('cursor-toggle-ownership'));
+$('update-check').addEventListener('click', () => command('update-check'));
+$('update-install').addEventListener('click', () => command('update-install'));
 if (/Mac/.test(navigator.platform)) for (const id of ['shortcut', 'unlink-shortcut', 'ownership-shortcut']) $(id).textContent = '⌘';
 api.onDetails(render);
 api.bootstrap().then(render);

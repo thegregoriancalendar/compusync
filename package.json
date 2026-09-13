@@ -17,11 +17,12 @@
     "native:smoke": "node scripts/smoke-native.cjs",
     "native:probe:crash": "node scripts/probe-recovery-guard.cjs",
     "build": "npm run native:build && npm run native:smoke && electron-builder --dir",
-    "dist:win": "npm run native:build && npm run native:smoke && electron-builder --win portable --publish never",
+    "dist:win": "npm run native:build && npm run native:smoke && electron-builder --win nsis --publish never",
     "dist:mac": "npm run native:build && npm run native:smoke && electron-builder --mac dmg zip --publish never",
     "demo": "node scripts/demo.cjs"
   },
   "dependencies": {
+    "electron-updater": "6.8.9",
     "ws": "8.21.3"
   },
   "devDependencies": {
@@ -32,7 +33,17 @@
   "build": {
     "appId": "app.compusync.desktop",
     "productName": "CompuSync",
-    "directories": { "output": "dist" },
+    "directories": {
+      "output": "dist"
+    },
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "thegregoriancalendar",
+        "repo": "compusync-releases"
+      }
+    ],
     "files": [
       "src/**/*",
       "package.json",
@@ -40,7 +51,10 @@
       "native/compusync-native.*-${arch}.node"
     ],
     "asar": true,
-    "asarUnpack": ["native/*.node", "src/main/adapters/chrome/extension/**/*"],
+    "asarUnpack": [
+      "native/*.node",
+      "src/main/adapters/chrome/extension/**/*"
+    ],
     "extraResources": [
       {
         "from": "native",
@@ -52,10 +66,27 @@
         ]
       }
     ],
-    "win": { "target": ["portable"], "signAndEditExecutable": false },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "deleteAppDataOnUninstall": false
+    },
     "mac": {
-      "target": ["dmg", "zip"],
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
       "category": "public.app-category.utilities",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
       "extendInfo": {
         "NSLocalNetworkUsageDescription": "CompuSync connects to your other laptop to link cursors and hand off Chrome windows.",
         "NSAccessibilityUsageDescription": "CompuSync needs Accessibility access to move the shared cursor and position Chrome windows during handoff.",

@@ -14,11 +14,12 @@ The three non-negotiable invariants are enforced independently: cursor deltas st
 
 ### V3 verification
 
-- `npm run check`: passed for 75 JavaScript files.
-- `npm test`: 178/178 tests passed, including the required network-loss, Chrome-force-quit, daemon/panic, suspend/wake recovery matrix, join-side layout identity, and orderly restart recovery.
+- `npm run check`: passed for 80 JavaScript files.
+- `npm test`: 181/181 tests passed, including the required network-loss, Chrome-force-quit, daemon/panic, suspend/wake recovery matrix, join-side layout identity, orderly restart recovery, and updater lifecycle.
 - `npm run test:native`: 9 Rust addon tests, 1 recovery-guard test, and 3 Node adapter tests passed.
-- `npm run test:e2e`: 3/3 real-Electron pairing and startup/profile scenarios passed. The retired v1 shared-surface and workspace UI suites are no longer part of the active E2E contract.
+- `npm run test:e2e`: 4/4 real-Electron pairing and startup/profile scenarios passed, including recovery from an unreadable encrypted pairing secret. The retired v1 shared-surface and workspace UI suites are no longer part of the active E2E contract.
 - `npm run build`: rebuilt the Windows x64 native addon and recovery guard, loaded both under Node and Electron, and produced `dist/win-unpacked`. The packaged fixed-ID Chrome bridge was verified under `app.asar.unpacked`.
+- `npm run dist:win`: produced and validated the NSIS installer, update blockmap, and `latest.yml`; the packaged app contains the public binary-release feed configuration.
 - A disposable-profile probe against installed Chrome 152 verified loopback CDP extension loading, worker activation, exact CDP target-to-tab identity, tab query/update/move, and fully offscreen window positioning without an extra tab or warning surface.
 - The Windows crash-recovery probe and native move-loop guard exercise hard termination and the tagged synthetic-button-up path. macOS uses AX moved/resized notifications rather than a polling loop.
 

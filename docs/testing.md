@@ -120,11 +120,12 @@ For every case, verify a surviving Chrome copy returns fully on-screen, overlays
 
 ## Packaged applications
 
-1. Build and launch the Windows portable executable. Quit any older tray instance first so Electron's single-instance lock does not redirect to stale code.
-2. Build and launch the macOS artifact matching the Mac architecture. Exercise the expected unsigned-development Gatekeeper flow; production distribution requires signing and notarization.
+1. Build, install, and launch the Windows NSIS installer. Quit any older tray instance first so Electron's single-instance lock does not redirect to stale code.
+2. Build and launch the macOS DMG matching the Mac architecture. Exercise the expected unsigned-development Gatekeeper flow; production distribution and automatic updates require signing and notarization.
 3. Verify local-network and macOS permission prompts, tray/menu controls, settings activation, cursor link/unlink, ownership transfer, and optional start at sign in.
 4. Repeat cursor crossings, Chrome round trips, reversal, and one failure-recovery case from packaged builds.
 5. Repeat the retired-surface regression from packaged builds. No obsolete window or command may return because of packaging, saved state, or an older profile.
+6. Install an older signed release, publish a newer version, and verify the update downloads in the background and installs after quitting and reopening CompuSync. Repeat on both platforms.
 
 ## Completion record
 

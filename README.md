@@ -8,6 +8,13 @@ The old shared surface, sandbox/workspace, and bundled editor are retired. Compu
 
 CompuSync must run on both computers on the same local network. A source build requires Node.js 22.12 or newer, the stable Rust toolchain, and platform compiler tools: Xcode Command Line Tools on macOS or Visual Studio Build Tools with the C++ workload on Windows.
 
+For normal use, download the current installer from [CompuSync Releases](https://github.com/thegregoriancalendar/compusync-releases/releases/latest):
+
+- Windows: run `CompuSync-Setup-<version>-x64.exe`.
+- macOS: open the `.dmg` matching the Mac architecture and drag CompuSync to Applications.
+
+Installed builds check GitHub for stable updates in the background. An available update downloads automatically and installs after CompuSync is quit and reopened.
+
 Install and build independently on each computer:
 
 ```sh
@@ -68,7 +75,7 @@ CompuSync is not remote desktop, a virtual machine, file synchronization, or app
 ## Build packages
 
 ```sh
-# Windows portable executable in dist/
+# Windows NSIS installer in dist/
 npm run dist:win
 
 # macOS DMG and ZIP for the current architecture; run on a Mac
@@ -82,7 +89,7 @@ npm run dist:mac -- --x64
 npm run build
 ```
 
-Development packages are unsigned. Build and sign macOS releases on a Mac. A Windows executable cannot run on macOS.
+Local development packages are unsigned. Production macOS releases must be signed and notarized for installation and automatic updates; production Windows releases should be signed to avoid SmartScreen warnings. See [the release guide](docs/releases.md).
 
 ## Develop and verify
 
