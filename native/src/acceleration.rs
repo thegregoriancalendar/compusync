@@ -14,7 +14,7 @@ impl Default for AccelerationConfig {
         Self {
             base: 1.0,
             threshold: 0.5,
-            slope: 0.04,
+            slope: 0.015,
         }
     }
 }
@@ -42,10 +42,24 @@ pub struct AppliedDelta {
     pub gain: f64,
 }
 
+const MAX_RAW_DELTA: f64 = 8_192.0;
+const MAX_APPLIED_DELTA: f64 = 512.0;
+
+fn limit_vector(dx: f64, dy: f64, limit: f64) -> (f64, f64) {
+    let magnitude = dx.hypot(dy);
+    if magnitude <= limit {
+        (dx, dy)
+    } else {
+        let scale = limit / magnitude;
+        (dx * scale, dy * scale)
+    }
+}
+
 pub fn apply(config: AccelerationConfig, dx: f64, dy: f64, dt_ms: f64) -> AppliedDelta {
-    if !dx.is_finite() || !dy.is_finite() {
+    if !dx.is_finite() || !dy.is_finite() || !dt_ms.is_finite() {
         return AppliedDelta::default();
     }
+    let (dx, dy) = limit_vector(dx, dy, MAX_RAW_DELTA);
     let dt = dt_ms.clamp(0.1, 250.0);
     let speed = dx.hypot(dy) / dt;
     let gain = if speed < config.threshold {
@@ -54,11 +68,8 @@ pub fn apply(config: AccelerationConfig, dx: f64, dy: f64, dt_ms: f64) -> Applie
         config.base + (speed - config.threshold) * config.slope
     }
     .clamp(0.0, 100.0);
-    AppliedDelta {
-        dx: dx * gain,
-        dy: dy * gain,
-        gain,
-    }
+    let (dx, dy) = limit_vector(dx * gain, dy * gain, MAX_APPLIED_DELTA);
+    AppliedDelta { dx, dy, gain }
 }
 
 #[cfg(test)]
@@ -94,5 +105,14 @@ mod tests {
         }
         .validate()
         .is_err());
+        let bad_time = apply(AccelerationConfig::default(), 2.0, 1.0, f64::NAN);
+        assert_eq!((bad_time.dx, bad_time.dy), (0.0, 0.0));
+    }
+
+    #[test]
+    fn one_corrupt_sample_cannot_cross_an_entire_display() {
+        let d = apply(AccelerationConfig::default(), 100_000.0, -50_000.0, 0.1);
+        assert!(d.dx.hypot(d.dy) <= MAX_APPLIED_DELTA + f64::EPSILON);
+        assert!(d.dx > 0.0 && d.dy < 0.0);
     }
 }

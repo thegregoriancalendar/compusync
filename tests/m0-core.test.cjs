@@ -23,7 +23,12 @@ const {
   sanitizeWindowDescriptor,
   policyForMessage,
 } = require('../src/main/messages.cjs');
-const { CursorController, accelerateDelta } = require('../src/main/cursor.cjs');
+const {
+  CursorController,
+  DEFAULT_ACCELERATION,
+  MAX_APPLIED_DELTA,
+  accelerateDelta,
+} = require('../src/main/cursor.cjs');
 const { KeyboardRouter } = require('../src/main/keyboard.cjs');
 const { RecoveryWatchdog } = require('../src/main/watchdog.cjs');
 const { routePeerInput, bindPeerInput } = require('../src/main/input-runtime.cjs');
@@ -177,8 +182,28 @@ test('window descriptors reject unsafe schemes, excessive tabs and malformed his
 });
 
 test('shared acceleration uses the specified two-segment curve', () => {
+  assert.equal(DEFAULT_ACCELERATION.slope, 0.015);
   assert.deepEqual(accelerateDelta(3, 4, 10, { base: 2, threshold: 1, slope: .5 }), { dx: 6, dy: 8, gain: 2 });
   assert.deepEqual(accelerateDelta(6, 8, 5, { base: 1, threshold: 1, slope: .5 }), { dx: 9, dy: 12, gain: 1.5 });
+  const guarded = accelerateDelta(100_000, -50_000, 0.1);
+  assert.ok(Math.hypot(guarded.dx, guarded.dy) <= MAX_APPLIED_DELTA + 1e-9);
+});
+
+test('native acceleration is configured before linking starts capture', () => {
+  const calls = [];
+  const native = {
+    configureAcceleration: () => calls.push('configure'),
+    setLinked: () => calls.push('linked'),
+    startCursorCapture: () => calls.push('capture'),
+  };
+  const cursor = new CursorController({
+    machineId: 'mac', placements: [placement('mac', 0, 0, 100, 100)],
+    linked: true, native,
+  });
+  cursor.start();
+  cursor.stop();
+  assert.ok(calls.indexOf('configure') < calls.indexOf('linked'));
+  assert.ok(calls.indexOf('linked') < calls.indexOf('capture'));
 });
 
 test('linking preserves the owner pointer and keeps native motion managed', () => {

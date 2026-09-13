@@ -79,6 +79,21 @@ fn monotonic_ms() -> u64 {
     PROCESS_STARTED.elapsed().as_millis().min(u64::MAX as u128) as u64
 }
 
+fn event_delta_interval_ms(
+    previous_timestamp: &mut Option<f64>,
+    timestamp: f64,
+    arrival_interval_ms: f64,
+) -> f64 {
+    let event_interval = (*previous_timestamp).and_then(|previous| {
+        let interval = timestamp - previous;
+        (timestamp.is_finite() && interval > 0.0 && interval <= 250.0).then_some(interval)
+    });
+    if timestamp.is_finite() {
+        *previous_timestamp = Some(timestamp);
+    }
+    event_interval.unwrap_or(arrival_interval_ms)
+}
+
 #[napi(object)]
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 pub struct Point {
@@ -460,7 +475,7 @@ impl NativeSubstrate {
     pub fn start_capture(&self) -> Result<()> {
         let events = self.inner.events.clone();
         let config = self.inner.acceleration.clone();
-        let last_delta = Arc::new(Mutex::new(Instant::now()));
+        let delta_clock = Arc::new(Mutex::new((Instant::now(), None)));
         let weak_inner = Arc::downgrade(&self.inner);
         let sink: EventSink = Arc::new(move |mut event| {
             if event.kind == "unlinkHotkey" {
@@ -472,9 +487,10 @@ impl NativeSubstrate {
             }
             if event.kind == "cursorDelta" {
                 let now = Instant::now();
-                let mut previous = last_delta.lock();
-                let dt = now.duration_since(*previous).as_secs_f64() * 1000.0;
-                *previous = now;
+                let mut clock = delta_clock.lock();
+                let arrival_dt = now.duration_since(clock.0).as_secs_f64() * 1000.0;
+                clock.0 = now;
+                let dt = event_delta_interval_ms(&mut clock.1, event.timestamp, arrival_dt);
                 let applied = accelerate(
                     *config.lock(),
                     event.dx.unwrap_or(0.0),
@@ -866,7 +882,7 @@ pub fn platform_name() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{held_buttons, held_modifier_codes};
+    use super::{event_delta_interval_ms, held_buttons, held_modifier_codes};
 
     #[test]
     fn every_input_release_selects_only_synthetic_holds() {
@@ -877,5 +893,17 @@ mod tests {
             Vec::<u32>::new()
         );
         assert_eq!(held_modifier_codes(1).collect::<Vec<_>>(), [0xE1, 0xE5]);
+    }
+
+
+    #[test]
+    fn source_event_cadence_wins_over_bursty_callback_delivery() {
+        let mut previous = None;
+        assert_eq!(event_delta_interval_ms(&mut previous, 1_000.0, 0.1), 0.1);
+        assert_eq!(event_delta_interval_ms(&mut previous, 1_008.0, 0.1), 8.0);
+        assert_eq!(event_delta_interval_ms(&mut previous, 1_016.0, 0.1), 8.0);
+        // Duplicate or wrapped platform timestamps safely use arrival cadence.
+        assert_eq!(event_delta_interval_ms(&mut previous, 1_016.0, 2.0), 2.0);
+        assert_eq!(event_delta_interval_ms(&mut previous, 2.0, 3.0), 3.0);
     }
 }

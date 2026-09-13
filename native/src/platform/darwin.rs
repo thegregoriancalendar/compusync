@@ -42,8 +42,11 @@ const CG_EVENT_OTHER_DRAGGED: u32 = 27;
 const CG_EVENT_TAP_DISABLED_TIMEOUT: u32 = 0xFFFF_FFFE;
 const CG_EVENT_TAP_DISABLED_USER: u32 = 0xFFFF_FFFF;
 const CG_FIELD_MOUSE_BUTTON: u32 = 3;
-const CG_FIELD_MOUSE_DELTA_X: u32 = 4;
-const CG_FIELD_MOUSE_DELTA_Y: u32 = 5;
+// Unlike kCGMouseEventDeltaX/Y, these fields contain raw device movement and
+// are not contaminated by CoreGraphics cursor acceleration or our own warps.
+// They have been public CGEventField values since macOS 10.15.1.
+const CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_X: u32 = 170;
+const CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_Y: u32 = 171;
 const CG_FIELD_KEYCODE: u32 = 9;
 const CG_FIELD_SOURCE_USER_DATA: u32 = 42;
 const COMPUSYNC_SOURCE_TAG: i64 = 0x4353_594E;
@@ -149,6 +152,7 @@ unsafe extern "C" {
     fn CGWarpMouseCursorPosition(point: CgPoint) -> i32;
     fn CGEventCreate(source: CfType) -> CgEvent;
     fn CGEventGetLocation(event: CgEvent) -> CgPoint;
+    fn CGEventGetTimestamp(event: CgEvent) -> u64;
     fn CGEventGetIntegerValueField(event: CgEvent, field: u32) -> i64;
     fn CGEventSetIntegerValueField(event: CgEvent, field: u32, value: i64);
     fn CGEventGetFlags(event: CgEvent) -> u64;
@@ -638,14 +642,17 @@ unsafe fn event_tap_inner(
         | CG_EVENT_RIGHT_DRAGGED
         | CG_EVENT_OTHER_DRAGGED => {
             let mut native = NativeEvent::simple("cursorDelta");
-            native.dx =
-                Some(unsafe { CGEventGetIntegerValueField(event, CG_FIELD_MOUSE_DELTA_X) } as f64);
-            native.dy =
-                Some(unsafe { CGEventGetIntegerValueField(event, CG_FIELD_MOUSE_DELTA_Y) } as f64);
+            native.timestamp = unsafe { CGEventGetTimestamp(event) } as f64 / 1_000_000.0;
+            native.dx = Some(unsafe {
+                CGEventGetIntegerValueField(event, CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_X)
+            } as f64);
+            native.dy = Some(unsafe {
+                CGEventGetIntegerValueField(event, CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_Y)
+            } as f64);
             (context.sink)(native);
-            // Forward the delta to the shared owner, but do not also move the
-            // non-owner Mac cursor. CGAssociate is foreground-scoped and is
-            // not a sufficient barrier while Chrome has focus.
+            // Forward the raw delta to the shared owner, but do not also move
+            // the non-owner Mac cursor. Owner motion continues to applications
+            // normally so native hover and drag behavior remain intact.
             if suppress_for_non_owner(
                 context.linked.load(Ordering::Acquire),
                 context.owner.load(Ordering::Acquire),
@@ -1109,7 +1116,10 @@ impl Drop for HostPlatform {
 
 #[cfg(test)]
 mod tests {
-    use super::{activate_drag_watch, suppress_for_non_owner, take_run_loop, CfRunLoop};
+    use super::{
+        activate_drag_watch, suppress_for_non_owner, take_run_loop, CfRunLoop,
+        CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_X, CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_Y,
+    };
 
     #[test]
     fn capture_run_loop_stop_target_is_consumed_once() {
@@ -1129,6 +1139,12 @@ mod tests {
         assert!(activate_drag_watch(true, &mut active));
         assert!(active);
         assert!(!activate_drag_watch(true, &mut active));
+    }
+
+    #[test]
+    fn raw_cursor_capture_uses_unaccelerated_core_graphics_fields() {
+        assert_eq!(CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_X, 170);
+        assert_eq!(CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_Y, 171);
     }
 
     #[test]

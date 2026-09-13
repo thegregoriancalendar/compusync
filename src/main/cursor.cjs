@@ -12,8 +12,10 @@ const {
   crossingTarget,
 } = require('./virtualspace.cjs');
 
-const DEFAULT_ACCELERATION = Object.freeze({ base: 1, threshold: .5, slope: .04 });
+const DEFAULT_ACCELERATION = Object.freeze({ base: 1, threshold: .5, slope: .015 });
 const DEFAULT_FRAME_MS = 1000 / 60;
+const MAX_RAW_DELTA = 8192;
+const MAX_APPLIED_DELTA = 512;
 // Leaves headroom for 60Hz authoritative positions and heartbeats below the
 // Session control-channel traffic budget while remaining well above frame rate.
 const MAX_DELTA_RATE_HZ = 200;
@@ -40,12 +42,18 @@ function normalizeAcceleration(value = {}) {
 
 function accelerateDelta(dx, dy, dt, curve = DEFAULT_ACCELERATION) {
   if (!finite(dx) || !finite(dy) || !finite(dt)) throw new TypeError('Invalid cursor delta.');
+  const rawMagnitude = Math.hypot(dx, dy);
+  const rawScale = rawMagnitude > MAX_RAW_DELTA ? MAX_RAW_DELTA / rawMagnitude : 1;
+  dx *= rawScale;
+  dy *= rawScale;
   const elapsed = Math.max(.1, dt);
   const speed = Math.hypot(dx, dy) / elapsed;
   const gain = speed < curve.threshold
     ? curve.base
     : curve.base + (speed - curve.threshold) * curve.slope;
-  return { dx: dx * gain, dy: dy * gain, gain };
+  const appliedMagnitude = Math.hypot(dx * gain, dy * gain);
+  const scale = appliedMagnitude > MAX_APPLIED_DELTA ? MAX_APPLIED_DELTA / appliedMagnitude : 1;
+  return { dx: dx * gain * scale, dy: dy * gain * scale, gain };
 }
 
 class CursorController extends EventEmitter {
@@ -123,6 +131,9 @@ class CursorController extends EventEmitter {
   start() {
     if (this.started) return;
     this.started = true;
+    // Configure the curve before setLinked starts the native event tap. This
+    // prevents the first trackpad sample from using a stale/default curve.
+    if (this.linked && !this.#nativeCall('configureAcceleration', this.config.acceleration)) return;
     if (!this.#nativeCall('setLinked', this.linked)) return;
     if (this.linked) this.#enableCapture();
     this.#applyPhysicalOwnership();
@@ -174,6 +185,7 @@ class CursorController extends EventEmitter {
     // Initializing from the layout center makes the cursor visibly jump and
     // fight the first physical deltas while the peer handshake completes.
     if (next && this.isOwner() && !this.#sampleOwnerPosition()) return false;
+    if (next && !this.#nativeCall('configureAcceleration', this.config.acceleration)) return false;
     this.linked = next;
     if (!this.#nativeCall('setLinked', next)) return false;
     this.edgePressure = null;
@@ -315,7 +327,6 @@ class CursorController extends EventEmitter {
 
   #enableCapture() {
     if (!this.started) return;
-    if (!this.#nativeCall('configureAcceleration', this.config.acceleration)) return;
     this.#nativeCall('startCursorCapture', {
       // Native capture owns the shared acceleration curve on the input hot
       // path. Mark its output so JS never applies the curve a second time.
@@ -597,6 +608,8 @@ module.exports = {
   DEFAULT_FRAME_MS,
   MAX_DELTA_RATE_HZ,
   DELTA_SEND_INTERVAL_MS,
+  MAX_RAW_DELTA,
+  MAX_APPLIED_DELTA,
   HANDOFF_ENTRY_GUARD_VU,
   BUTTON_BITS,
   normalizeAcceleration,
