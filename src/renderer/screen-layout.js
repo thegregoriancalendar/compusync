@@ -18,9 +18,8 @@
     };
   }
 
-  function monitorGroup(layout, fallbackAspect = 1.6, limits = {}) {
-    const fallbackWidth = Number.isFinite(limits.maxWidth) ? limits.maxWidth : 128;
-    const fallbackHeight = Math.round(fallbackWidth / fallbackAspect);
+  function monitorGeometry(layout, fallbackAspect = 1.6) {
+    const aspect = Number.isFinite(fallbackAspect) && fallbackAspect > 0 ? fallbackAspect : 1.6;
     const displays = Array.isArray(layout?.displays) ? layout.displays.filter((display) => {
       const bounds = display?.bounds;
       return typeof display.id === 'string' && bounds
@@ -28,30 +27,71 @@
         && bounds.width > 0 && bounds.height > 0;
     }) : [];
     if (!displays.length) return {
-      w: fallbackWidth,
-      h: fallbackHeight,
-      monitors: [{ id: 'unknown', x: 0, y: 0, w: fallbackWidth, h: fallbackHeight, primary: true }],
+      w: 1600,
+      h: 1600 / aspect,
+      monitors: [{ id: 'unknown', x: 0, y: 0, w: 1600, h: 1600 / aspect, primary: true, index: 0 }],
     };
     const left = Math.min(...displays.map(({ bounds }) => bounds.x));
     const top = Math.min(...displays.map(({ bounds }) => bounds.y));
     const right = Math.max(...displays.map(({ bounds }) => bounds.x + bounds.width));
     const bottom = Math.max(...displays.map(({ bounds }) => bounds.y + bounds.height));
     const width = right - left, height = bottom - top;
-    const maxWidth = Number.isFinite(limits.maxWidth) ? limits.maxWidth : MAX_GROUP_WIDTH;
-    const maxHeight = Number.isFinite(limits.maxHeight) ? limits.maxHeight : MAX_GROUP_HEIGHT;
-    const scale = Math.min(maxWidth / width, maxHeight / height);
     return {
-      w: width * scale,
-      h: height * scale,
+      w: width,
+      h: height,
       monitors: displays.map((display, index) => ({
         id: display.id,
-        x: (display.bounds.x - left) * scale,
-        y: (display.bounds.y - top) * scale,
-        w: display.bounds.width * scale,
-        h: display.bounds.height * scale,
+        x: display.bounds.x - left,
+        y: display.bounds.y - top,
+        w: display.bounds.width,
+        h: display.bounds.height,
         primary: Boolean(display.primary),
         index,
       })),
+    };
+  }
+
+  function scaleMonitorGroup(group, scale) {
+    return {
+      w: group.w * scale,
+      h: group.h * scale,
+      monitors: group.monitors.map((monitor) => ({
+        ...monitor,
+        x: monitor.x * scale,
+        y: monitor.y * scale,
+        w: monitor.w * scale,
+        h: monitor.h * scale,
+      })),
+    };
+  }
+
+  function positive(value, fallback) {
+    return Number.isFinite(value) && value > 0 ? value : fallback;
+  }
+
+  function monitorGroup(layout, fallbackAspect = 1.6, limits = {}) {
+    const group = monitorGeometry(layout, fallbackAspect);
+    const maxWidth = positive(limits.maxWidth, MAX_GROUP_WIDTH);
+    const maxHeight = positive(limits.maxHeight, MAX_GROUP_HEIGHT);
+    return scaleMonitorGroup(group, Math.min(maxWidth / group.w, maxHeight / group.h));
+  }
+
+  function monitorGroups(layouts = {}, fallbacks = {}, limits = {}) {
+    const groups = {
+      mac: monitorGeometry(layouts.mac, fallbacks.mac || 1.55),
+      windows: monitorGeometry(layouts.windows, fallbacks.windows || 1.7),
+    };
+    const maxWidth = positive(limits.maxWidth, MAX_GROUP_WIDTH);
+    const maxHeight = positive(limits.maxHeight, MAX_GROUP_HEIGHT);
+    // One scale across both computers makes equal display resolutions equal
+    // on screen; a computer with more monitors therefore has a larger group.
+    const scale = Math.min(
+      maxWidth / Math.max(groups.mac.w, groups.windows.w),
+      maxHeight / Math.max(groups.mac.h, groups.windows.h),
+    );
+    return {
+      mac: scaleMonitorGroup(groups.mac, scale),
+      windows: scaleMonitorGroup(groups.windows, scale),
     };
   }
 
@@ -135,6 +175,7 @@
     MAX_GROUP_WIDTH,
     MAX_GROUP_HEIGHT,
     monitorGroup,
+    monitorGroups,
     arrangeDiagram,
     snapDragged,
     arrangementText,

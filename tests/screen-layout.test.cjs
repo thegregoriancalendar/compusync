@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  monitorGroup, arrangeDiagram, snapDragged, arrangementText,
+  monitorGroup, monitorGroups, arrangeDiagram, snapDragged, arrangementText,
 } = require('../src/renderer/screen-layout.js');
 
 test('screen layout editor preserves every monitor inside its computer group', () => {
@@ -22,6 +22,19 @@ test('screen layout editor preserves every monitor inside its computer group', (
   assert.deepEqual(group.monitors[1], {
     id: 'main', x: 64, y: 0, w: 96, h: 54, primary: true, index: 1,
   });
+});
+
+test('both computer groups use one scale so equal-resolution monitors stay equal', () => {
+  const display = (id, x = 0) => ({
+    id, bounds: { x, y: 0, width: 1920, height: 1080 },
+  });
+  const groups = monitorGroups({
+    mac: { displays: [display('mac-a'), display('mac-b', 1920)] },
+    windows: { displays: [display('windows-a')] },
+  });
+  assert.equal(groups.mac.monitors[0].w, groups.windows.monitors[0].w);
+  assert.equal(groups.mac.monitors[0].h, groups.windows.monitors[0].h);
+  assert.equal(groups.mac.w, groups.windows.w * 2);
 });
 
 test('screen layout editor snaps either display to the three safe Mac-relative seams', () => {
