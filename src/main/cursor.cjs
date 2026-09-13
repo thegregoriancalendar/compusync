@@ -18,6 +18,10 @@ const DEFAULT_FRAME_MS = 1000 / 60;
 // Session control-channel traffic budget while remaining well above frame rate.
 const MAX_DELTA_RATE_HZ = 200;
 const DELTA_SEND_INTERVAL_MS = 1000 / MAX_DELTA_RATE_HZ;
+// A handoff can land exactly on a half-open screen boundary. Trackpads often
+// begin with a few sub-pixel samples in both directions, which would otherwise
+// bounce ownership back and forth before intentional motion begins.
+const HANDOFF_ENTRY_GUARD_VU = 4;
 const BUTTON_BITS = Object.freeze({ left: 1, right: 2, middle: 4, x1: 8, x2: 16 });
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);
 const noOp = () => {};
@@ -78,6 +82,7 @@ class CursorController extends EventEmitter {
     this.outboundDelta = { dx: 0, dy: 0, t: 0 };
     this.lastDeltaSentAt = -Infinity;
     this.edgePressure = null;
+    this.entryGuard = null;
     this.localButtons = 0;
     this.remoteButtons = 0;
     this.syntheticButtons = 0;
@@ -142,6 +147,7 @@ class CursorController extends EventEmitter {
     }
     if (ownerPlacement) this.virtualCursor = clampToPlacement(this.virtualCursor, ownerPlacement);
     this.edgePressure = null;
+    this.entryGuard = null;
     this.#applyPhysicalOwnership();
     this.emit('layout', this.state());
   }
@@ -171,6 +177,7 @@ class CursorController extends EventEmitter {
     this.linked = next;
     if (!this.#nativeCall('setLinked', next)) return false;
     this.edgePressure = null;
+    this.entryGuard = null;
     this.pendingLocal = { dx: 0, dy: 0 };
     this.pendingRemote = { dx: 0, dy: 0 };
     this.outboundDelta = { dx: 0, dy: 0, t: 0 };
@@ -349,6 +356,7 @@ class CursorController extends EventEmitter {
     if (!owner) return;
     const candidate = { x: this.virtualCursor.x + dx, y: this.virtualCursor.y + dy };
     if (containsPoint(owner, candidate)) {
+      this.#updateEntryGuard(candidate, owner);
       this.edgePressure = null;
       this.virtualCursor = candidate;
       this.#nativeCall('warpCursor', toLocal(candidate, owner));
@@ -356,6 +364,14 @@ class CursorController extends EventEmitter {
     }
     const crossing = crossingTarget(owner, candidate, this.placements);
     if (!crossing) {
+      this.edgePressure = null;
+      this.virtualCursor = clampToPlacement(candidate, owner);
+      this.#nativeCall('warpCursor', toLocal(this.virtualCursor, owner));
+      return;
+    }
+    if (this.entryGuard && crossing.placement.machineId === this.entryGuard.fromMachineId) {
+      // Do not let seam noise reverse a handoff. The latch clears only after
+      // intentional motion carries the pointer a few VU into this display.
       this.edgePressure = null;
       this.virtualCursor = clampToPlacement(candidate, owner);
       this.#nativeCall('warpCursor', toLocal(this.virtualCursor, owner));
@@ -398,6 +414,9 @@ class CursorController extends EventEmitter {
     this.virtualCursor = position;
     this.ownerMachineId = target.machineId;
     this.edgePressure = null;
+    this.entryGuard = null;
+    this.pendingLocal = { dx: 0, dy: 0 };
+    this.pendingRemote = { dx: 0, dy: 0 };
     // This machine is no longer authoritative. Release every injected hold;
     // its physical device remains tracked and continues forwarding events.
     if (!this.#nativeCall('releaseInputState')) return false;
@@ -414,13 +433,31 @@ class CursorController extends EventEmitter {
       || !Number.isSafeInteger(message.buttons) || message.buttons < 0 || message.buttons > 31
       || !Number.isSafeInteger(message.modifiers) || message.modifiers < 0 || message.modifiers > 65535) return false;
     const targetId = ownerAt({ x: message.x, y: message.y }, this.placements);
-    if (!targetId || (peerMachineId && peerMachineId !== this.ownerMachineId && peerMachineId !== targetId)) return false;
+    if (!targetId || (peerMachineId && peerMachineId !== this.ownerMachineId && peerMachineId !== targetId)) {
+      this.emit('handoff-rejected', {
+        peerMachineId,
+        currentOwnerMachineId: this.ownerMachineId,
+        targetMachineId: targetId,
+        virtualCursor: { x: message.x, y: message.y },
+        placements: this.placements.map(({ machineId, origin, size }) => ({ machineId, origin: { ...origin }, size: { ...size } })),
+      });
+      return false;
+    }
+    const previousOwner = this.placementFor(this.ownerMachineId);
     const target = this.placementFor(targetId);
     this.ownerMachineId = targetId;
     this.virtualCursor = clampToPlacement({ x: message.x, y: message.y }, target);
     this.remoteButtons = (this.remoteButtons & message.buttons) | (message.buttons & ~this.localButtons);
     this.modifiers = message.modifiers;
     this.edgePressure = null;
+    this.pendingLocal = { dx: 0, dy: 0 };
+    this.pendingRemote = { dx: 0, dy: 0 };
+    const entryEdge = previousOwner && previousOwner.machineId !== targetId
+      ? this.#entryEdge(target, previousOwner) : null;
+    this.entryGuard = entryEdge
+      ? { fromMachineId: previousOwner.machineId, edge: entryEdge }
+      : null;
+    this.#updateEntryGuard(this.virtualCursor, target);
     if (this.isOwner()) {
       const desiredSynthetic = this.remoteButtons & ~this.localButtons;
       if (!this.#nativeCall('releaseCursor')
@@ -442,6 +479,28 @@ class CursorController extends EventEmitter {
       modifiers: message.modifiers,
     });
     return true;
+  }
+
+  #entryEdge(target, source) {
+    const targetRight = target.origin.x + target.size.w;
+    const targetBottom = target.origin.y + target.size.h;
+    const sourceRight = source.origin.x + source.size.w;
+    const sourceBottom = source.origin.y + source.size.h;
+    if (source.origin.x >= targetRight) return 'right';
+    if (sourceRight <= target.origin.x) return 'left';
+    if (source.origin.y >= targetBottom) return 'bottom';
+    if (sourceBottom <= target.origin.y) return 'top';
+    return null;
+  }
+
+  #updateEntryGuard(point, placement) {
+    if (!this.entryGuard) return;
+    let inward = 0;
+    if (this.entryGuard.edge === 'right') inward = placement.origin.x + placement.size.w - point.x;
+    else if (this.entryGuard.edge === 'left') inward = point.x - placement.origin.x;
+    else if (this.entryGuard.edge === 'bottom') inward = placement.origin.y + placement.size.h - point.y;
+    else inward = point.y - placement.origin.y;
+    if (inward >= HANDOFF_ENTRY_GUARD_VU) this.entryGuard = null;
   }
 
   #mappedRemoteModifiers(modifiers) {
@@ -538,6 +597,7 @@ module.exports = {
   DEFAULT_FRAME_MS,
   MAX_DELTA_RATE_HZ,
   DELTA_SEND_INTERVAL_MS,
+  HANDOFF_ENTRY_GUARD_VU,
   BUTTON_BITS,
   normalizeAcceleration,
   accelerateDelta,

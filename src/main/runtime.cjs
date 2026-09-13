@@ -125,9 +125,11 @@ class SharedInputRuntime extends EventEmitter {
     this.cursor.on('ownership', (state) => this.#logMode('cursor.ownership', {
       owner: state.ownerMachineId === this.machineId ? 'local' : 'peer',
       reason: state.reason,
+      position: state.virtualCursor,
       buttons: state.buttons,
       modifiers: state.modifiers,
     }));
+    this.cursor.on('handoff-rejected', (state) => this.#logMode('cursor.handoff.rejected', state));
     this.keyboard = new KeyboardRouter({
       cursor: this.cursor,
       native: this.native,

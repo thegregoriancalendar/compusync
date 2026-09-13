@@ -274,10 +274,61 @@ test('the source trackpad drives a round trip after ownership moves to its peer'
   assert.equal(win.ownerMachineId, 'win');
 
   now += 10;
-  mac.localDelta(-4, 0, 1, now);
+  mac.localDelta(4, 0, 1, now);
+  win.flush(now);
+  now += 10;
+  mac.localDelta(-6, 0, 1, now);
   win.flush(now);
   assert.equal(mac.ownerMachineId, 'mac');
   assert.equal(win.ownerMachineId, 'mac');
+});
+
+test('trackpad seam noise cannot bounce a newly received handoff', () => {
+  const spaces = [placement('mac', 0, 0, 100, 100), placement('win', 100, 0, 100, 100)];
+  const outbound = [];
+  const mac = new CursorController({
+    machineId: 'mac', placements: spaces, initialPosition: { x: 100, y: 50 }, ownerMachineId: 'win',
+    native: mockNative(), send: (message) => { outbound.push(message); return true; },
+    acceleration: { base: 1, threshold: 1000, slope: 0 },
+  });
+
+  assert.equal(mac.receive({
+    type: 'cursor.handoff', x: 99.999999, y: 50, buttons: 0, modifiers: 0,
+  }, 'win'), true);
+  assert.equal(mac.ownerMachineId, 'mac');
+
+  // Alternating first-touch samples at the seam stay on the Mac.
+  for (const dx of [.5, -.25, .75, -1]) {
+    mac.localDelta(dx, 0, 1);
+    mac.flush();
+  }
+  assert.equal(mac.ownerMachineId, 'mac');
+  assert.equal(outbound.some(({ type }) => type === 'cursor.handoff'), false);
+
+  // Moving intentionally into the display releases the latch; an intentional
+  // reversal can then cross back normally.
+  mac.localDelta(-5, 0, 1);
+  mac.flush();
+  mac.localDelta(7, 0, 1);
+  mac.flush();
+  assert.equal(mac.ownerMachineId, 'win');
+  assert.equal(outbound.filter(({ type }) => type === 'cursor.handoff').length, 1);
+});
+
+test('a mismatched rapid handoff is rejected with enough topology to diagnose split ownership', () => {
+  const cursor = new CursorController({
+    machineId: 'mac', placements: [placement('mac', 0, 0, 100, 100), placement('win', 100, 0, 100, 100)],
+    initialPosition: { x: 50, y: 50 }, ownerMachineId: 'mac', native: mockNative(),
+  });
+  let rejected;
+  cursor.once('handoff-rejected', (state) => { rejected = state; });
+
+  assert.equal(cursor.receive({
+    type: 'cursor.handoff', x: 250, y: 50, buttons: 0, modifiers: 0,
+  }, 'win'), false);
+  assert.equal(rejected.currentOwnerMachineId, 'mac');
+  assert.equal(rejected.targetMachineId, null);
+  assert.deepEqual(rejected.placements.map(({ machineId }) => machineId), ['mac', 'win']);
 });
 
 test('top movement clamps, non-owner follows authority, and ownership hotkey preserves relative position', () => {
