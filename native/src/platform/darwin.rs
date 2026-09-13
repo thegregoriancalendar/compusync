@@ -441,6 +441,10 @@ struct TapContext {
 unsafe impl Send for TapContext {}
 unsafe impl Sync for TapContext {}
 
+fn suppress_for_non_owner(linked: bool, owner: bool) -> bool {
+    linked && !owner
+}
+
 struct AxDragWatch {
     observer: AxObserver,
     element: AxElement,
@@ -639,6 +643,15 @@ unsafe fn event_tap_inner(
             native.dy =
                 Some(unsafe { CGEventGetIntegerValueField(event, CG_FIELD_MOUSE_DELTA_Y) } as f64);
             (context.sink)(native);
+            // Forward the delta to the shared owner, but do not also move the
+            // non-owner Mac cursor. CGAssociate is foreground-scoped and is
+            // not a sufficient barrier while Chrome has focus.
+            if suppress_for_non_owner(
+                context.linked.load(Ordering::Acquire),
+                context.owner.load(Ordering::Acquire),
+            ) {
+                return null_mut();
+            }
         }
         CG_EVENT_KEY_DOWN | CG_EVENT_KEY_UP | CG_EVENT_FLAGS_CHANGED => {
             let native_code =
@@ -667,7 +680,10 @@ unsafe fn event_tap_inner(
             native.down = Some(down);
             native.modifiers = Some(modifiers);
             (context.sink)(native);
-            if context.linked.load(Ordering::Acquire) && !context.owner.load(Ordering::Acquire) {
+            if suppress_for_non_owner(
+                context.linked.load(Ordering::Acquire),
+                context.owner.load(Ordering::Acquire),
+            ) {
                 return null_mut();
             }
         }
@@ -696,7 +712,10 @@ unsafe fn event_tap_inner(
                 clear_drag_watch(context, true);
             }
             (context.sink)(native);
-            if context.linked.load(Ordering::Acquire) && !context.owner.load(Ordering::Acquire) {
+            if suppress_for_non_owner(
+                context.linked.load(Ordering::Acquire),
+                context.owner.load(Ordering::Acquire),
+            ) {
                 return null_mut();
             }
         }
@@ -1090,7 +1109,7 @@ impl Drop for HostPlatform {
 
 #[cfg(test)]
 mod tests {
-    use super::{activate_drag_watch, take_run_loop, CfRunLoop};
+    use super::{activate_drag_watch, suppress_for_non_owner, take_run_loop, CfRunLoop};
 
     #[test]
     fn capture_run_loop_stop_target_is_consumed_once() {
@@ -1110,5 +1129,13 @@ mod tests {
         assert!(activate_drag_watch(true, &mut active));
         assert!(active);
         assert!(!activate_drag_watch(true, &mut active));
+    }
+
+    #[test]
+    fn linked_non_owner_suppresses_local_os_input_only() {
+        assert!(!suppress_for_non_owner(false, true));
+        assert!(!suppress_for_non_owner(false, false));
+        assert!(!suppress_for_non_owner(true, true));
+        assert!(suppress_for_non_owner(true, false));
     }
 }
