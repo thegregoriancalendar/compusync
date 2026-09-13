@@ -81,6 +81,30 @@ test('native adapter hardens cursor coordinates without changing raw bounds used
   assert.deepEqual(adapter.substrate.lastBounds, { id: 'ax:1:0', bounds: rawWindow.bounds });
 });
 
+test('native adapter skips unusable window geometry without failing the snapshot', () => {
+  const displays = [
+    { id: 'main', bounds: { x: 0, y: 0, width: 1920, height: 1080 }, scale: 1, primary: true },
+  ];
+  const validWindow = {
+    id: 'hwnd:chrome', processName: 'chrome.exe', visible: true,
+    bounds: { x: 100, y: 50, width: 800, height: 600 },
+  };
+  const adapter = new NativeAdapter(bindingFor({
+    platformName: 'windows', displays, cursor: { x: 0, y: 0 },
+    windows: [
+      null,
+      { id: 'hwnd:minimized', bounds: { x: -32000, y: -32000, width: 0, height: 0 } },
+      { id: 'hwnd:closing', bounds: { x: 0, y: 0, width: NaN, height: 20 } },
+      validWindow,
+    ],
+  }), 'C:\\native\\compusync-native.node');
+
+  assert.deepEqual(adapter.enumerateWindows(), [{
+    ...validWindow,
+    normalizedBounds: validWindow.bounds,
+  }]);
+});
+
 test('coordinate transforms reject malformed native geometry', () => {
   assert.throws(() => coordinateSpace([], 'windows'), /display/);
   assert.throws(() => coordinateSpace([{ bounds: { x: 0, y: 0, width: 0, height: 1 } }], 'windows'), /bounds/);

@@ -272,13 +272,22 @@ class NativeAdapter extends EventEmitter {
   toPlatformBounds(bounds, displays) { return toPlatformBounds(bounds, this.coordinateSpace(displays)); }
   enumerateWindows() {
     const windows = this.substrate.enumerateWindows();
+    if (!Array.isArray(windows)) throw new TypeError('Native window enumeration must return an array.');
     const space = this.coordinateSpace();
-    return windows.map((window) => ({
-      ...window,
-      // Keep `bounds` in raw OS-global coordinates: Chrome CDP window matching
-      // relies on it. New VU-aware callers must opt into normalizedBounds.
-      normalizedBounds: toNormalizedBounds(window.bounds, space),
-    }));
+    const usable = [];
+    for (const window of windows) {
+      // OS window lists routinely include transient, minimized, cloaked, or
+      // closing windows with empty geometry. They cannot participate in a
+      // handoff, but must not invalidate every other window in the snapshot.
+      try { validBounds(window?.bounds); } catch { continue; }
+      usable.push({
+        ...window,
+        // Keep `bounds` in raw OS-global coordinates: Chrome CDP window matching
+        // relies on it. New VU-aware callers must opt into normalizedBounds.
+        normalizedBounds: toNormalizedBounds(window.bounds, space),
+      });
+    }
+    return usable;
   }
   enumerateWindowsNormalized() {
     return this.enumerateWindows().map((window) => ({ ...window, bounds: window.normalizedBounds }));
