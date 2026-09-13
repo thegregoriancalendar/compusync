@@ -49,12 +49,7 @@ class RecoveryWatchdog extends EventEmitter {
       this.native.heartbeat?.();
     }
     this.native.on?.('panic', this.panicHandler);
-    this.heartbeatTimer = setInterval(() => {
-      if (this.cursor?.linked !== false) {
-        this.native.heartbeat?.();
-        if (this.peerConnected) this.send({ type: 'heartbeat', t: this.now() });
-      }
-    }, this.heartbeatIntervalMs);
+    this.heartbeatTimer = setInterval(() => this.pulse(), this.heartbeatIntervalMs);
     this.checkTimer = setInterval(() => this.check(), this.checkIntervalMs);
     this.heartbeatTimer.unref?.();
     this.checkTimer.unref?.();
@@ -80,6 +75,15 @@ class RecoveryWatchdog extends EventEmitter {
     return true;
   }
 
+  pulse() {
+    // Peer liveness is independent of whether this laptop currently captures
+    // shared input. Otherwise the first laptop linked after a recovery waits
+    // for heartbeats an unlinked peer intentionally never sends, then unlinks
+    // itself after two seconds before the user can link the other laptop.
+    if (this.cursor?.linked !== false) this.native.heartbeat?.();
+    if (this.peerConnected) this.send({ type: 'heartbeat', t: this.now() });
+  }
+
   check() {
     if (!this.recovered && this.peerConnected && this.cursor?.linked !== false
       && this.now() - this.lastHeartbeat > this.heartbeatTimeoutMs) {
@@ -100,6 +104,8 @@ class RecoveryWatchdog extends EventEmitter {
   trigger(reason = 'failure', cause = null) {
     if (this.recovered) return false;
     this.recovered = true;
+    if (this.native?.substrate) console.error('[CompuSync] Recovering shared input:', reason,
+      cause?.stack || cause?.message || cause || 'no reported cause');
     const errors = [];
     // Each step is isolated. A broken native operation must never prevent the
     // remaining recovery operations from running.

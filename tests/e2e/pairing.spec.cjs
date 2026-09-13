@@ -52,6 +52,8 @@ test('short code pairs two laptops through automatic discovery', async () => {
     await expect(host.settings.locator('#status')).toContainText('Connected to');
     await expect(host.settings.locator('#cursor-mode')).toBeEnabled();
     await expect(peer.settings.locator('#cursor-mode')).toBeEnabled();
+    await expect(host.settings.locator('#pairing-card')).toBeHidden();
+    await expect(peer.settings.locator('#pairing-card')).toBeHidden();
     await expect(host.settings.locator('#code-status')).toContainText('Connected. This pairing is saved');
     await expect(peer.settings.locator('#code-status')).toContainText('Connected. This pairing is saved');
     await expect(host.settings.locator('#notices')).not.toContainText('Cursor linking needs attention');

@@ -65,6 +65,7 @@ function render(next) {
   const connected = status.phase === 'connected';
   const cursorReady = connected && next.cursorLinkReady === true;
   const cursor = next.cursorSettings || localCursorDefaults;
+  $('pairing-card').hidden = connected;
   $('status-dot').className = `dot ${status.phase}`;
   $('status').textContent = connected ? `Connected to ${status.peers[0]?.name || 'your other laptop'}` : {
     starting: 'Getting ready', hosting: 'Ready to pair', connecting: 'Connecting…', reconnecting: 'Waiting for your other laptop', error: 'Connection needs attention',

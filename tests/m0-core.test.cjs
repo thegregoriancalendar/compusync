@@ -417,6 +417,26 @@ test('watchdog runs every recovery step even when one native operation fails', (
   assert.equal(watchdog.trigger('again'), false);
 });
 
+test('peer heartbeat continues while local cursors are unlinked', () => {
+  const sent = [], nativeCalls = [];
+  const cursor = { linked: false };
+  const watchdog = new RecoveryWatchdog({
+    now: () => 1234,
+    cursor,
+    native: { heartbeat: () => nativeCalls.push('heartbeat') },
+    send: (message) => sent.push(message),
+  });
+  watchdog.setPeerConnected(true);
+
+  watchdog.pulse();
+  assert.deepEqual(sent, [{ type: 'heartbeat', t: 1234 }]);
+  assert.deepEqual(nativeCalls, []);
+
+  cursor.linked = true;
+  watchdog.pulse();
+  assert.deepEqual(nativeCalls, ['heartbeat']);
+});
+
 test('hotkeys toggle fail-safe link mode and jump ownership', () => {
   assert.equal(DEFAULT_LINK_HOTKEY, 'CommandOrControl+Shift+U');
   assert.equal(DEFAULT_OWNERSHIP_HOTKEY, 'CommandOrControl+Shift+Y');
