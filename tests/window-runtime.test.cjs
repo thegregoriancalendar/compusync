@@ -11,6 +11,7 @@ function runtimeFixture(options = {}) {
   let window = options.window || { id: 'hwnd', processName: 'chrome.exe', bounds: { x: 700, y: 100, width: 400, height: 300 } };
   native.enumerateWindows = () => window ? [window] : [];
   const nativeCalls = [];
+  native.windowExists = () => Boolean(window);
   native.guardWindow = (id, bounds) => nativeCalls.push(['guard', id, bounds]);
   native.terminateMoveLoop = (id) => nativeCalls.push(['terminate', id]);
   native.releaseWindowGuard = (id) => nativeCalls.push(['release', id]);
@@ -41,7 +42,7 @@ function runtimeFixture(options = {}) {
   const runtime = new WindowHandoffRuntime({
     input, native, chrome, frameMs: options.frameMs || 100000,
     setSeam: options.setSeam, showHint: options.showHint, logger: options.logger,
-    processId: options.processId,
+    processId: options.processId, livenessMs: 0,
   });
   runtime.start();
   return {

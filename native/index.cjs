@@ -164,6 +164,7 @@ class FallbackNativeAdapter extends EventEmitter {
   setLinked() {}
   displayMetrics() { return []; }
   enumerateWindows() { return []; }
+  windowExists() { return false; }
   enumerateWindowsNormalized() { return []; }
   setWindowBounds() {}
   setWindowBoundsNormalized(id, bounds) { return this.setWindowBounds(id, bounds); }
@@ -308,6 +309,10 @@ class NativeAdapter extends EventEmitter {
   inputMonitoringAccess(request = false) {
     return typeof this.substrate.inputMonitoringAccess === 'function'
       && this.substrate.inputMonitoringAccess(Boolean(request));
+  }
+  windowExists(id) {
+    return typeof this.substrate.windowExists === 'function'
+      ? this.substrate.windowExists(String(id)) : true;
   }
   chromeAutomationAccess(request = false) {
     return typeof this.substrate.chromeAutomationAccess === 'function'

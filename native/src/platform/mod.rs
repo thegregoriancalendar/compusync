@@ -13,6 +13,7 @@ pub trait Platform: Send {
     fn cursor_position(&self) -> Result<Point, String>;
     fn displays(&self) -> Result<Vec<DisplayMetric>, String>;
     fn windows(&self) -> Result<Vec<WindowInfo>, String>;
+    fn window_exists(&self, id: &str) -> Result<bool, String>;
     fn set_window_bounds(&mut self, id: &str, bounds: Rect) -> Result<(), String>;
     fn focus_window(&mut self, id: &str) -> Result<(), String>;
     fn close_window(&mut self, id: &str) -> Result<(), String>;

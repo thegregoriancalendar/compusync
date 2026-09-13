@@ -220,6 +220,7 @@ unsafe extern "system" {
     fn MonitorFromWindow(window: Hwnd, flags: u32) -> Hmonitor;
     fn EnumWindows(callback: unsafe extern "system" fn(Hwnd, Lparam) -> Bool, data: Lparam)
         -> Bool;
+    fn IsWindow(window: Hwnd) -> Bool;
     fn IsWindowVisible(window: Hwnd) -> Bool;
     fn IsIconic(window: Hwnd) -> Bool;
     fn IsZoomed(window: Hwnd) -> Bool;
@@ -972,6 +973,9 @@ impl Platform for HostPlatform {
         } else {
             Ok(result)
         }
+    }
+    fn window_exists(&self, id: &str) -> Result<bool, String> {
+        Ok(unsafe { IsWindow(parse_hwnd(id)?) } != 0)
     }
     fn set_window_bounds(&mut self, id: &str, b: Rect) -> Result<(), String> {
         let hwnd = parse_hwnd(id)?;

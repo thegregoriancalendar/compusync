@@ -97,11 +97,16 @@ class WindowHandoffRuntime extends EventEmitter {
     this.showHint = typeof options.showHint === 'function' ? options.showHint : () => {};
     this.logger = options.logger || null;
     this.frameMs = options.frameMs || WINDOW_FRAME_MS;
+    this.livenessMs = Number.isFinite(options.livenessMs) ? Math.max(0, options.livenessMs) : 250;
+    this.now = typeof options.now === 'function' ? options.now : Date.now;
     this.started = false;
     this.polling = false;
+    this.pollPromise = null;
     this.pollTimer = null;
     this.sourceWindowId = null;
     this.sourceStartBounds = null;
+    this.sourceGeometryVU = null;
+    this.lastLivenessAt = -Infinity;
     this.nativeLoopTerminated = false;
     this.guardedWindowId = null;
     // Never let native window discovery feed one of CompuSync's own Electron
@@ -187,6 +192,8 @@ class WindowHandoffRuntime extends EventEmitter {
     if (!began) return false;
     this.sourceWindowId = String(id);
     this.sourceStartBounds = boundsOf(window);
+    this.sourceGeometryVU = { ...geometryVU };
+    this.lastLivenessAt = -Infinity;
     this.nativeLoopTerminated = false;
     this.pollTimer = setInterval(() => { void this.poll(); }, this.frameMs);
     this.pollTimer.unref?.();
@@ -194,31 +201,47 @@ class WindowHandoffRuntime extends EventEmitter {
   }
 
   async poll() {
-    if (this.polling || !this.drag.active || this.drag.active.role !== 'source') return false;
+    if (!this.drag.active || this.drag.active.role !== 'source') return false;
+    if (this.pollPromise) return this.pollPromise;
     this.polling = true;
-    try {
-      const windows = await this.windows();
-      const window = windows.find((candidate) => String(candidate.id) === this.sourceWindowId);
-      if (!window) {
-        // The prepared peer window is now the only survivor. Commit it even if
-        // preparation is still running; reliable control ordering lets the
-        // destination queue this behind the offer instead of aborting it.
-        try { await this.drag.sourceDisappeared('chrome-quit'); }
-        catch { /* The watchdog will settle an unreachable peer. */ }
-        this.setSeam(null);
-        this.#settleSource();
-        return false;
-      }
-      const geometryVU = geometryToVU(window, this.localPlacement());
-      if (!geometryVU) return false;
+    const operation = (async () => {
+      // Window enumeration is an expensive synchronous AX walk on macOS and
+      // must not gate 60 Hz drag frames. Position is authoritative from the
+      // shared cursor; only the initially captured width/height are needed.
+      const geometryVU = this.sourceGeometryVU || this.drag.active?.geometry;
       const cursorVU = this.input.cursor.virtualCursor;
+      const frame = this.drag.frame({ geometryVU, cursorVU });
       if (!this.nativeLoopTerminated && this.drag.active?.adapter
         && cursorAtSharedEdge(cursorVU, this.drag.active.source, this.drag.active.target)) {
         if (!await this.#enterProgrammaticMove()) return false;
       }
-      await this.drag.frame({ geometryVU, cursorVU });
+      await frame;
+      if (!this.drag.active || this.drag.active.role !== 'source') return false;
+      const at = this.now();
+      if (typeof this.native.windowExists === 'function'
+        && at - this.lastLivenessAt >= this.livenessMs) {
+        this.lastLivenessAt = at;
+        let exists;
+        try { exists = await this.native.windowExists(this.sourceWindowId); }
+        catch (error) {
+          this.input.watchdog.trigger('window-liveness-failed', error);
+          return true;
+        }
+        if (!exists) {
+          await this.drag.sourceDisappeared('source-quit');
+          this.setSeam(null);
+          this.#settleSource();
+          return false;
+        }
+      }
       return true;
-    } finally { this.polling = false; }
+    })();
+    this.pollPromise = operation;
+    try { return await operation; }
+    finally {
+      if (this.pollPromise === operation) this.pollPromise = null;
+      this.polling = false;
+    }
   }
 
   async handleMoveEnd(id, options = {}) {
@@ -229,6 +252,9 @@ class WindowHandoffRuntime extends EventEmitter {
     if (this.isWindows && this.nativeLoopTerminated && !options.physical) return false;
     clearInterval(this.pollTimer);
     this.pollTimer = null;
+    if (this.pollPromise) {
+      try { await this.pollPromise; } catch { /* Drag abort reports the actionable failure. */ }
+    }
     await this.poll();
     const geometryVU = this.drag.active?.geometry;
     const ended = await this.drag.end({ geometryVU });
@@ -287,6 +313,8 @@ class WindowHandoffRuntime extends EventEmitter {
     }
     this.sourceWindowId = null;
     this.sourceStartBounds = null;
+    this.sourceGeometryVU = null;
+    this.lastLivenessAt = -Infinity;
     this.nativeLoopTerminated = false;
   }
 

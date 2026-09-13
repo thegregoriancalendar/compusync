@@ -36,6 +36,9 @@ impl Platform for HostPlatform {
     fn windows(&self) -> Result<Vec<WindowInfo>, String> {
         Ok(vec![])
     }
+    fn window_exists(&self, _: &str) -> Result<bool, String> {
+        Ok(false)
+    }
     fn set_window_bounds(&mut self, _: &str, _: Rect) -> Result<(), String> {
         Err("window positioning is unavailable".into())
     }

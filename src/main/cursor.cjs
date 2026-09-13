@@ -272,6 +272,14 @@ class CursorController extends EventEmitter {
       this.remoteButtons = message.down ? this.remoteButtons | bit : this.remoteButtons & ~bit;
       const isDown = Boolean((this.localButtons | this.remoteButtons) & bit);
       if (this.isOwner()) {
+        // A managed window handoff drives both native windows explicitly.
+        // Injecting the transported left hold into the destination OS starts
+        // a second AppKit/Win32 drag that fights positioning and can trigger
+        // Snap. Preserve logical state but leave that button native-free.
+        if (this.dragging && message.button === 'left') {
+          this.syntheticButtons &= ~bit;
+          return true;
+        }
         if (!wasDown && isDown && !this.#synthesizeButton(message.button, bit, true)) return false;
         else if (wasDown && !isDown && !this.#synthesizeButton(message.button, bit, false)) return false;
         else if (this.localButtons & bit) this.syntheticButtons &= ~bit;
@@ -317,7 +325,8 @@ class CursorController extends EventEmitter {
       this.ownerMachineId = target.machineId;
       this.edgePressure = null;
       if (!this.#applyPhysicalOwnership()) return false;
-      const desiredSynthetic = this.remoteButtons & ~this.localButtons;
+      const desiredSynthetic = this.remoteButtons & ~this.localButtons
+        & ~(this.dragging ? BUTTON_BITS.left : 0);
       if (!this.#nativeCall('assumeInputState', desiredSynthetic, this.#mappedRemoteModifiers(this.modifiers))) return false;
       this.syntheticButtons = desiredSynthetic;
       this.emit('ownership', { ownerMachineId: target.machineId, reason: 'hotkey', virtualCursor: { ...position }, buttons, modifiers: this.modifiers });
@@ -470,7 +479,8 @@ class CursorController extends EventEmitter {
       : null;
     this.#updateEntryGuard(this.virtualCursor, target);
     if (this.isOwner()) {
-      const desiredSynthetic = this.remoteButtons & ~this.localButtons;
+      const desiredSynthetic = this.remoteButtons & ~this.localButtons
+        & ~(this.dragging ? BUTTON_BITS.left : 0);
       if (!this.#nativeCall('releaseCursor')
         || !this.#nativeCall('warpCursor', toLocal(this.virtualCursor, target))
         || !this.#nativeCall('showCursor')

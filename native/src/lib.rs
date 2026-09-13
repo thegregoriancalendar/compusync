@@ -722,6 +722,11 @@ impl NativeSubstrate {
     }
 
     #[napi]
+    pub fn window_exists(&self, id: String) -> Result<bool> {
+        self.inner.platform.lock().window_exists(&id).map_err(napi_error)
+    }
+
+    #[napi]
     pub fn set_window_bounds(&self, id: String, bounds: Rect) -> Result<()> {
         self.inner
             .platform

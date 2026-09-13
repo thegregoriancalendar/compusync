@@ -1262,6 +1262,13 @@ impl Platform for HostPlatform {
         }
         Ok(result)
     }
+    fn window_exists(&self, id: &str) -> Result<bool, String> {
+        match ax_window(id) {
+            Ok(_) => Ok(true),
+            Err(error) if error == "macOS window no longer exists" => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
     fn set_window_bounds(&mut self, id: &str, b: Rect) -> Result<(), String> {
         let (_owner, w) = ax_window(id)?;
         let p = CgPoint { x: b.x, y: b.y };

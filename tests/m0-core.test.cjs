@@ -251,7 +251,7 @@ test('the owner sums local and remote deltas and edge resistance delays handoff'
   assert.deepEqual(aNative.calls.slice(-3), [['release-input'], ['hide'], ['park']]);
 });
 
-test('a drag disables resistance and the destination assumes held input state', () => {
+test('a managed window drag disables resistance without starting a second native drag', () => {
   const spaces = [placement('a', 0, 0, 100, 100), placement('b', 100, 0, 100, 100, 2)];
   let handoff;
   const source = new CursorController({
@@ -269,11 +269,14 @@ test('a drag disables resistance and the destination assumes held input state', 
   const destination = new CursorController({
     machineId: 'b', placements: spaces, initialPosition: { x: 99, y: 50 }, ownerMachineId: 'a', native,
   });
+  destination.setDragging(true);
   assert.equal(destination.receive(handoff, 'a'), true);
   assert.equal(destination.isOwner(), true);
   assert.deepEqual(native.calls, [
-    ['release'], ['warp', { x: 2, y: 100 }], ['show'], ['park'], ['assume', 1, 7],
+    ['release'], ['warp', { x: 2, y: 100 }], ['show'], ['park'], ['assume', 0, 7],
   ]);
+  assert.equal(destination.receive({ type: 'cursor.button', button: 'left', down: false }, 'a'), true);
+  assert.equal(native.calls.some(([name]) => name === 'button'), false);
 });
 
 test('the source trackpad drives a round trip after ownership moves to its peer', () => {
