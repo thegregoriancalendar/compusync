@@ -19,11 +19,10 @@ const localCursorDefaults = {
 
 function diagramGroups(next) {
   const layouts = Object.values(next.state?.layouts || {});
-  const group = (platform, fallback) => {
-    const layout = layouts.find((candidate) => candidate.platform === platform);
-    return window.CompuSyncScreenLayout.monitorGroup(layout, fallback);
-  };
-  return { mac: group('darwin', 1.55), windows: group('win32', 1.7) };
+  return window.CompuSyncScreenLayout.monitorGroups({
+    mac: layouts.find((candidate) => candidate.platform === 'darwin'),
+    windows: layouts.find((candidate) => candidate.platform === 'win32'),
+  }, { mac: 1.55, windows: 1.7 });
 }
 
 function renderMonitorGroup(element, platform, group, computerName) {
@@ -67,7 +66,8 @@ function renderScreenLayout(next = details) {
   for (const [platform, id] of [['mac', 'layout-mac'], ['windows', 'layout-windows']]) {
     const rect = layoutRects[platform];
     const element = $(id);
-    element.classList.toggle('group-above', platform === 'mac' && layoutDraft.macPosition === 'top');
+    element.classList.toggle('label-above', layoutDraft.macPosition === 'top'
+      ? platform === 'mac' : platform === 'windows');
     Object.assign(element.style, {
       left: `${rect.x}px`, top: `${rect.y}px`, width: `${rect.w}px`, height: `${rect.h}px`,
     });
