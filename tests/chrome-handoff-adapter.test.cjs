@@ -262,6 +262,25 @@ test('prepared native-window metadata/cache preserves one descriptor UUID across
   assert.equal(nativeCloseCalls, 0);
 });
 
+test('failed CDP target closure falls back to the native Chrome window', async () => {
+  const closed = [];
+  const adapter = createChromeHandoffAdapter({
+    platform: 'win32',
+    cdp: { closeTarget: async () => false },
+    native: { closeWindow: async (id) => closed.push(id) },
+  });
+  await adapter.close({ id: 'hwnd-fallback', targetIds: ['target-a'], activeTargetId: 'target-a' });
+  assert.deepEqual(closed, ['hwnd-fallback']);
+
+  const unavailable = createChromeHandoffAdapter({
+    platform: 'win32', cdp: { closeTarget: async () => false }, native: {},
+  });
+  await assert.rejects(
+    () => unavailable.close({ targetIds: ['target-a'], activeTargetId: 'target-a' }),
+    { code: 'CHROME_CLOSE_FAILED' },
+  );
+});
+
 test('high-level adapter delegates Apple operations and marks maximized windows for instant commit', async () => {
   const calls = [];
   const apple = {

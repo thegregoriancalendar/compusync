@@ -20,6 +20,7 @@ const {
   createSecureProfile,
   defaultExtensionDirectory,
   migrateChromeSession,
+  nativeChromeIsRunning,
   relaunchArguments,
   requestChromeClose,
   unpackedExtensionDirectory,
@@ -298,6 +299,25 @@ test('default restart helpers request non-forced taskkill and verify a bounded C
   await assert.rejects(() => waitForChromeExit(async () => true, {
     timeoutMs: 100, pollMs: 50, delay: async () => {},
   }), { code: 'CHROME_EXIT_TIMEOUT' });
+});
+
+test('Windows restart closes only unique native Chrome windows and waits on window disappearance', async () => {
+  const closed = [];
+  let windows = [
+    { id: '0x101', processName: 'chrome.exe', visible: true },
+    { id: '0x101', processName: 'chrome.exe', visible: true },
+    { id: '0x202', processName: 'notepad.exe', visible: true },
+    { id: '0x303', processName: 'chrome.exe', visible: false },
+  ];
+  const native = {
+    enumerateWindows: () => windows,
+    closeWindow: async (id) => closed.push(id),
+  };
+  await requestChromeClose({ native, execFile: () => assert.fail('taskkill must not run') });
+  assert.deepEqual(closed, ['0x101']);
+  assert.equal(await nativeChromeIsRunning(native), true);
+  windows = [{ id: '0x202', processName: 'notepad.exe', visible: true }];
+  assert.equal(await nativeChromeIsRunning(native), false);
 });
 
 test('profile helpers constrain debug ports and enforce private directory setup', async (t) => {

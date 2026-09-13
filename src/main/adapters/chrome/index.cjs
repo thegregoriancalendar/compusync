@@ -170,19 +170,37 @@ class ChromeHandoffAdapter {
       if (this.platform === 'darwin') return await this.apple.close(handle);
       const record = localRecord(this.records, handle);
       const targetIds = handle?.targetIds || record?.targetIds || [];
+      let cdpFailure = null;
       if (targetIds.length) {
         const active = handle?.activeTargetId ?? handle?.targetId ?? record?.activeTargetId;
         const closeOrder = targetIds.filter((targetId) => targetId !== active).reverse();
         if (active && targetIds.includes(active)) closeOrder.push(active);
         try {
-          for (const targetId of closeOrder) await this.cdp.closeTarget(targetId);
+          for (const targetId of closeOrder) {
+            if (await this.cdp.closeTarget(targetId) === false) {
+              throw new Error(`Chrome refused to close target ${targetId}.`);
+            }
+          }
           return;
-        } catch {
+        } catch (error) {
+          cdpFailure = error;
           // If Chrome vanishes partway through, closing its surviving native
           // top-level window prevents a partial prepared copy from remaining.
         }
       }
-      if (id != null && typeof this.native.closeWindow === 'function') return await this.native.closeWindow(id);
+      if (id != null && typeof this.native.closeWindow === 'function') {
+        try { return await this.native.closeWindow(id); }
+        catch (error) {
+          const failure = new Error('Compusync could not close the Chrome handoff window.');
+          failure.code = 'CHROME_CLOSE_FAILED';
+          failure.cause = cdpFailure || error;
+          throw failure;
+        }
+      }
+      const failure = new Error('Compusync could not close the Chrome handoff window.');
+      failure.code = 'CHROME_CLOSE_FAILED';
+      failure.cause = cdpFailure;
+      throw failure;
     } finally {
       this.identities.forget(handle);
       if (id != null) this.records.delete(String(id));

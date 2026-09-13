@@ -30,6 +30,7 @@ class ChromeAdapterRuntime extends EventEmitter {
     this.relaunch = options.relaunch || (this.platform === 'win32' ? new WindowsChromeRelaunch({
       platform: this.platform, store: options.store, env: options.env,
       localAppData: options.localAppData, normalUserDataDir: options.normalUserDataDir,
+      native: this.native,
     }) : null);
     this.adapter = this.platform === 'darwin' ? this.createAdapter({
       ...options, platform: 'darwin', native: this.native, machineId: this.machineId, getPlacement: this.getPlacement,

@@ -5,12 +5,12 @@ const { randomUUID } = require('node:crypto');
 const os = require('node:os');
 const path = require('node:path');
 const { execFile: execFileCallback, spawn: spawnProcess } = require('node:child_process');
-const { DEBUG_PORT_MIN, DEBUG_PORT_MAX } = require('./detect.cjs');
+const { DEBUG_PORT_MIN, DEBUG_PORT_MAX, isChromeWindow } = require('./detect.cjs');
 
 const DECISION_KEY = 'chromeWindowsRelaunchDecision';
 const SIGNED_OUT_NOTICE_KEY = 'chromeIsolatedProfileNoticeShown';
 const OFFER_MESSAGE = 'Chrome needs a one-time restart to enable window handoff. Your tabs will be restored.';
-const SESSION_MIGRATION_DETAIL = 'Compusync copies only Chrome session files. Cookies, credentials, extensions, preferences, and sign-in data stay in your normal profile.';
+const SESSION_MIGRATION_DETAIL = 'Compusync copies only Chrome session files. Cookies, credentials, extensions, preferences, and sign-in data stay in your normal profile. After Chrome reopens, drag the window across again.';
 const DEFAULT_CLOSE_TIMEOUT_MS = 5_000;
 const DEFAULT_CLOSE_POLL_MS = 100;
 const MAX_SESSION_FILES = 512;
@@ -95,7 +95,32 @@ function execFilePromise(execFile, executable, args, options) {
   });
 }
 
+function nativeChromeWindows(native) {
+  if (typeof native?.enumerateWindows !== 'function') return null;
+  const windows = native.enumerateWindows();
+  if (!Array.isArray(windows)) throw new TypeError('Native window enumeration must return an array.');
+  return windows.filter((window) => isChromeWindow(window) && window.visible !== false);
+}
+
+async function nativeChromeIsRunning(native) {
+  return nativeChromeWindows(native)?.length > 0;
+}
+
 async function requestChromeClose(options = {}) {
+  const native = options.native;
+  if (typeof native?.enumerateWindows === 'function' && typeof native?.closeWindow === 'function') {
+    try {
+      const windows = nativeChromeWindows(native);
+      const ids = [...new Set(windows.map((window) => window.id).filter((id) => id != null).map(String))];
+      for (const id of ids) await native.closeWindow(id);
+      return true;
+    } catch (error) {
+      const wrapped = new Error('Chrome did not accept the graceful window close request.');
+      wrapped.code = 'CHROME_CLOSE_FAILED';
+      wrapped.cause = error;
+      throw wrapped;
+    }
+  }
   const execFile = options.execFile || execFileCallback;
   try {
     await execFilePromise(execFile, 'taskkill.exe', ['/IM', 'chrome.exe', '/T'], {
@@ -303,14 +328,19 @@ class WindowsChromeRelaunch {
     this.fs = options.fs || fs;
     this.env = options.env || process.env;
     this.execFile = options.execFile || execFileCallback;
+    this.native = options.native;
     this.spawn = options.spawn || spawnProcess;
     this.port = validatePort(options.port);
     this.localAppData = options.localAppData;
     this.chromeExecutable = options.chromeExecutable;
     this.username = options.username;
     this.userDomain = options.userDomain;
-    this.closeChrome = options.closeChrome || (() => requestChromeClose({ execFile: this.execFile, timeoutMs: this.closeTimeoutMs }));
-    this.checkChromeRunning = options.isChromeRunning || (() => chromeIsRunning({ execFile: this.execFile }));
+    this.closeChrome = options.closeChrome || (() => requestChromeClose({
+      native: this.native, execFile: this.execFile, timeoutMs: this.closeTimeoutMs,
+    }));
+    this.checkChromeRunning = options.isChromeRunning || (typeof this.native?.enumerateWindows === 'function'
+      ? () => nativeChromeIsRunning(this.native)
+      : () => chromeIsRunning({ execFile: this.execFile }));
     this.closeTimeoutMs = Math.min(Math.max(Number(options.closeTimeoutMs) || DEFAULT_CLOSE_TIMEOUT_MS, 100), 10_000);
     this.closePollMs = Math.min(Math.max(Number(options.closePollMs) || DEFAULT_CLOSE_POLL_MS, 10), this.closeTimeoutMs);
     this.delay = options.delay || delay;
@@ -435,6 +465,8 @@ module.exports = {
   chromeIsRunning,
   findChromeExecutable,
   migrateChromeSession,
+  nativeChromeIsRunning,
+  nativeChromeWindows,
   normalUserDataDirectory,
   profileDirectory,
   requestChromeClose,
