@@ -18,6 +18,8 @@ const { ChromeAdapterRuntime } = require('./main/adapters/chrome/runtime.cjs');
 const { createWindowsChromeExtensionSetup } = require('./main/adapters/chrome/setup.cjs');
 const { runMacPermissionPreflight } = require('./main/macos-permissions.cjs');
 const { createUpdateService } = require('./main/updates.cjs');
+const { MessagesService } = require('./messages/service.cjs');
+const { MessagesMacBridge } = require('./messages/mac-bridge.cjs');
 const { createNativeAdapter } = require('../native/index.cjs');
 const { autoUpdater } = require('electron-updater');
 
@@ -30,7 +32,7 @@ app.setName('CompuSync');
 const hasLock = app.requestSingleInstanceLock();
 if (!hasLock) app.quit();
 
-let settings, tray, sync, inputRuntime, windowRuntime, clipboardSync, seamOverlay, nativeInput, updateService, config;
+let settings, messagesWindow, tray, sync, inputRuntime, windowRuntime, clipboardSync, messagesService, seamOverlay, nativeInput, updateService, config;
 let quitting = false;
 let changingSession = false;
 let backgroundLaunch = false;
@@ -243,6 +245,31 @@ function showSettings() {
   settings.on('closed', () => { settings = null; });
 }
 
+function messagesUiAllowed() {
+  return process.platform === 'win32' || process.env.COMPUSYNC_MESSAGES_UI === '1';
+}
+
+function showMessages() {
+  if (!messagesUiAllowed()) return;
+  if (messagesWindow && !messagesWindow.isDestroyed()) {
+    if (messagesWindow.isMinimized()) messagesWindow.restore();
+    messagesWindow.show();
+    messagesWindow.focus();
+    return;
+  }
+  messagesWindow = new BrowserWindow({
+    width: 980, height: 700, minWidth: 760, minHeight: 520,
+    title: 'Messages Companion', backgroundColor: '#f5f5f7', show: false,
+    autoHideMenuBar: true, webPreferences: webPreferences(),
+  });
+  const window = messagesWindow;
+  window.once('ready-to-show', () => { if (!window.isDestroyed()) window.show(); });
+  window.setMenuBarVisibility(false);
+  secureWindow(window);
+  window.loadFile(rendererPath('messages.html'));
+  window.on('closed', () => { if (messagesWindow === window) messagesWindow = null; });
+}
+
 function showMessageBox(options) {
   return settings && !settings.isDestroyed()
     ? dialog.showMessageBox(settings, options)
@@ -269,6 +296,10 @@ function menuTemplate() {
       click: () => inputRuntime?.setLinked(!inputRuntime.cursor.linked, 'menu'),
     },
     { label: 'Move cursor to other laptop', enabled: Boolean(cursorReady && inputRuntime?.cursor.linked), click: () => inputRuntime?.cursor.toggleOwnership() },
+    ...(messagesUiAllowed() ? [
+      { type: 'separator' },
+      { label: 'Messages Companion…', enabled: sync?.phase === 'connected', click: showMessages },
+    ] : []),
     { type: 'separator' },
     { label: 'Connection & settings…', accelerator: 'CmdOrCtrl+,', click: showSettings },
     { type: 'separator' },
@@ -413,6 +444,8 @@ async function startSession() {
   stopInputRuntime('session-restart');
   clipboardSync?.stop();
   clipboardSync = null;
+  messagesService?.stop();
+  messagesService = null;
   if (sync) await sync.stop();
   const layout = localLayout();
   sync = new Session({ ...config, layout, startClosed: backgroundLaunch });
@@ -421,6 +454,16 @@ async function startSession() {
     logger: applicationLogger,
   });
   clipboardSync.start();
+  messagesService = new MessagesService({
+    session: sync,
+    platform: process.platform,
+    bridge: process.platform === 'darwin' ? new MessagesMacBridge() : null,
+  });
+  messagesService.on('state', (state) => {
+    send(messagesWindow, 'messages:state', state);
+    updateMenu();
+  });
+  messagesService.start();
   sync.on('state', (state) => {
     applyState(state);
     // SharedInputRuntime consumes the same state event after this listener and
@@ -531,6 +574,16 @@ function setupIpc() {
       return { ok: true };
     } catch (error) { return { ok: false, error: error.message }; }
   });
+  const trustedMessages = (event) => messagesWindow && !messagesWindow.isDestroyed()
+    && event.sender === messagesWindow.webContents && event.senderFrame === messagesWindow.webContents.mainFrame;
+  ipcMain.handle('messages:bootstrap', (event) => {
+    if (!trustedMessages(event) || !messagesService) throw new Error('Messages Companion is not available.');
+    return messagesService.state();
+  });
+  ipcMain.handle('messages:command', async (event, method, payload) => {
+    if (!trustedMessages(event) || !messagesService) throw new Error('Messages Companion is not available.');
+    return messagesService.request(method, payload);
+  });
 }
 
 app.on('second-instance', (_event, argv) => { if (!argv.includes('--background')) activateApp(); });
@@ -546,6 +599,8 @@ app.on('before-quit', (event) => {
   stopInputRuntime('process-exit');
   clipboardSync?.stop();
   clipboardSync = null;
+  messagesService?.stop();
+  messagesService = null;
   seamOverlay?.destroy();
   seamOverlay = null;
   Promise.resolve(sync?.stop()).finally(() => app.quit());
