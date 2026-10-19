@@ -63,7 +63,8 @@ class RustAudioEngine extends EventEmitter {
       try {
         const state = this.native.status();
         this.emit('event', { type: 'timing', id: route.id, timing: {
-          clockReady: state.clockReady, delayMs: state.playoutDelayMs,
+          clockReady: state.running && state.clockReady, playing: state.running && state.playedFrames > 0,
+          delayMs: state.playoutDelayMs, rttMs: state.clockRttMs,
           uncertaintyMs: state.clockUncertaintyMs, phaseErrorMs: state.phaseErrorMs,
           latePackets: state.latePackets, resyncs: state.resyncs,
         } });

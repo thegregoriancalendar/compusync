@@ -125,6 +125,22 @@ pub use system::*;
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    #[cfg(windows)]
+    #[test]
+    fn missing_bus_preflight_leaves_real_windows_defaults_unchanged() {
+        let mut system = System::new().unwrap();
+        system.enable_policy().unwrap(); // Activation only; never calls SetDefaultEndpoint.
+        let originals: Vec<_> = (0..3).map(|role| system.current(role).unwrap()).collect();
+        assert!(system
+            .plan("compusync-nonexistent-test-bus", &originals[1])
+            .is_err());
+        assert_eq!(
+            (0..3)
+                .map(|role| system.current(role).unwrap())
+                .collect::<Vec<_>>(),
+            originals
+        );
+    }
     struct Fake {
         current: RefCell<[String; 3]>,
         fail: Option<usize>,
@@ -342,5 +358,28 @@ mod tests {
             assert!(result.result.is_err());
             assert_eq!(*f.current.borrow(), s.originals);
         }
+    }
+    #[test]
+    fn guard_marks_failed_restoration_for_journal_retention() {
+        let s = snapshot();
+        let f = Fake {
+            current: RefCell::new(s.originals.clone()),
+            fail: None,
+            missing: vec!["speakers".into(), "headphones".into()],
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send("START".into()).unwrap();
+        tx.send("STOP".into()).unwrap();
+        let outcome = guard_defaults(
+            &f,
+            &s,
+            rx,
+            |_| Ok(()),
+            || Ok(()),
+            std::time::Duration::from_secs(1),
+        );
+        assert!(!outcome.restored);
+        assert!(outcome.result.is_err());
+        assert_eq!(f.current(2).unwrap(), "communications");
     }
 }

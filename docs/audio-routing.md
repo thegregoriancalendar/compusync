@@ -66,6 +66,8 @@ Audio buffering also delays sound relative to video playing independently on the
 
 ## Timing and recovery
 
+The **Latency Monitor → Audio** section shows the active direction, scheduled capture-to-playback delay, audio clock-exchange round-trip time, clock uncertainty, and this laptop's playback schedule error. It also shows late packets and resynchronizations for the current route. Readings update every 500 ms once scheduled playback begins, clear when sharing stops or disconnects, and work while cursor linking is off. Scheduled delay and clock estimates do not measure acoustic speaker alignment or downstream Bluetooth latency.
+
 - Both hosts use native monotonic clocks: mach_absolute_time on Mac and QueryPerformanceCounter on Windows. CPAL 0.18.2 output timestamps use those same host clock domains. Mac capture uses the native IOProc input timestamp, converted from mach host time. Windows capture uses WASAPI GetBuffer QPC timestamps (100 ns units converted to the same native QPC timeline), handles silent buffers, and requests resync on discontinuities.
 - The source sends authenticated four-timestamp ping/pong exchanges. Startup requires eight valid observations and a best round-trip delay no higher than 10 ms, corresponding to at most 5 ms estimated network offset uncertainty. Models continue every 250 ms, using a recent bounded low-delay window. Small offset updates are slewed; large changes request a resynchronization.
 - Every 5 ms audio block carries an epoch, first frame index, capture timestamp, and absolute playback timestamp in source host time. Capture timestamps survive sample-rate conversion. Both local and remote outputs receive the same samples and deadlines.

@@ -132,6 +132,15 @@ test('simultaneous offers settle on one sender and one receiver with a common ro
   assert.equal([...macEngine.calls, ...windowsEngine.calls].filter(([call]) => call === 'receive').length, 1);
 });
 
+test('a later offer cannot replace an established sender', async (t) => {
+  const { mac, windows, macSession } = await pair(t, true);
+  mac.startRoute(); await settle();
+  const route = mac.route;
+  assert.equal(route.ready, true);
+  macSession.emit('peer-message', { type: 'audio.offer', id: '0' }, 'windows');
+  assert.equal(mac.route, route); assert.equal(windows.route.id, route.id);
+});
+
 test('Windows setup failures block sending while leaving Mac-to-Windows reception available', async (t) => {
   const { mac, windows, windowsEngine } = await pair(t, true);
   windowsEngine.routingStatus = () => ({ ready: false, buses: [], reason: 'Install VB-CABLE.' });
@@ -270,7 +279,9 @@ test('native engine supports Windows sending and Mac receiving with the same tra
 
 test('receiving packets alone cannot report synchronized playback; the device must have played scheduled frames', async (t) => {
   t.mock.timers.enable({ apis: ['setInterval'] });
-  let state = { running: true, packets: 10, clockReady: true, playedFrames: 0 };
+  let state = { running: true, packets: 10, clockReady: true, playedFrames: 0,
+    playoutDelayMs: 175, clockRttMs: 4.2, clockUncertaintyMs: 2.1,
+    phaseErrorMs: -0.25, latePackets: 3, resyncs: 2 };
   class NativeAudio {
     protocolVersion() { return AUDIO_VERSION; }
     async startReceiver() { return 45123; }
@@ -284,10 +295,18 @@ test('receiving packets alone cannot report synchronized playback; the device mu
   await engine.receive({ id: 'timed', key: '42'.repeat(32), peerIp: '127.0.0.1', outputId: '' });
   t.mock.timers.tick(500);
   assert.equal(events.some((event) => event.type === 'connected'), false);
+  assert.equal(events.at(-1).timing.playing, false);
   state = { ...state, playedFrames: 240, clockReady: false }; t.mock.timers.tick(500);
   assert.equal(events.some((event) => event.type === 'connected'), false);
   state = { ...state, clockReady: true }; t.mock.timers.tick(500);
   assert.equal(events.filter((event) => event.type === 'connected').length, 1);
+  assert.deepEqual(events.filter((event) => event.type === 'timing').at(-1).timing, {
+    clockReady: true, playing: true, delayMs: 175, rttMs: 4.2, uncertaintyMs: 2.1,
+    phaseErrorMs: -0.25, latePackets: 3, resyncs: 2,
+  });
+  state = { ...state, running: false }; t.mock.timers.tick(500);
+  assert.equal(events.filter((event) => event.type === 'timing').at(-1).timing.clockReady, false);
+  assert.equal(events.filter((event) => event.type === 'timing').at(-1).timing.playing, false);
 });
 
 test('audio negotiation uses real encrypted sessions and their observed socket addresses in either host role', async (t) => {

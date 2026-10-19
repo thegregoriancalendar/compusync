@@ -491,7 +491,7 @@ mod tests {
         assert!(remote.play_ns - remote.capture_ns >= 150 * MS);
         assert!((remote.samples[0][0] - local.samples[0][0]).abs() < 0.0001);
 
-        // A Windows scheduling discontinuity asks the Mac to choose a new
+        // A receiver scheduling discontinuity asks the source to choose a new
         // epoch. Both outputs must receive identical new future deadlines.
         receive_stats
             .resync_requested

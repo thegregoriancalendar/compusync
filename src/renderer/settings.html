@@ -104,7 +104,7 @@
 
     <section class="card" aria-labelledby="audio-heading">
       <div class="card-heading">
-        <div><h2 id="audio-heading">Audio manager</h2><p class="small">Play Mac audio on both laptops using a shared playback schedule.</p></div>
+        <div><h2 id="audio-heading">Audio manager</h2><p class="small">Play audio from either laptop on both outputs using a shared playback schedule.</p></div>
         <span id="audio-mode" class="mode-badge unlinked">Separate</span>
       </div>
       <p id="audio-status" class="small" role="status">Audio stays on each laptop.</p>
@@ -122,7 +122,7 @@
         </div>
       </div>
       <div id="audio-windows-output" hidden>
-        <label for="audio-output">Playback device on this laptop</label>
+        <label id="audio-output-label" for="audio-output">Playback device on this laptop</label>
         <div class="row">
           <select id="audio-output"><option value="">Windows default output</option></select>
           <button id="audio-refresh" type="button">Refresh devices</button>
@@ -169,6 +169,8 @@
         <h2 id="mouse-latency-heading">Latency Monitor</h2>
         <span class="mode-badge latency-estimate">Estimated</span>
       </div>
+      <section class="latency-group" aria-labelledby="mouse-latency-subheading">
+      <h3 id="mouse-latency-subheading">Mouse</h3>
       <p id="mouse-latency-status" class="small">Connect both laptops and link cursors to measure.</p>
       <table class="latency-table" aria-describedby="mouse-latency-help">
         <thead><tr><th scope="col">Direction</th><th scope="col">Typical</th><th scope="col">Slow (p95)</th></tr></thead>
@@ -179,6 +181,20 @@
       </table>
       <p id="mouse-latency-network" class="small"></p>
       <p id="mouse-latency-help" class="small">Move the Mac's mouse with the cursor on Windows, then the Windows mouse with the cursor on Mac. Typical is the median over the last 10 seconds; p95 shows slower updates. Starts when CompuSync receives mouse input and includes batching, network travel and the destination cursor update. Device/OS input delivery and screen redraw are excluded. One-way estimates assume similar network delay in both directions.</p>
+      </section>
+      <section class="latency-group" aria-labelledby="audio-latency-heading">
+        <h3 id="audio-latency-heading">Audio</h3>
+        <p id="audio-latency-status" class="small" role="status">Start audio sharing from either laptop to see timing. Cursor linking can stay off.</p>
+        <dl class="latency-metrics" aria-describedby="audio-latency-help">
+          <div><dt>Scheduled playback delay</dt><dd id="audio-latency-delay">&mdash;</dd></div>
+          <div><dt>Audio network round trip</dt><dd id="audio-latency-rtt">&mdash;</dd></div>
+          <div><dt>Clock uncertainty</dt><dd id="audio-latency-uncertainty">&mdash;</dd></div>
+          <div><dt>Local schedule error</dt><dd id="audio-latency-phase">&mdash;</dd></div>
+          <div><dt>Late packets</dt><dd id="audio-latency-late">&mdash;</dd></div>
+          <div><dt>Resynchronizations</dt><dd id="audio-latency-resyncs">&mdash;</dd></div>
+        </dl>
+        <p id="audio-latency-help" class="small">Playback delay runs from audio capture to scheduled output on both laptops. Clock uncertainty estimates network clock error; local schedule error shows this laptop's playback cursor deviation from the shared timeline. Speaker and Bluetooth latency are not measured. Counts cover this route on this laptop. Updates every half second while playing.</p>
+      </section>
     </section>
 
     <footer>

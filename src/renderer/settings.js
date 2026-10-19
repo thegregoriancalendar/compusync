@@ -181,6 +181,7 @@ function render(next) {
   $('clipboard-sync').checked = next.clipboardSync !== false;
   renderAudio(next);
   renderMouseLatency(next);
+  renderAudioLatency(next);
   $('auto-launch').disabled = !next.packaged;
   $('launch-note').hidden = next.packaged;
   const update = next.update || {
@@ -241,6 +242,32 @@ function renderMouseLatency(next) {
     ? `Network round trip (best recent): ${latency.networkRttMs.toFixed(1)} ms.` : '';
 }
 
+function renderAudioLatency(next) {
+  const audio = next.audio;
+  const timing = audio?.timing;
+  const connected = next.status.phase === 'connected';
+  const active = connected && audio?.active === true;
+  const ready = active && audio.phase !== 'error' && timing?.clockReady === true && timing?.playing === true;
+  const local = next.platform === 'win32' ? 'Windows' : 'Mac';
+  const peer = next.platform === 'win32' ? 'Mac' : 'Windows';
+  const direction = audio?.role === 'sender' ? `${local} \u2192 ${peer}` : `${peer} \u2192 ${local}`;
+  const ms = (value, prefix = '~', signed = false) => ready && Number.isFinite(value)
+    ? `${prefix}${signed && value > 0 ? '+' : ''}${value.toFixed(2)} ms` : '\u2014';
+  const count = (value) => ready && Number.isSafeInteger(value) && value >= 0 ? String(value) : '\u2014';
+  $('audio-latency-delay').textContent = ms(timing?.delayMs);
+  $('audio-latency-rtt').textContent = ms(timing?.rttMs);
+  $('audio-latency-uncertainty').textContent = ms(timing?.uncertaintyMs, '\u00b1');
+  $('audio-latency-phase').textContent = ms(timing?.phaseErrorMs, '', true);
+  $('audio-latency-late').textContent = count(timing?.latePackets);
+  $('audio-latency-resyncs').textContent = count(timing?.resyncs);
+  $('audio-latency-status').textContent = !connected
+    ? 'Connect both laptops and start audio sharing to see timing.'
+    : audio?.phase === 'error' ? audio.message
+      : !active ? 'Start audio sharing from either laptop to see timing. Cursor linking can stay off.'
+        : ready ? `${direction} audio. Both outputs follow the shared playback schedule.`
+          : `${direction} audio. Waiting for synchronized playback...`;
+}
+
 function renderAudio(next) {
   const audio = next.audio;
   const windows = next.platform === 'win32';
@@ -271,6 +298,7 @@ function renderAudio(next) {
     $('audio-source').dataset.sources = sourceSignature;
   }
   $('audio-source').value = audio?.sourceId || '';
+  $('audio-output-label').textContent = windows ? 'Playback device on this laptop' : 'Playback device for received audio';
   $('audio-output').disabled = active || !audio?.available;
   $('audio-refresh').disabled = active || !audio?.available;
   const select = $('audio-output');
@@ -309,9 +337,12 @@ function renderAudio(next) {
   }
   $('audio-help').textContent = !audio?.available
     ? 'Rebuild the native addon on both laptops to enable audio routing.'
+    : active ? audio.role === 'sender'
+      ? windows ? 'Windows output is temporarily routed through VB-CABLE. Stop sharing to restore your previous outputs.'
+        : 'Local Mac playback is delayed to follow the shared schedule.'
+      : 'Playing audio from the other laptop through the selected playback device.'
     : windows
-      ? active ? 'Windows output is temporarily routed through VB-CABLE. Stop sharing to restore your previous outputs.'
-        : audio.routing?.reason || 'Choose physical speakers or headphones. Apps must use System default in shared mode; close other monitors of VB-CABLE. Start here to share Windows audio.'
+      ? audio.routing?.reason || 'Choose physical speakers or headphones. Apps must use System default in shared mode; close other monitors of VB-CABLE. Start here to share Windows audio.'
       : !audio.canCapture
         ? 'Mac audio capture requires macOS 14.6 or later.'
         : !audio.peerReady && next.status.phase === 'connected'

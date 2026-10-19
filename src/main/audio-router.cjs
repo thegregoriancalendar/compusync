@@ -31,7 +31,7 @@ class AudioRouter extends EventEmitter {
   }
 
   state() {
-    return { phase: this.phase, message: this.message, active: Boolean(this.route),
+    return { role: this.route?.role || null, phase: this.phase, message: this.message, active: Boolean(this.route),
       canStart: this.connected && this.canCapture && this.peer?.canReceive === true && this.peer.platform !== this.platform && this.routing.ready && !this.route,
       peerReady: Boolean(this.peer), canCapture: this.canCapture, available: this.engine.available,
       sourceId: this.sourceId, routing: this.routing, outputId: this.outputId, outputs: this.outputs, timing: this.timing,
@@ -126,7 +126,7 @@ class AudioRouter extends EventEmitter {
     if (message.type === 'audio.offer') {
       if (!['darwin', 'win32'].includes(this.platform) || !this.engine.available || !this.peer?.canSend || this.peer.platform === this.platform) return;
       if (this.route) {
-        if (this.route.role !== 'sender' || message.id >= this.route.id) return;
+        if (this.route.role !== 'sender' || this.route.ready || message.id >= this.route.id) return;
         this.stopRoute('Resolving simultaneous audio requests.');
       }
       const route = this.route = { id: message.id, role: 'receiver' };
