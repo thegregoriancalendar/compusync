@@ -93,6 +93,7 @@ function readConfig() {
     clipboardSync: saved.clipboardSync !== false,
     audioSourceId: typeof saved.audioSourceId === 'string' && saved.audioSourceId.length <= 256 ? saved.audioSourceId : '',
     audioOutputId: typeof saved.audioOutputId === 'string' && saved.audioOutputId.length <= 256 ? saved.audioOutputId : '',
+    audioPlaybackMode: saved.audioPlaybackMode === 'split-stereo' ? 'split-stereo' : 'stereo',
     cursorSettings: cursorSettingsFromSaved(saved.cursorSettings),
     dismissedNotices: Array.isArray(saved.dismissedNotices)
       ? saved.dismissedNotices.filter((id) => typeof id === 'string' && id.length <= 100).slice(0, 100) : [],
@@ -370,6 +371,7 @@ function ensureInputRuntime() {
       onNotice: addNotice,
       onSettingsChange: (layout) => {
         config.cursorSettings = { ...config.cursorSettings, ...layout };
+        audioRouter?.layoutChanged(config.cursorSettings);
         saveConfig();
         refreshStatus();
       },
@@ -391,7 +393,7 @@ function ensureInputRuntime() {
       },
     });
     inputRuntime = startingInputRuntime;
-    inputRuntime.on('latency', () => send(settings, 'sync:details', details()));
+    inputRuntime.on('latency', (latency) => send(settings, 'sync:mouse-latency', latency));
     inputRuntime.start();
     const chrome = new ChromeAdapterRuntime({
       native: nativeInput,
@@ -481,6 +483,8 @@ async function startSession() {
     engine: new RustAudioEngine({ binding: audioBinding.binding, bindingPath: audioBinding.path }),
     sourceId: config.audioSourceId,
     outputId: config.audioOutputId,
+    playbackMode: config.audioPlaybackMode,
+    layoutSettings: config.cursorSettings,
   });
   audioRouter.on('state', refreshStatus);
   audioRouter.start();
@@ -566,6 +570,7 @@ function setupIpc() {
         config.clipboardSync = nextClipboardSync;
         clipboardSync?.setEnabled(config.clipboardSync);
         config.cursorSettings = nextCursorSettings;
+        audioRouter?.layoutChanged(config.cursorSettings);
         inputRuntime?.updateSettings(config.cursorSettings);
         if (app.isPackaged) app.setLoginItemSettings({
           openAtLogin: config.autoLaunch, args: ['--background'],
@@ -576,6 +581,10 @@ function setupIpc() {
         refreshStatus();
       } else if (command === 'audio-start') {
         audioRouter.startRoute();
+      } else if (command === 'audio-playback-mode') {
+        audioRouter.setPlaybackMode(data?.mode);
+        config.audioPlaybackMode = audioRouter.playbackMode;
+        saveConfig();
       } else if (command === 'audio-stop') {
         audioRouter.stopRoute();
       } else if (command === 'audio-outputs') {

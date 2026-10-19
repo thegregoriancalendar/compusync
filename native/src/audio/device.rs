@@ -9,7 +9,10 @@ use cpal::{
     FromSample, SampleFormat, SizedSample,
 };
 use rtrb::Consumer;
-use std::sync::{atomic::Ordering, Arc};
+use std::sync::{
+    atomic::{AtomicU8, Ordering},
+    Arc,
+};
 
 pub fn outputs() -> Result<Vec<AudioOutput>, String> {
     cpal::default_host()
@@ -44,15 +47,16 @@ pub fn playback(
     device: &cpal::Device,
     consumer: Consumer<AudioPacket>,
     stats: Arc<Stats>,
+    channel: Arc<AtomicU8>,
 ) -> Result<cpal::Stream, String> {
     let supported = device.default_output_config().map_err(|e| e.to_string())?;
     let config = supported.config();
     match supported.sample_format() {
-        SampleFormat::F32 => output::<f32>(device, config, consumer, stats),
-        SampleFormat::F64 => output::<f64>(device, config, consumer, stats),
-        SampleFormat::I16 => output::<i16>(device, config, consumer, stats),
-        SampleFormat::I32 => output::<i32>(device, config, consumer, stats),
-        SampleFormat::U16 => output::<u16>(device, config, consumer, stats),
+        SampleFormat::F32 => output::<f32>(device, config, consumer, stats, channel),
+        SampleFormat::F64 => output::<f64>(device, config, consumer, stats, channel),
+        SampleFormat::I16 => output::<i16>(device, config, consumer, stats, channel),
+        SampleFormat::I32 => output::<i32>(device, config, consumer, stats, channel),
+        SampleFormat::U16 => output::<u16>(device, config, consumer, stats, channel),
         format => Err(format!(
             "Audio output format {format} is not supported yet."
         )),
@@ -69,6 +73,7 @@ fn output<T: SizedSample + FromSample<f32>>(
     config: cpal::StreamConfig,
     mut consumer: Consumer<AudioPacket>,
     stats: Arc<Stats>,
+    playback_channel: Arc<AtomicU8>,
 ) -> Result<cpal::Stream, String> {
     let channels = config.channels as usize;
     let rate = config.sample_rate;
@@ -122,6 +127,7 @@ fn output<T: SizedSample + FromSample<f32>>(
                 }
                 let mut played = 0;
                 let mut gap = false;
+                let mode = playback_channel.load(Ordering::Acquire);
                 for (index, frame) in data.chunks_mut(channels).enumerate() {
                     let sample = buffer.sample((start + index as f64 * step) as i64);
                     if sample.is_some() {
@@ -132,13 +138,8 @@ fn output<T: SizedSample + FromSample<f32>>(
                     }
                     let stereo = sample.unwrap_or([0.0; 2]);
                     for (channel, value) in frame.iter_mut().enumerate() {
-                        *value = T::from_sample(if channels == 1 {
-                            (stereo[0] + stereo[1]) * 0.5
-                        } else if channel < 2 {
-                            stereo[channel]
-                        } else {
-                            0.0
-                        });
+                        *value =
+                            T::from_sample(super::channel::sample(stereo, mode, channel, channels));
                     }
                 }
                 stats.played.fetch_add(played, Ordering::Relaxed);

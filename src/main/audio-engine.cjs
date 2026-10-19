@@ -16,6 +16,7 @@ class RustAudioEngine extends EventEmitter {
     super();
     this.native = binding?.NativeAudio ? new binding.NativeAudio() : null;
     this.available = this.native?.protocolVersion?.() === AUDIO_VERSION;
+    this.supportsStereoSplit = this.available && typeof this.native?.setPlaybackChannel === 'function';
     this.canSend = this.available && (platform === 'win32' || (platform === 'darwin' && supportsMacCapture(release)));
     this.canReceive = this.available && ['darwin', 'win32'].includes(platform);
     this.guardPath = bindingPath ? path.join(path.dirname(bindingPath), 'compusync-recovery-guard.exe') : '';
@@ -35,21 +36,23 @@ class RustAudioEngine extends EventEmitter {
     return this.prepared;
   }
 
-  async receive({ id, key, peerIp, outputId }) {
+  async receive({ id, key, peerIp, outputId, channel = 'stereo' }) {
     if (!this.canReceive) throw new Error('Rebuild the native addon to enable audio playback.');
-    const route = this.route = { id, role: 'receiver', connected: false };
+    const route = this.route = { id, role: 'receiver', connected: false, channel };
     await this.prepareRouting();
     if (this.route !== route) throw new Error('Audio start cancelled.');
+    this.setPlaybackChannel(route.channel);
     const port = await this.native.startReceiver(key, peerIp || '', outputId);
     if (this.route === route) this.poll(route);
     return port;
   }
 
-  async send({ id, key, peerIp, port, outputId = '', sourceId = '' }) {
+  async send({ id, key, peerIp, port, outputId = '', sourceId = '', channel = 'stereo' }) {
     if (!this.canSend) throw new Error('Synchronized Mac audio needs the rebuilt native addon and macOS 14.6 or later.');
-    const route = this.route = { id, role: 'sender', startedAt: Date.now() };
+    const route = this.route = { id, role: 'sender', startedAt: Date.now(), channel };
     await this.prepareRouting();
     if (this.route !== route) throw new Error('Audio start cancelled.');
+    this.setPlaybackChannel(route.channel);
     // The pinned Electron runtime includes NSAudioCaptureUsageDescription, so
     // development launches can request the same native OS permission as a build.
     await this.native.startSender(key, peerIp || '', port, outputId, sourceId, this.guardPath);
@@ -62,6 +65,11 @@ class RustAudioEngine extends EventEmitter {
       if (this.route !== route) return;
       try {
         const state = this.native.status();
+        const warning = state.running && typeof state.warning === 'string' ? state.warning.slice(0, 500) : null;
+        if (warning !== (route.warning || null)) {
+          route.warning = warning;
+          this.emit('event', { type: 'warning', id: route.id, message: warning });
+        }
         this.emit('event', { type: 'timing', id: route.id, timing: {
           clockReady: state.running && state.clockReady, playing: state.running && state.playedFrames > 0,
           delayMs: state.playoutDelayMs, rttMs: state.clockRttMs,
@@ -102,11 +110,22 @@ class RustAudioEngine extends EventEmitter {
     return this.native.setVolume(outputId, level);
   }
 
+  setPlaybackChannel(channel) {
+    if (!['stereo', 'left', 'right'].includes(channel)) throw new Error('Choose a valid audio channel.');
+    if (!this.supportsStereoSplit) {
+      if (channel !== 'stereo') throw new Error('Rebuild the native addon to enable split stereo.');
+      return;
+    }
+    this.native.setPlaybackChannel(channel);
+    if (this.route) this.route.channel = channel;
+  }
+
   stop() {
     this.route = null;
     this.prepared = null;
     clearInterval(this.timer);
     this.native?.stop(); // Also cancels a start still waiting on OS permissions.
+    if (this.supportsStereoSplit) this.native.setPlaybackChannel('stereo');
   }
 }
 

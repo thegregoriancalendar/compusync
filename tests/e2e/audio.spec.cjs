@@ -31,6 +31,15 @@ test('Windows audio manager exposes routing setup and refuses capture before pai
     expect(await page.locator('#audio-output option').count()).toBe(audio.outputs.filter((output) => !audio.routing.buses.some((bus) => bus.id === output.id)).length + 1);
     expect(await page.evaluate(() => window.compusync.command('audio-start'))).toMatchObject({ ok: false });
     expect(await page.evaluate(() => window.compusync.command('audio-output', { id: 'missing-device' }))).toMatchObject({ ok: false });
+    await expect(page.locator('#audio-warning')).toBeHidden();
+    const warning = 'screenpipe-app.exe has an audio session. This may be a recorder.';
+    await page.evaluate((warning) => {
+      renderAudio({ ...details, audio: { ...details.audio, active: true, phase: 'streaming', warning } });
+    }, warning);
+    await expect(page.locator('#audio-warning')).toHaveText(warning);
+    await expect(page.locator('#audio-stop')).toBeEnabled();
+    await page.evaluate(() => renderAudio(details));
+    await expect(page.locator('#audio-warning')).toBeHidden();
     await page.screenshot({ path: 'test-results/audio-manager-windows.png', fullPage: true });
     expect(errors).toEqual([]);
   } finally {

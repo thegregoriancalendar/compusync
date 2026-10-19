@@ -91,6 +91,7 @@ pub fn run_guard(bus: &str, output: &str, owner: u32) -> Result<(), String> {
         }
     });
     let mut next_bypass_check = None;
+    let mut last_warning = None;
     let outcome = crate::guard_defaults(
         &system,
         &snapshot,
@@ -106,7 +107,16 @@ pub fn run_guard(bus: &str, output: &str, owner: u32) -> Result<(), String> {
             let next =
                 next_bypass_check.get_or_insert_with(|| Instant::now() + Duration::from_secs(2));
             if Instant::now() >= *next {
-                system.check_bypass(owner)?;
+                let warning = system.bypass_warning(owner).unwrap_or_else(|error| {
+                    Some(format!("Could not inspect other Windows audio sessions. Sharing continues: {error}"))
+                });
+                if warning != last_warning {
+                    say(&format!(
+                        "WARNING {}",
+                        warning.as_deref().unwrap_or("").replace(['\r', '\n'], " ")
+                    ))?;
+                    last_warning = warning;
+                }
                 *next = Instant::now() + Duration::from_millis(500);
             }
             Ok(())

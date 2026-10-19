@@ -49,19 +49,7 @@ pub fn restore(system: &impl Defaults, snapshot: &Snapshot) -> Result<(), String
 }
 
 pub fn apply(system: &impl Defaults, snapshot: &Snapshot) -> Result<(), String> {
-    for role in 0..3 {
-        if system.current(role).ok().as_deref() != Some(&snapshot.originals[role]) {
-            let _ = restore(system, snapshot);
-            return Err("Windows output changed during setup. Retry sharing.".into());
-        }
-        if let Err(error) = system.set(role, &snapshot.bus) {
-            let recovery = restore(system, snapshot);
-            return Err(format!(
-                "Could not route Windows audio: {error}. Recovery: {recovery:?}"
-            ));
-        }
-    }
-    Ok(())
+    apply_with_recovery(system, snapshot).result
 }
 
 /// Run the pipe protocol independently from Windows/COM, so cancellation,
@@ -69,6 +57,68 @@ pub fn apply(system: &impl Defaults, snapshot: &Snapshot) -> Result<(), String> 
 pub struct GuardOutcome {
     pub result: Result<(), String>,
     pub restored: bool,
+}
+
+fn current(system: &impl Defaults, role: usize) -> Result<String, String> {
+    let name = ["console", "multimedia", "communications"][role];
+    system
+        .current(role)
+        .map_err(|error| format!("Could not read the Windows {name} output during setup: {error}"))
+}
+fn changed(role: usize) -> String {
+    let name = ["console", "multimedia", "communications"][role];
+    format!("Windows {name} output changed during setup. Retry sharing.")
+}
+fn finish_recovery(
+    system: &impl Defaults,
+    snapshot: &Snapshot,
+    result: Result<(), String>,
+) -> GuardOutcome {
+    let recovery = restore(system, snapshot);
+    GuardOutcome {
+        restored: recovery.is_ok(),
+        result: recovery.and(result),
+    }
+}
+fn apply_with_recovery(system: &impl Defaults, snapshot: &Snapshot) -> GuardOutcome {
+    let mut attempted = false;
+    let result = (|| {
+        // Validate the whole snapshot before our first write. A change before
+        // START belongs to the user and must not be "recovered" by this route.
+        for role in 0..3 {
+            if current(system, role)? != snapshot.originals[role] {
+                return Err(changed(role));
+            }
+        }
+        for role in 0..3 {
+            let id = current(system, role)?;
+            // Windows can link console and multimedia defaults: writing the
+            // first role can already move the second role to our bus. Accept
+            // that side effect, but never replace an unrelated new selection.
+            if id != snapshot.originals[role] && id != snapshot.bus {
+                return Err(changed(role));
+            }
+            attempted = true; // A failing setter may still have changed Windows.
+            system
+                .set(role, &snapshot.bus)
+                .map_err(|error| format!("Could not route Windows audio: {error}"))?;
+        }
+        // A later setter or external change must not undo an earlier role.
+        for role in 0..3 {
+            if current(system, role)? != snapshot.bus {
+                return Err(changed(role));
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() && attempted {
+        finish_recovery(system, snapshot, result)
+    } else {
+        GuardOutcome {
+            result,
+            restored: !attempted,
+        }
+    }
 }
 pub fn guard_defaults(
     system: &impl Defaults,
@@ -82,14 +132,24 @@ pub fn guard_defaults(
         sync::mpsc::RecvTimeoutError,
         time::{Duration, Instant},
     };
-    let mut attempted = false;
-    let result = (|| {
+    let start = (|| {
         announce("READY")?;
         if commands.recv_timeout(watchdog).ok().as_deref() != Some("START") {
             return Err("Windows routing start was cancelled.".into());
         }
-        attempted = true;
-        apply(system, snapshot)?;
+        Ok(())
+    })();
+    if start.is_err() {
+        return GuardOutcome {
+            result: start,
+            restored: true,
+        };
+    }
+    let applied = apply_with_recovery(system, snapshot);
+    if applied.result.is_err() {
+        return applied;
+    }
+    let result = (|| {
         announce("ROUTED")?;
         let mut heartbeat = Instant::now();
         loop {
@@ -105,15 +165,7 @@ pub fn guard_defaults(
         }
         Ok(())
     })();
-    let recovery = if attempted {
-        restore(system, snapshot)
-    } else {
-        Ok(())
-    };
-    GuardOutcome {
-        restored: recovery.is_ok(),
-        result: recovery.and(result),
-    }
+    finish_recovery(system, snapshot, result)
 }
 
 #[cfg(windows)]
@@ -171,6 +223,129 @@ mod tests {
                 "communications".into(),
             ],
         }
+    }
+    // Reproduce Windows linking eConsole and eMultimedia, rather than assuming
+    // that setting one ERole only affects that one ERole.
+    struct Linked(Fake);
+    impl Defaults for Linked {
+        fn current(&self, role: usize) -> Result<String, String> {
+            self.0.current(role)
+        }
+        fn active(&self, id: &str) -> bool {
+            self.0.active(id)
+        }
+        fn set(&self, role: usize, id: &str) -> Result<(), String> {
+            self.0.set(role, id)?;
+            if role < 2 {
+                self.0.current.borrow_mut()[1 - role] = id.into();
+            }
+            Ok(())
+        }
+    }
+    fn linked(fail: Option<usize>) -> (Snapshot, Linked) {
+        let mut s = snapshot();
+        s.originals[1] = s.originals[0].clone();
+        let f = Linked(Fake {
+            current: RefCell::new(s.originals.clone()),
+            fail,
+            missing: vec![],
+        });
+        (s, f)
+    }
+    #[test]
+    fn linked_console_and_multimedia_roles_route_and_restore() {
+        let (s, f) = linked(None);
+        apply(&f, &s).unwrap();
+        assert_eq!(*f.0.current.borrow(), ["bus", "bus", "bus"]);
+        restore(&f, &s).unwrap();
+        assert_eq!(*f.0.current.borrow(), s.originals);
+    }
+    #[test]
+    fn linked_roles_roll_back_after_a_later_switch_failure() {
+        for failed in 1..3 {
+            let (s, f) = linked(Some(failed));
+            assert!(apply(&f, &s).is_err());
+            assert_eq!(*f.0.current.borrow(), s.originals);
+        }
+    }
+    #[test]
+    fn linked_roles_preserve_a_later_user_selection() {
+        let (s, f) = linked(None);
+        apply(&f, &s).unwrap();
+        f.set(1, "user-choice").unwrap();
+        restore(&f, &s).unwrap();
+        assert_eq!(
+            *f.0.current.borrow(),
+            ["user-choice", "user-choice", "communications"]
+        );
+    }
+    #[test]
+    fn unrelated_changes_during_switch_still_abort_and_preserve_user_choice() {
+        struct Changing(Fake, usize, usize);
+        impl Defaults for Changing {
+            fn current(&self, role: usize) -> Result<String, String> {
+                self.0.current(role)
+            }
+            fn active(&self, id: &str) -> bool {
+                self.0.active(id)
+            }
+            fn set(&self, role: usize, id: &str) -> Result<(), String> {
+                self.0.set(role, id)?;
+                if id == "bus" && role == self.1 {
+                    self.0.set(self.2, "user-choice")?;
+                }
+                Ok(())
+            }
+        }
+        // Changes to both a pending role and an already-switched role.
+        for (after, changed) in [(0, 2), (2, 0)] {
+            let s = snapshot();
+            let f = Changing(
+                Fake {
+                    current: RefCell::new(s.originals.clone()),
+                    fail: None,
+                    missing: vec![],
+                },
+                after,
+                changed,
+            );
+            assert!(apply(&f, &s).is_err());
+            for role in 0..3 {
+                assert_eq!(
+                    f.current(role).unwrap(),
+                    if role == changed {
+                        "user-choice"
+                    } else {
+                        &s.originals[role]
+                    }
+                );
+            }
+        }
+    }
+    #[test]
+    fn pre_start_user_selection_of_bus_is_not_claimed_or_restored() {
+        let s = snapshot();
+        let f = Fake {
+            current: RefCell::new(s.originals.clone()),
+            fail: None,
+            missing: vec![],
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send("START".into()).unwrap();
+        let outcome = guard_defaults(
+            &f,
+            &s,
+            rx,
+            |event| {
+                assert_eq!(event, "READY");
+                f.set(1, "bus")
+            },
+            || panic!("route must not start"),
+            std::time::Duration::from_secs(1),
+        );
+        assert!(outcome.result.is_err());
+        assert!(outcome.restored);
+        assert_eq!(*f.current.borrow(), ["speakers", "bus", "communications"]);
     }
     #[test]
     fn partial_switch_rolls_back_every_changed_role() {

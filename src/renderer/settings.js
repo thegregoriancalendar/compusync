@@ -2,6 +2,7 @@
 
 const api = window.compusync;
 const $ = (id) => document.getElementById(id);
+const { setText, reconcileChildren } = window.CompuSyncDOM;
 let details;
 let selectedTab = false;
 let copyTimer;
@@ -12,6 +13,8 @@ let layoutDrag = null;
 let layoutViewportDrag = null;
 let layoutView = { zoom: 1, panX: 0, panY: 0 };
 const volumeEdits = new Map();
+const monitorSignatures = new WeakMap();
+const noticeElements = new Map();
 
 const localCursorDefaults = {
   macPosition: 'left',
@@ -30,6 +33,9 @@ function diagramGroups(next) {
 }
 
 function renderMonitorGroup(element, platform, group, computerName) {
+  const signature = JSON.stringify([platform, group, computerName]);
+  if (monitorSignatures.get(element) === signature) return;
+  monitorSignatures.set(element, signature);
   element.replaceChildren();
   const platformName = platform === 'mac' ? 'Mac' : 'Windows';
   const count = group.monitors.length;
@@ -76,7 +82,7 @@ function renderScreenLayout(next = details) {
   );
   editor.style.backgroundSize = `${gridSize}px ${gridSize}px`;
   editor.style.backgroundPosition = `${gridOrigin.x}px ${gridOrigin.y}px`;
-  $('layout-zoom-level').textContent = `${Math.round(layoutView.zoom * 100)}%`;
+  setText($('layout-zoom-level'), `${Math.round(layoutView.zoom * 100)}%`);
   const peer = next.status?.peers?.[0];
   for (const [platform, id] of [['mac', 'layout-mac'], ['windows', 'layout-windows']]) {
     const rect = layoutRects[platform];
@@ -92,19 +98,27 @@ function renderScreenLayout(next = details) {
     const computerName = next.platform === nativePlatform ? next.name : peer?.name || '';
     renderMonitorGroup(element, platform, groups[platform], computerName);
   }
-  $('layout-description').textContent = window.CompuSyncScreenLayout.arrangementText(layoutDraft.macPosition);
+  setText($('layout-description'), window.CompuSyncScreenLayout.arrangementText(layoutDraft.macPosition));
 }
 
 function setValueUnlessEditing(id, value) {
   const field = $(id);
-  if (document.activeElement !== field) field.value = String(value);
+  if (document.activeElement !== field && field.value !== String(value)) field.value = String(value);
 }
 
 function renderNotices(notices = []) {
   const container = $('notices');
-  container.replaceChildren();
+  const children = [];
+  const ids = new Set();
   for (const notice of notices) {
-    if (!notice || typeof notice.id !== 'string') continue;
+    if (!notice || typeof notice.id !== 'string' || ids.has(notice.id)) continue;
+    ids.add(notice.id);
+    const signature = JSON.stringify(notice);
+    const cached = noticeElements.get(notice.id);
+    if (cached?.signature === signature) {
+      children.push(cached.article);
+      continue;
+    }
     const article = document.createElement('article');
     article.className = `notice ${notice.kind === 'permission' ? 'permission' : ''}`;
     const title = document.createElement('strong');
@@ -127,8 +141,11 @@ function renderNotices(notices = []) {
       dismiss.addEventListener('click', () => command('dismiss-notice', { id: notice.id }));
       article.append(dismiss);
     }
-    container.append(article);
+    noticeElements.set(notice.id, { signature, article });
+    children.push(article);
   }
+  for (const id of noticeElements.keys()) if (!ids.has(id)) noticeElements.delete(id);
+  reconcileChildren(container, children);
   container.hidden = !container.childElementCount;
 }
 
@@ -160,23 +177,23 @@ function render(next) {
   if (!layoutDrag) layoutDraft = { macPosition: cursor.macPosition, displayOffset: cursor.displayOffset };
   $('pairing-card').hidden = connected;
   $('status-dot').className = `dot ${status.phase}`;
-  $('status').textContent = connected ? `Connected to ${status.peers[0]?.name || 'your other laptop'}` : {
+  setText($('status'), connected ? `Connected to ${status.peers[0]?.name || 'your other laptop'}` : {
     starting: 'Getting ready', hosting: 'Ready to pair', connecting: 'Connecting…', reconnecting: 'Waiting for your other laptop', error: 'Connection needs attention',
-  }[status.phase] || 'Not connected';
-  $('status-description').textContent = status.message || (connected ? 'Cursor and Chrome handoff are ready between your laptops.' : status.role === 'host' ? `${next.name} · Share the invitation below.` : 'Keep CompuSync open on the other laptop.');
+  }[status.phase] || 'Not connected');
+  setText($('status-description'), status.message || (connected ? 'Cursor and Chrome handoff are ready between your laptops.' : status.role === 'host' ? `${next.name} · Share the invitation below.` : 'Keep CompuSync open on the other laptop.'));
   $('hosting').hidden = status.role !== 'host' || status.phase === 'error';
   $('create-host').hidden = !$('hosting').hidden;
   const code = next.invitation?.code || '';
-  $('invitation').value = code;
+  setValueUnlessEditing('invitation', code);
   $('copy').disabled = !code;
   $('new-code').disabled = connected;
-  $('code-status').textContent = connected
+  setText($('code-status'), connected
     ? 'Connected. This pairing is saved for next time.'
     : status.phase === 'reconnecting'
       ? 'Pairing saved. Waiting for the other laptop to reconnect.'
-      : code ? '' : 'Code expired or used. Choose New code to pair again.';
-  $('host-addresses').textContent = next.addresses.map((host) => `${host}:${next.port}`).join(' · ');
-  $('discovery-error').textContent = next.invitation?.discoveryError || '';
+      : code ? '' : 'Code expired or used. Choose New code to pair again.');
+  setText($('host-addresses'), next.addresses.map((host) => `${host}:${next.port}`).join(' · '));
+  setText($('discovery-error'), next.invitation?.discoveryError || '');
   $('auto-launch').checked = next.autoLaunch;
   $('clipboard-sync').checked = next.clipboardSync !== false;
   renderAudio(next);
@@ -188,20 +205,20 @@ function render(next) {
     phase: 'disabled', currentVersion: '', canCheck: false, canRestart: false,
     message: 'Automatic updates are available in the installed Windows and macOS apps.',
   };
-  $('update-status').textContent = update.message;
+  setText($('update-status'), update.message);
   $('update-check').disabled = !update.canCheck;
   $('update-install').hidden = !update.canRestart;
-  $('app-version').textContent = update.currentVersion ? `Current version ${update.currentVersion}` : '';
+  setText($('app-version'), update.currentVersion ? `Current version ${update.currentVersion}` : '');
   renderScreenLayout(next);
   setValueUnlessEditing('acceleration-base', cursor.acceleration.base);
   setValueUnlessEditing('acceleration-threshold', cursor.acceleration.threshold);
   setValueUnlessEditing('acceleration-slope', cursor.acceleration.slope);
   setValueUnlessEditing('edge-resistance', cursor.edgeResistanceVU);
-  $('cursor-mode-status').textContent = cursor.linked ? 'Linked' : 'Unlinked';
+  setText($('cursor-mode-status'), cursor.linked ? 'Linked' : 'Unlinked');
   $('cursor-mode-status').className = `mode-badge${cursor.linked ? '' : ' unlinked'}`;
-  $('cursor-mode').textContent = cursor.linked ? 'Unlink cursors' : cursorPending ? 'Linking…' : 'Link cursors';
+  setText($('cursor-mode'), cursor.linked ? 'Unlink cursors' : cursorPending ? 'Linking…' : 'Link cursors');
   $('cursor-mode').disabled = !cursorReady || cursorPending;
-  $('cursor-mode-description').textContent = !connected
+  setText($('cursor-mode-description'), !connected
     ? 'The saved pairing must reconnect before cursor linking is available.'
     : !cursorReady
       ? 'Cursor linking is unavailable. Review the notice above.'
@@ -209,7 +226,7 @@ function render(next) {
         ? 'Waiting for the other laptop to enter shared-cursor mode.'
       : cursor.linked
         ? 'One cursor can move and type across both laptops.'
-        : 'Each laptop currently has its own independent cursor.';
+        : 'Each laptop currently has its own independent cursor.');
   $('toggle-ownership').disabled = !connected || !cursor.linked;
   renderNotices(next.notices);
   if (!selectedTab) tab(status.role === 'join');
@@ -227,19 +244,19 @@ function renderMouseLatency(next) {
   for (const [direction, stats] of Object.entries(directions)) {
     const median = $(`latency-${direction}`);
     const p95 = $(`latency-${direction}-p95`);
-    median.textContent = format(linked ? stats?.medianMs : null);
-    p95.textContent = format(linked ? stats?.p95Ms : null);
+    setText(median, format(linked ? stats?.medianMs : null));
+    setText(p95, format(linked ? stats?.p95Ms : null));
     const title = linked && stats ? `${stats.samples} samples; clock uncertainty about \u00b1${stats.uncertaintyMs.toFixed(1)} ms.` : '';
     median.title = title;
     p95.title = title;
   }
-  $('mouse-latency-status').textContent = !linked
+  setText($('mouse-latency-status'), !linked
     ? 'Connect both laptops and link cursors to measure.'
     : !latency || latency.calibrating
       ? 'Calibrating timing with the other laptop. Both laptops need the current build.'
-      : 'Live while moving the other laptop\'s cursor. Readings clear after 10 seconds without samples.';
-  $('mouse-latency-network').textContent = linked && Number.isFinite(latency?.networkRttMs)
-    ? `Network round trip (best recent): ${latency.networkRttMs.toFixed(1)} ms.` : '';
+      : 'Live while moving the other laptop\'s cursor. Readings clear after 10 seconds without samples.');
+  setText($('mouse-latency-network'), linked && Number.isFinite(latency?.networkRttMs)
+    ? `Network round trip (best recent): ${latency.networkRttMs.toFixed(1)} ms.` : '');
 }
 
 function renderAudioLatency(next) {
@@ -254,35 +271,46 @@ function renderAudioLatency(next) {
   const ms = (value, prefix = '~', signed = false) => ready && Number.isFinite(value)
     ? `${prefix}${signed && value > 0 ? '+' : ''}${value.toFixed(2)} ms` : '\u2014';
   const count = (value) => ready && Number.isSafeInteger(value) && value >= 0 ? String(value) : '\u2014';
-  $('audio-latency-delay').textContent = ms(timing?.delayMs);
-  $('audio-latency-rtt').textContent = ms(timing?.rttMs);
-  $('audio-latency-uncertainty').textContent = ms(timing?.uncertaintyMs, '\u00b1');
-  $('audio-latency-phase').textContent = ms(timing?.phaseErrorMs, '', true);
-  $('audio-latency-late').textContent = count(timing?.latePackets);
-  $('audio-latency-resyncs').textContent = count(timing?.resyncs);
-  $('audio-latency-status').textContent = !connected
+  setText($('audio-latency-delay'), ms(timing?.delayMs));
+  setText($('audio-latency-rtt'), ms(timing?.rttMs));
+  setText($('audio-latency-uncertainty'), ms(timing?.uncertaintyMs, '\u00b1'));
+  setText($('audio-latency-phase'), ms(timing?.phaseErrorMs, '', true));
+  setText($('audio-latency-late'), count(timing?.latePackets));
+  setText($('audio-latency-resyncs'), count(timing?.resyncs));
+  setText($('audio-latency-status'), !connected
     ? 'Connect both laptops and start audio sharing to see timing.'
     : audio?.phase === 'error' ? audio.message
       : !active ? 'Start audio sharing from either laptop to see timing. Cursor linking can stay off.'
         : ready ? `${direction} audio. Both outputs follow the shared playback schedule.`
-          : `${direction} audio. Waiting for synchronized playback...`;
+          : `${direction} audio. Waiting for synchronized playback...`);
 }
 
 function renderAudio(next) {
   const audio = next.audio;
   const windows = next.platform === 'win32';
   const active = audio?.active === true;
-  $('audio-mode').textContent = active ? 'Shared playback' : 'Separate';
+  const split = audio?.playbackMode === 'split-stereo';
+  setText($('audio-mode'), active ? split ? 'Split stereo' : 'Shared playback' : 'Separate');
+  $('audio-playback-mode').value = split ? 'split-stereo' : 'stereo';
+  $('audio-playback-mode').disabled = active || !audio?.available;
+  $('audio-playback-mode').querySelector('[value="split-stereo"]').disabled = !audio?.stereoSplitAvailable;
+  const channels = audio?.stereoSplit?.channels;
+  setText($('audio-channels'), split
+    ? channels ? `Mac: ${channels.mac} channel \u00b7 Windows: ${channels.windows} channel. Each plays its channel through both local speakers. Assignments follow the main displays in Screen layout.`
+      : audio?.stereoSplit?.reason || 'Connect both laptops and arrange their main displays left and right in Screen layout.'
+    : 'Both laptops play the full stereo mix. Split stereo assigns left and right using the main displays in Screen layout.');
   $('audio-mode').className = `mode-badge${active ? '' : ' unlinked'}`;
-  $('audio-status').textContent = audio?.message || 'Audio stays on each laptop.';
+  setText($('audio-status'), audio?.message || 'Audio stays on each laptop.');
   $('audio-status').classList.toggle('audio-error-text', audio?.phase === 'error');
+  $('audio-warning').hidden = !active || !audio?.warning;
+  setText($('audio-warning'), active ? audio?.warning || '' : '');
   const timing = audio?.timing;
   $('audio-timing').hidden = !active || !timing?.clockReady;
-  $('audio-timing').textContent = timing?.clockReady
+  setText($('audio-timing'), timing?.clockReady
     ? `Buffered delay: ${Math.round(timing.delayMs)} ms · Clock uncertainty estimate: ±${Number(timing.uncertaintyMs).toFixed(2)} ms · Recoveries: ${timing.resyncs}`
-    : '';
+    : '');
   $('audio-start').hidden = false;
-  $('audio-start').textContent = `Play ${windows ? 'Windows' : 'Mac'} audio on both laptops`;
+  setText($('audio-start'), split ? `Split ${windows ? 'Windows' : 'Mac'} stereo across laptops` : `Play ${windows ? 'Windows' : 'Mac'} audio on both laptops`);
   $('audio-start').disabled = !audio?.canStart;
   $('audio-stop').disabled = !active;
   $('audio-windows-output').hidden = false;
@@ -298,7 +326,7 @@ function renderAudio(next) {
     $('audio-source').dataset.sources = sourceSignature;
   }
   $('audio-source').value = audio?.sourceId || '';
-  $('audio-output-label').textContent = windows ? 'Playback device on this laptop' : 'Playback device for received audio';
+  setText($('audio-output-label'), windows ? 'Playback device on this laptop' : 'Playback device for received audio');
   $('audio-output').disabled = active || !audio?.available;
   $('audio-refresh').disabled = active || !audio?.available;
   const select = $('audio-output');
@@ -326,16 +354,16 @@ function renderAudio(next) {
     if (!available || !edit) {
       slider.value = available ? volume.level : 0;
       const value = available ? `${volume.muted ? 'Muted · ' : ''}${volume.level}%` : 'Unavailable';
-      $(`audio-volume-${device}-value`).textContent = value;
+      setText($(`audio-volume-${device}-value`), value);
       slider.setAttribute('aria-valuetext', value);
     }
-    $(`audio-volume-${device}-status`).textContent = volume?.error || (available
+    setText($(`audio-volume-${device}-status`), volume?.error || (available
       ? `${volume.label}${next.platform === platform ? ' · This laptop' : ''}`
       : next.platform === platform ? 'Reading output volume…'
         : next.status.phase === 'connected' ? 'Volume controls are unavailable on the other laptop.'
-          : `Connect ${device === 'mac' ? 'the Mac' : 'Windows'} to adjust its volume.`);
+          : `Connect ${device === 'mac' ? 'the Mac' : 'Windows'} to adjust its volume.`));
   }
-  $('audio-help').textContent = !audio?.available
+  setText($('audio-help'), !audio?.available
     ? 'Rebuild the native addon on both laptops to enable audio routing.'
     : active ? audio.role === 'sender'
       ? windows ? 'Windows output is temporarily routed through VB-CABLE. Stop sharing to restore your previous outputs.'
@@ -347,7 +375,7 @@ function renderAudio(next) {
         ? 'Mac audio capture requires macOS 14.6 or later.'
         : !audio.peerReady && next.status.phase === 'connected'
           ? 'The other laptop has not announced audio support. Run the same current build on both laptops.'
-          : `Use built-in or wired speakers for the first test. Allow System Audio Recording for ${next.packaged ? 'CompuSync' : 'Electron or the terminal used to launch it'} when prompted. The Mac’s local sound is delayed so both laptops can follow the same schedule.`;
+          : `Use built-in or wired speakers for the first test. Allow System Audio Recording for ${next.packaged ? 'CompuSync' : 'Electron or the terminal used to launch it'} when prompted. The Mac’s local sound is delayed so both laptops can follow the same schedule.`);
 }
 
 async function audioCommand(name, data) {
@@ -356,14 +384,14 @@ async function audioCommand(name, data) {
     const result = await api.command(name, data);
     if (!result.ok) throw new Error(result.error);
   } catch (error) {
-    $('audio-error').textContent = error.message;
+    setText($('audio-error'), error.message);
     $('audio-error').hidden = false;
   }
 }
 
 function previewVolume(device, level) {
   const value = `${level}%`;
-  $(`audio-volume-${device}-value`).textContent = value;
+  setText($(`audio-volume-${device}-value`), value);
   $(`audio-volume-${device}`).setAttribute('aria-valuetext', value);
 }
 
@@ -410,7 +438,7 @@ async function command(name, data) {
     if (!result.ok) throw new Error(result.error);
     return true;
   } catch (error) {
-    $('error').textContent = error.message;
+    setText($('error'), error.message);
     $('error').hidden = false;
     return false;
   }
@@ -440,17 +468,17 @@ for (const id of ['share-tab', 'join-tab']) $(id).addEventListener('keydown', (e
 $('new-code').addEventListener('click', () => command('new-code'));
 $('copy').addEventListener('click', async () => {
   if (await command('copy')) {
-    $('copy-status').textContent = 'Copied';
+    setText($('copy-status'), 'Copied');
     clearTimeout(copyTimer);
     copyTimer = setTimeout(() => { $('copy-status').textContent = ''; }, 2000);
   }
 });
 $('join').addEventListener('click', async () => {
   $('join').disabled = true;
-  $('join').textContent = 'Finding laptop…';
+  setText($('join'), 'Finding laptop…');
   await command('join', { invitation: $('join-code').value, address: $('join-address').value, port: $('join-port').value });
   $('join').disabled = false;
-  $('join').textContent = 'Connect laptops';
+  setText($('join'), 'Connect laptops');
 });
 $('join-code').addEventListener('input', () => {
   const field = $('join-code');
@@ -587,6 +615,7 @@ $('toggle-ownership').addEventListener('click', () => command('cursor-toggle-own
 $('update-check').addEventListener('click', () => command('update-check'));
 $('update-install').addEventListener('click', () => command('update-install'));
 $('audio-source').addEventListener('change', () => audioCommand('audio-source', { id: $('audio-source').value }));
+$('audio-playback-mode').addEventListener('change', () => audioCommand('audio-playback-mode', { mode: $('audio-playback-mode').value }));
 $('audio-setup').addEventListener('click', () => audioCommand('audio-setup'));
 $('audio-start').addEventListener('click', () => audioCommand('audio-start'));
 $('audio-stop').addEventListener('click', () => audioCommand('audio-stop'));
@@ -606,4 +635,9 @@ for (const device of ['mac', 'windows']) {
 }
 if (/Mac/.test(navigator.platform)) for (const id of ['shortcut', 'unlink-shortcut', 'ownership-shortcut']) $(id).textContent = '⌘';
 api.onDetails(render);
+api.onMouseLatency?.((mouseLatency) => {
+  if (!details) return;
+  details = { ...details, mouseLatency };
+  renderMouseLatency(details);
+});
 api.bootstrap().then(render);

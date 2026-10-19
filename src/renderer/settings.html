@@ -108,7 +108,14 @@
         <span id="audio-mode" class="mode-badge unlinked">Separate</span>
       </div>
       <p id="audio-status" class="small" role="status">Audio stays on each laptop.</p>
+      <p id="audio-warning" class="small" role="status" hidden></p>
       <p id="audio-timing" class="small" hidden></p>
+      <label for="audio-playback-mode">Playback mode</label>
+      <select id="audio-playback-mode" aria-describedby="audio-channels">
+        <option value="stereo">Full stereo on both laptops</option>
+        <option value="split-stereo">Split stereo by screen layout</option>
+      </select>
+      <p id="audio-channels" class="small" role="status">Both laptops play the full stereo mix.</p>
       <div class="audio-volumes" role="group" aria-label="Device volumes">
         <div class="audio-volume">
           <div class="audio-volume-heading"><label for="audio-volume-mac">Mac volume</label><output id="audio-volume-mac-value" for="audio-volume-mac">Unavailable</output></div>
@@ -202,6 +209,7 @@
       <details><summary>Connection help</summary><p>Allow CompuSync through the firewall on your private network. Guest Wi-Fi may block laptop-to-laptop connections. If pairing fails, check the code or generate a new one. You can also enter the address in the pairing section’s Connection help. A sleeping or fully quit app cannot receive a window; the connection returns automatically when it is available again.</p></details>
     </footer>
   </main>
+  <script src="dom-updates.js"></script>
   <script src="screen-layout.js"></script>
   <script src="settings.js"></script>
 </body>

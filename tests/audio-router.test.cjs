@@ -309,6 +309,58 @@ test('receiving packets alone cannot report synchronized playback; the device mu
   assert.equal(events.filter((event) => event.type === 'timing').at(-1).timing.playing, false);
 });
 
+test('session warnings remain advisory, clear independently, and cannot affect a later route', async (t) => {
+  const { windows, mac, windowsEngine, macEngine } = await pair(t, true);
+  windows.startRoute(); await settle();
+  macEngine.emit('event', { type: 'connected', id: mac.route.id }); await settle();
+  const id = windows.route.id;
+  const warning = 'screenpipe-app.exe has an audio session; it may be recording.';
+  const stops = windowsEngine.stops;
+  windowsEngine.emit('event', { type: 'warning', id, message: warning });
+  assert.equal(windows.state().warning, warning);
+  assert.equal(windows.phase, 'streaming');
+  assert.equal(windows.state().active, true);
+  assert.equal(windowsEngine.stops, stops);
+  windowsEngine.emit('event', { type: 'warning', id, message: null });
+  assert.equal(windows.state().warning, null);
+  windowsEngine.emit('event', { type: 'warning', id, message: warning });
+  windows.stopRoute(); await settle();
+  assert.equal(windows.state().warning, null);
+  windows.startRoute(); await settle();
+  windowsEngine.emit('event', { type: 'warning', id, message: warning });
+  assert.equal(windows.state().warning, null);
+  windowsEngine.emit('event', { type: 'error', id: windows.route.id, message: 'Windows output disconnected.' });
+  assert.equal(windows.phase, 'error');
+  assert.equal(windows.state().active, false);
+});
+
+test('native warnings update on change without becoming errors or preventing playback', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  let state = { running: true, clockReady: true, playedFrames: 240, warning: 'Recording session detected.' };
+  class NativeAudio {
+    protocolVersion() { return AUDIO_VERSION; }
+    async startReceiver() { return 45123; }
+    status() { return state; }
+    stop() {}
+  }
+  const engine = new RustAudioEngine({ binding: { NativeAudio }, platform: 'win32' });
+  t.after(() => engine.stop());
+  engine.prepareRouting = async () => {};
+  const events = []; engine.on('event', (event) => events.push(event));
+  await engine.receive({ id: 'advisory', key: '42'.repeat(32), peerIp: '127.0.0.1', outputId: '' });
+  t.mock.timers.tick(1000);
+  assert.deepEqual(events.filter((event) => event.type === 'warning'), [
+    { type: 'warning', id: 'advisory', message: state.warning },
+  ]);
+  assert.equal(events.some((event) => event.type === 'connected'), true);
+  assert.equal(events.some((event) => event.type === 'error'), false);
+  state = { ...state, warning: null }; t.mock.timers.tick(500);
+  assert.equal(events.filter((event) => event.type === 'warning').at(-1).message, null);
+  state = { ...state, running: false, error: 'Device disconnected.' }; t.mock.timers.tick(500);
+  assert.equal(events.at(-1).type, 'error');
+  assert.equal(events.at(-1).message, 'Device disconnected.');
+});
+
 test('audio negotiation uses real encrypted sessions and their observed socket addresses in either host role', async (t) => {
   for (const macHosts of [false, true]) {
     const secret = newSecret();

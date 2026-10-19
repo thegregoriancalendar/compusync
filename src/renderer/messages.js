@@ -1,5 +1,9 @@
 'use strict';
 
+const { setText, reconcileChildren } = window.CompuSyncDOM;
+const messageElements = new Map();
+let listSignature;
+
 const elements = {
   search: document.querySelector('#search'),
   list: document.querySelector('#conversation-list'),
@@ -40,6 +44,9 @@ function selectedConversation() { return state.conversations.find((item) => item
 
 function renderList() {
   const query = elements.search.value.trim().toLocaleLowerCase();
+  const signature = JSON.stringify([query, selectedId, state.conversations]);
+  if (listSignature === signature) return;
+  listSignature = signature;
   elements.list.replaceChildren();
   for (const conversation of state.conversations) {
     const name = displayName(conversation);
@@ -70,29 +77,38 @@ function renderList() {
 
 function renderMessages({ preserveScroll = false } = {}) {
   const previousHeight = elements.messages.scrollHeight;
-  elements.messages.replaceChildren();
+  const wasAtBottom = previousHeight - elements.messages.scrollTop - elements.messages.clientHeight < 40;
+  const rows = [];
+  const ids = new Set();
   for (const item of history) {
-    const row = document.createElement('article');
-    row.className = `message ${item.fromMe ? 'outgoing' : 'incoming'}`;
-    if (!item.fromMe && item.sender) {
+    ids.add(item.id);
+    let parts = messageElements.get(item.id);
+    if (!parts) {
+      const row = document.createElement('article');
       const sender = document.createElement('div');
       sender.className = 'sender';
-      const senderName = selectedConversation()?.participants.find((person) => person.handle === item.sender)?.name;
-      sender.textContent = senderName || item.sender;
-      row.append(sender);
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      const metadata = document.createElement('div');
+      metadata.className = 'metadata';
+      row.append(sender, bubble, metadata);
+      parts = { row, sender, bubble, metadata };
+      messageElements.set(item.id, parts);
     }
-    const bubble = document.createElement('div');
-    bubble.className = 'bubble';
-    bubble.textContent = item.text;
-    const metadata = document.createElement('div');
-    metadata.className = 'metadata';
+    const { row, sender, bubble, metadata } = parts;
+    row.className = `message ${item.fromMe ? 'outgoing' : 'incoming'}`;
+    sender.hidden = item.fromMe || !item.sender;
+    const senderName = selectedConversation()?.participants.find((person) => person.handle === item.sender)?.name;
+    setText(sender, senderName || item.sender || '');
+    setText(bubble, item.text);
     const date = item.sentAt ? new Date(item.sentAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }) : '';
-    metadata.textContent = item.fromMe ? `${date}${date ? ' · ' : ''}${item.status}` : date;
-    row.append(bubble, metadata);
-    elements.messages.append(row);
+    setText(metadata, item.fromMe ? `${date}${date ? ' · ' : ''}${item.status}` : date);
+    rows.push(row);
   }
+  for (const id of messageElements.keys()) if (!ids.has(id)) messageElements.delete(id);
+  reconcileChildren(elements.messages, rows);
   if (preserveScroll) elements.messages.scrollTop += elements.messages.scrollHeight - previousHeight;
-  else elements.messages.scrollTop = elements.messages.scrollHeight;
+  else if (wasAtBottom) elements.messages.scrollTop = elements.messages.scrollHeight;
   elements.older.hidden = !hasMore;
 }
 
@@ -102,17 +118,17 @@ function renderState() {
   const error = sendError || historyError || conversationError;
   elements.composer.hidden = !conversation || !state.available;
   if (!state.available) {
-    elements.status.textContent = error || state.reason || 'Messages is not available from the Mac.';
-    elements.title.textContent = 'Messages Companion';
-    elements.subtitle.textContent = 'Mac connection required';
+    setText(elements.status, error || state.reason || 'Messages is not available from the Mac.');
+    setText(elements.title, 'Messages Companion');
+    setText(elements.subtitle, 'Mac connection required');
   } else if (!conversation) {
-    elements.status.textContent = error || (state.conversations.length ? 'Select a conversation.' : 'No conversations available.');
-    elements.title.textContent = 'Messages Companion';
-    elements.subtitle.textContent = '';
+    setText(elements.status, error || (state.conversations.length ? 'Select a conversation.' : 'No conversations available.'));
+    setText(elements.title, 'Messages Companion');
+    setText(elements.subtitle, '');
   } else {
-    elements.status.textContent = error || (loading ? 'Updating…' : '');
-    elements.title.textContent = displayName(conversation);
-    elements.subtitle.textContent = conversation.participants.map((person) => person.handle).filter(Boolean).join(', ') || conversation.service;
+    setText(elements.status, error || (loading ? 'Updating…' : ''));
+    setText(elements.title, displayName(conversation));
+    setText(elements.subtitle, conversation.participants.map((person) => person.handle).filter(Boolean).join(', ') || conversation.service);
   }
 }
 

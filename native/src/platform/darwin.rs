@@ -1,3 +1,4 @@
+use super::macos_window_drag::GeometryWatch;
 use super::{macos_event_tap, EventSink, Platform};
 use crate::{DisplayMetric, NativeEvent, Point, Rect, WindowInfo};
 use once_cell::sync::Lazy;
@@ -544,8 +545,8 @@ struct AxDragWatch {
     run_loop: CfRunLoop,
     id: String,
     generation: u64,
-    active: bool,
-    initial_geometry: Option<AxWindowGeometry>,
+    geometry: GeometryWatch,
+    moved_subscribed: bool,
     resize_subscribed: bool,
 }
 
@@ -598,25 +599,22 @@ pub(super) fn chrome_automation_access(request: bool) -> &'static str {
 }
 unsafe impl Send for AxDragWatch {}
 
-#[derive(Clone, Copy)]
-struct AxWindowGeometry {
-    position: CgPoint,
-    size: CgSize,
-}
-
-fn ax_window_geometry(element: AxElement) -> Option<AxWindowGeometry> {
-    Some(AxWindowGeometry {
-        position: ax_value::<CgPoint>(element, ax(AX.position), AX_VALUE_POINT)?,
-        size: ax_value::<CgSize>(element, ax(AX.size), AX_VALUE_SIZE)?,
+fn ax_window_geometry(element: AxElement) -> Option<Rect> {
+    let position = ax_value::<CgPoint>(element, ax(AX.position), AX_VALUE_POINT)?;
+    let size = ax_value::<CgSize>(element, ax(AX.size), AX_VALUE_SIZE)?;
+    Some(Rect {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
     })
 }
 
-fn geometry_changed(initial: AxWindowGeometry, current: AxWindowGeometry) -> bool {
-    const AX_GEOMETRY_EPSILON: f64 = 0.5;
-    (initial.position.x - current.position.x).abs() >= AX_GEOMETRY_EPSILON
-        || (initial.position.y - current.position.y).abs() >= AX_GEOMETRY_EPSILON
-        || (initial.size.width - current.size.width).abs() >= AX_GEOMETRY_EPSILON
-        || (initial.size.height - current.size.height).abs() >= AX_GEOMETRY_EPSILON
+fn emit_drag_diagnostic(context: &TapContext, reason: &str, id: Option<String>) {
+    let mut event = NativeEvent::simple("windowDragDiagnostic");
+    event.message = Some(reason.into());
+    event.window_id = id;
+    (context.sink)(event);
 }
 
 fn emit_move_size_start(context: &TapContext, id: String) {
@@ -636,75 +634,68 @@ fn poll_drag_watch(context: &TapContext) {
         let Some(watch) = watch.as_mut() else {
             return;
         };
-        if watch.active || !drag_watch_is_current(context, watch) {
+        if watch.geometry.active() || !drag_watch_is_current(context, watch) {
             return;
         }
-        let Some(initial) = watch.initial_geometry else {
-            return;
-        };
-        let Some(current) = ax_window_geometry(watch.element) else {
-            return;
-        };
+        let current = ax_window_geometry(watch.element);
         // AX queries can outlast a release and another press. Never activate
         // the old window's watch for the new gesture.
-        if !drag_watch_is_current(context, watch)
-            || !geometry_changed(initial, current)
-            || !activate_drag_watch(true, &mut watch.active)
-        {
+        let current_gesture = drag_watch_is_current(context, watch);
+        if !watch.geometry.observe(current, current_gesture) {
             return;
         }
         watch.id.clone()
     };
+    emit_drag_diagnostic(context, "geometry-moved", Some(id.clone()));
     emit_move_size_start(context, id);
 }
 
-fn focused_window() -> Option<(String, i32, OwnedCf)> {
+fn focused_window() -> Result<(String, i32, OwnedCf), String> {
     let system = OwnedCf(unsafe { AXUIElementCreateSystemWide() });
     if system.0.is_null() {
-        return None;
+        return Err("system-accessibility-unavailable".into());
     }
     // AXFocusedWindow is an application attribute, not a system-wide one.
     // Resolve the frontmost application first; asking the system-wide element
     // for AXFocusedWindow fails silently on macOS and prevents drag lifecycle
     // events from ever being emitted.
     let mut focused_app = null();
-    if unsafe {
+    let status = unsafe {
         AXUIElementCopyAttributeValue(
             system.0 as AxElement,
             ax(AX.focused_application),
             &mut focused_app,
         )
-    } != 0
-        || focused_app.is_null()
-    {
-        return None;
+    };
+    if status != 0 || focused_app.is_null() {
+        return Err(format!("focused-application-unavailable:{status}"));
     }
     let focused_app = OwnedCf(focused_app);
     unsafe {
         AXUIElementSetMessagingTimeout(focused_app.0 as AxElement, 0.05);
     }
     let mut focused = null();
-    if unsafe {
+    let status = unsafe {
         AXUIElementCopyAttributeValue(
             focused_app.0 as AxElement,
             ax(AX.focused_window),
             &mut focused,
         )
-    } != 0
-        || focused.is_null()
-    {
-        return None;
+    };
+    if status != 0 || focused.is_null() {
+        return Err(format!("focused-window-unavailable:{status}"));
     }
     let focused = OwnedCf(focused);
     unsafe {
         AXUIElementSetMessagingTimeout(focused.0 as AxElement, 0.05);
     }
     let mut pid = 0;
-    if unsafe { AXUIElementGetPid(focused.0 as AxElement, &mut pid) } != 0 {
-        return None;
+    let status = unsafe { AXUIElementGetPid(focused.0 as AxElement, &mut pid) };
+    if status != 0 {
+        return Err(format!("focused-process-unavailable:{status}"));
     }
     let mut windows = null();
-    if unsafe {
+    let status = unsafe {
         AXUIElementCopyAttributeValues(
             focused_app.0 as AxElement,
             ax(AX.windows),
@@ -712,15 +703,15 @@ fn focused_window() -> Option<(String, i32, OwnedCf)> {
             200,
             &mut windows,
         )
-    } != 0
-        || windows.is_null()
-    {
-        return None;
+    };
+    if status != 0 || windows.is_null() {
+        return Err(format!("focused-window-list-unavailable:{status}"));
     }
     let windows = OwnedCf(windows);
     let index = (0..unsafe { CFArrayGetCount(windows.0) })
-        .find(|index| unsafe { CFEqual(CFArrayGetValueAtIndex(windows.0, *index), focused.0) })?;
-    Some((format!("ax:{pid}:{index}"), pid, focused))
+        .find(|index| unsafe { CFEqual(CFArrayGetValueAtIndex(windows.0, *index), focused.0) })
+        .ok_or_else(|| "focused-window-not-in-list".to_string())?;
+    Ok((format!("ax:{pid}:{index}"), pid, focused))
 }
 
 unsafe extern "C" fn ax_window_moved(_: AxObserver, _: AxElement, _: CfString, user: *mut c_void) {
@@ -733,11 +724,13 @@ unsafe extern "C" fn ax_window_moved(_: AxObserver, _: AxElement, _: CfString, u
         let Some(watch) = watch.as_mut() else {
             return;
         };
-        if !drag_watch_is_current(context, watch) || !activate_drag_watch(true, &mut watch.active) {
+        let current_gesture = drag_watch_is_current(context, watch);
+        if !watch.geometry.notify(current_gesture) {
             return;
         }
         watch.id.clone()
     };
+    emit_drag_diagnostic(context, "notification-moved", Some(id.clone()));
     emit_move_size_start(context, id);
 }
 
@@ -746,75 +739,85 @@ fn drag_watch_is_current(context: &TapContext, watch: &AxDragWatch) -> bool {
         && watch.generation == context.drag_generation.load(Ordering::Acquire)
 }
 
-fn activate_drag_watch(left_down: bool, active: &mut bool) -> bool {
-    if !left_down || *active {
-        return false;
-    }
-    *active = true;
-    true
-}
-
 fn clear_drag_watch(context: &TapContext, emit_end: bool) {
     let Some(watch) = context.drag_watch.lock().take() else {
         return;
     };
-    if emit_end && watch.active {
+    if emit_end && watch.geometry.active() {
         let mut event = NativeEvent::simple("moveSizeEnd");
         event.window_id = Some(watch.id.clone());
         (context.sink)(event);
+    } else if emit_end {
+        emit_drag_diagnostic(
+            context,
+            "released-without-window-movement",
+            Some(watch.id.clone()),
+        );
     }
     unsafe {
-        AXObserverRemoveNotification(watch.observer, watch.element, ax(AX.moved));
-        if watch.resize_subscribed {
-            AXObserverRemoveNotification(watch.observer, watch.element, ax(AX.resized));
+        if !watch.observer.is_null() {
+            if watch.moved_subscribed {
+                AXObserverRemoveNotification(watch.observer, watch.element, ax(AX.moved));
+            }
+            if watch.resize_subscribed {
+                AXObserverRemoveNotification(watch.observer, watch.element, ax(AX.resized));
+            }
+            if !watch.source.is_null() {
+                CFRunLoopRemoveSource(watch.run_loop, watch.source, kCFRunLoopCommonModes);
+            }
+            CFRelease(watch.observer);
         }
-        CFRunLoopRemoveSource(watch.run_loop, watch.source, kCFRunLoopCommonModes);
-        CFRelease(watch.observer);
         CFRelease(watch.element);
     }
 }
 
-fn begin_drag_watch(context: &TapContext) {
+fn begin_drag_watch(context: &TapContext) -> String {
     clear_drag_watch(context, false);
     let generation = context.drag_generation.load(Ordering::Acquire);
-    let Some((id, pid, element)) = focused_window() else {
-        return;
+    let (id, pid, element) = match focused_window() {
+        Ok(window) => window,
+        Err(reason) => return reason,
     };
-    let mut observer = null_mut();
-    if unsafe { AXObserverCreate(pid, Some(ax_window_moved), &mut observer) } != 0
-        || observer.is_null()
-    {
-        return;
-    }
-    if unsafe {
-        AXObserverAddNotification(
-            observer,
-            element.0 as AxElement,
-            ax(AX.moved),
-            context as *const TapContext as *mut c_void,
-        )
-    } != 0
-    {
-        unsafe {
-            CFRelease(observer);
-        }
-        return;
-    }
-    let resize_subscribed = unsafe {
-        AXObserverAddNotification(
-            observer,
-            element.0 as AxElement,
-            ax(AX.resized),
-            context as *const TapContext as *mut c_void,
-        ) == 0
-    };
-    let source = unsafe { AXObserverGetRunLoopSource(observer) };
-    let run_loop = unsafe { CFRunLoopGetCurrent() };
-    unsafe {
-        CFRunLoopAddSource(run_loop, source, kCFRunLoopCommonModes);
-    }
+    // AX position polling is the primary live detector. Notifications are an
+    // optional fast path: unsupported notifications must not discard the watch.
     let raw_element = element.0 as AxElement;
     let initial_geometry = ax_window_geometry(raw_element);
+    let mut observer = null_mut();
+    let observer_status = unsafe { AXObserverCreate(pid, Some(ax_window_moved), &mut observer) };
+    let mut moved_status = None;
+    let mut resized_status = None;
+    let mut source = null();
+    let run_loop = unsafe { CFRunLoopGetCurrent() };
+    if observer_status == 0 && !observer.is_null() {
+        moved_status = Some(unsafe {
+            AXObserverAddNotification(
+                observer,
+                raw_element,
+                ax(AX.moved),
+                context as *const TapContext as *mut c_void,
+            )
+        });
+        resized_status = Some(unsafe {
+            AXObserverAddNotification(
+                observer,
+                raw_element,
+                ax(AX.resized),
+                context as *const TapContext as *mut c_void,
+            )
+        });
+        if moved_status == Some(0) || resized_status == Some(0) {
+            source = unsafe { AXObserverGetRunLoopSource(observer) };
+            if !source.is_null() {
+                unsafe { CFRunLoopAddSource(run_loop, source, kCFRunLoopCommonModes) };
+            }
+        }
+    }
+    let mode = if source.is_null() {
+        "poll-only"
+    } else {
+        "notifications-and-poll"
+    };
+    let status = format!("watching:{mode},observer={observer_status},moved={moved_status:?},resized={resized_status:?},geometry={}", initial_geometry.is_some());
     std::mem::forget(element);
     *context.drag_watch.lock() = Some(AxDragWatch {
         observer,
@@ -823,19 +826,21 @@ fn begin_drag_watch(context: &TapContext) {
         run_loop,
         id,
         generation,
-        active: false,
-        initial_geometry,
-        resize_subscribed,
+        geometry: GeometryWatch::new(initial_geometry),
+        moved_subscribed: moved_status == Some(0),
+        resize_subscribed: resized_status == Some(0),
     });
+    status
 }
 
-fn ensure_drag_watch(context: &TapContext) {
+fn ensure_drag_watch(context: &TapContext) -> Option<String> {
     let watching = context.drag_watch.lock().is_some();
     if !watching {
         // Wait until input has delivered a drag event so the clicked window
         // can gain focus before the worker resolves it.
-        begin_drag_watch(context);
+        return Some(begin_drag_watch(context));
     }
+    None
 }
 
 unsafe extern "C" fn event_tap(
@@ -1520,6 +1525,8 @@ impl Platform for HostPlatform {
         let drag_poll_thread = match thread::Builder::new()
             .name("compusync-mac-window-drag".into())
             .spawn(move || {
+                let mut diagnostic_generation = None;
+                let mut last_watch_result = None;
                 while !poll_stop.load(Ordering::Acquire) {
                     let stale = poll_context
                         .drag_watch
@@ -1531,7 +1538,25 @@ impl Platform for HostPlatform {
                     }
                     if poll_context.left_down.load(Ordering::Acquire) {
                         if poll_context.drag_moved.load(Ordering::Acquire) {
-                            ensure_drag_watch(&poll_context);
+                            let generation = poll_context.drag_generation.load(Ordering::Acquire);
+                            if diagnostic_generation != Some(generation) {
+                                diagnostic_generation = Some(generation);
+                                last_watch_result = None;
+                                emit_drag_diagnostic(&poll_context, "input-drag-observed", None);
+                            }
+                            if let Some(status) = ensure_drag_watch(&poll_context) {
+                                // A focused app may briefly be unavailable. Retry
+                                // without repeating the same failure every frame.
+                                if last_watch_result.as_ref() != Some(&status) {
+                                    let id = poll_context
+                                        .drag_watch
+                                        .lock()
+                                        .as_ref()
+                                        .map(|watch| watch.id.clone());
+                                    emit_drag_diagnostic(&poll_context, &status, id);
+                                    last_watch_result = Some(status);
+                                }
+                            }
                             poll_drag_watch(&poll_context);
                         }
                     } else {
@@ -1614,9 +1639,9 @@ impl Drop for HostPlatform {
 #[cfg(test)]
 mod tests {
     use super::{
-        activate_drag_watch, cursor_visibility_action, geometry_changed, suppress_for_non_owner,
-        take_run_loop, AxWindowGeometry, CfRunLoop, CgPoint, CgSize, CursorVisibilityAction,
-        CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_X, CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_Y,
+        cursor_visibility_action, suppress_for_non_owner, take_run_loop, CfRunLoop, CgPoint,
+        CursorVisibilityAction, CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_X,
+        CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_Y,
     };
 
     #[test]
@@ -1753,42 +1778,6 @@ mod tests {
 
         assert_eq!(take_run_loop(&mut run_loop), Some(expected));
         assert_eq!(take_run_loop(&mut run_loop), None);
-    }
-
-    #[test]
-    fn ax_notification_starts_once_only_while_physical_left_is_held() {
-        let mut active = false;
-
-        assert!(!activate_drag_watch(false, &mut active));
-        assert!(!active);
-        assert!(activate_drag_watch(true, &mut active));
-        assert!(active);
-        assert!(!activate_drag_watch(true, &mut active));
-    }
-
-    #[test]
-    fn live_ax_geometry_starts_drag_only_after_the_window_moves() {
-        let initial = AxWindowGeometry {
-            position: CgPoint { x: 100.0, y: 40.0 },
-            size: CgSize {
-                width: 900.0,
-                height: 700.0,
-            },
-        };
-        let stationary = AxWindowGeometry {
-            position: CgPoint {
-                x: 100.25,
-                y: 40.25,
-            },
-            size: initial.size,
-        };
-        let moved = AxWindowGeometry {
-            position: CgPoint { x: 102.0, y: 40.0 },
-            size: initial.size,
-        };
-
-        assert!(!geometry_changed(initial, stationary));
-        assert!(geometry_changed(initial, moved));
     }
 
     #[test]

@@ -7,6 +7,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'messages.js'), 'utf8');
+const domSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'dom-updates.js'), 'utf8');
 const conversation = {
   id: 'iMessage;-;chat123', name: 'Ada', service: 'iMessage', participants: [],
 };
@@ -23,9 +24,18 @@ function renderer({ bootstrap = async () => available, command }) {
   function element() {
     return {
       textContent: '', value: '', hidden: false, style: {}, children: [], listeners: {},
-      scrollHeight: 0, scrollTop: 0,
+      scrollHeight: 0, scrollTop: 0, clientHeight: 0,
       replaceChildren(...children) { this.children = children; },
       append(...children) { this.children.push(...children); },
+      insertBefore(child, reference) {
+        child.remove?.();
+        const index = reference ? this.children.indexOf(reference) : this.children.length;
+        this.children.splice(index, 0, child);
+        child.remove = () => {
+          const index = this.children.indexOf(child);
+          if (index !== -1) this.children.splice(index, 1);
+        };
+      },
       setAttribute() {},
       addEventListener(name, callback) { this.listeners[name] = callback; },
     };
@@ -33,9 +43,11 @@ function renderer({ bootstrap = async () => available, command }) {
   let onState, interval;
   let now = 0;
   const context = {
-    window: { compusyncMessages: { bootstrap, command, onState(callback) { onState = callback; } } },
+    window: { getSelection: () => ({ isCollapsed: true }),
+      compusyncMessages: { bootstrap, command, onState(callback) { onState = callback; } } },
     document: {
       visibilityState: 'visible',
+      addEventListener() {},
       querySelector(selector) {
         if (!elements.has(selector)) elements.set(selector, element());
         return elements.get(selector);
@@ -46,7 +58,9 @@ function renderer({ bootstrap = async () => available, command }) {
     setInterval(callback) { interval = callback; },
     setTimeout() {},
   };
-  vm.runInNewContext(source, context);
+  vm.createContext(context);
+  vm.runInContext(domSource, context);
+  vm.runInContext(source, context);
   return {
     get: (selector) => elements.get(selector),
     state: (value) => onState(value),

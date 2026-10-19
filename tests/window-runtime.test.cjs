@@ -101,6 +101,28 @@ test('a Mac native move that cannot be joined to a window is logged before captu
   } finally { await fixture.runtime.stop(); }
 });
 
+test('Mac native watch diagnostics reach shared logs without starting a handoff', async () => {
+  const logs = [];
+  const fixture = runtimeFixture({ platformName: 'darwin',
+    logger: (event, details) => logs.push({ event, details }) });
+  try {
+    fixture.native.emit('nativeEvent', { kind: 'windowDragDiagnostic',
+      windowId: 'ax:100:0', message: 'watching:poll-only,observer=0,moved=Some(-25205)',
+      title: 'private title', url: 'https://private.example' });
+    assert.equal(logs.length, 1);
+    assert.equal(logs[0].event, 'drag.lifecycle');
+    assert.equal(logs[0].details.event, 'native-drag-watch');
+    assert.equal(logs[0].details.id, 'ax:100:0');
+    assert.match(logs[0].details.reason, /poll-only/);
+    assert.equal(fixture.runtime.drag.active, null);
+    assert.equal(fixture.sent.length, 0);
+    assert.doesNotMatch(JSON.stringify(logs), /private/);
+    await fixture.runtime.stop();
+    fixture.native.emit('nativeEvent', { kind: 'windowDragDiagnostic', message: 'input-drag-observed' });
+    assert.equal(logs.length, 1);
+  } finally { await fixture.runtime.stop(); }
+});
+
 test('native device-pixel window geometry converts to the shared VU placement', () => {
   assert.deepEqual(geometryToVU({ bounds: { x: 200, y: 100, width: 800, height: 600 } },
     { origin: { x: 1000, y: 50 }, size: { w: 1000, h: 800 }, scale: 2 }),

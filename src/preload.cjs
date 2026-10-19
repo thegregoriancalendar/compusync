@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('compusync', {
   bootstrap: () => ipcRenderer.invoke('sync:bootstrap'),
   command: (name, data) => ipcRenderer.invoke('sync:command', name, data),
   onDetails: (callback) => subscribe('sync:details', callback),
+  onMouseLatency: (callback) => subscribe('sync:mouse-latency', callback),
   onHandoffOverlay: (callback) => subscribe('sync:handoff-overlay', callback),
 });
 

@@ -41,13 +41,40 @@ volume control show a disabled slider and an explanation.
 Volume controls require the updated native addon on both laptops. Rebuild with
 `npm run native:build` after quitting CompuSync, then restart it.
 
+## Split stereo by screen layout
+
+In Audio manager, choose **Playback mode → Split stereo by screen layout** on the
+source laptop, then start sharing. The laptop whose **main display** is farther
+left in Screen layout plays the left channel; the other plays the right channel.
+Each assigned channel plays through both front speakers on that laptop, including
+when its physical output is mono. Full stereo on both laptops remains the default.
+The existing shared playback schedule, output selection, and volume controls apply
+to both modes. Either Mac or Windows can be the source; Windows sending still
+requires VB-CABLE.
+
+Assignments include the main display's position inside a multi-monitor computer
+group and follow saved layout changes while sharing. The source negotiates both
+assignments; live channel swaps occur as each laptop processes the update, rather
+than as a scheduled simultaneous transition. If the two main displays have the
+same horizontal center, split stereo cannot start. Moving to that arrangement
+while sharing stops the route; offset a display left or right and start again.
+Stop sharing before changing playback mode. The source's selection is saved for
+its next start; the receiver displays the active route's mode.
+
+Update and rebuild the native addon on **both** laptops with
+`npm run native:build`, then restart CompuSync to enable split stereo. A peer or
+addon without split support can still use full stereo. Verify with a track that
+alternates left-only and right-only sound, swap the computers in Screen layout,
+and repeat with either source. Automated channel isolation and negotiation tests
+do not replace listening on both physical outputs.
+
 ## Windows sender setup
 
 Windows needs the **standard VB-CABLE** driver; receiving Mac audio does not. Download it from [VB-Audio](https://vb-audio.com/Cable/), extract the package, run its installer as administrator, and reboot as the vendor instructs. CompuSync does not install or redistribute the driver. The Audio manager links to that same official download page.
 
 Keep physical speakers/headphones selected as both Windows default output and default communications output before starting. In Audio manager, refresh devices, choose physical local playback, and leave capture bus on Detect standard VB-CABLE. The bus is verified using the driver interface and endpoint description, not an editable display name; Cable A/B, C/D, Voicemeeter, and arbitrary virtual drivers are not yet supported.
 
-Apps must use **System default** in shared mode. Restart playback after sharing starts if an app does not follow output changes. Avoid exclusive/ASIO playback and protected audio. Disable Windows **Listen to this device**, direct hardware monitoring, or any other monitor of CABLE Output; these would add an unscheduled copy. Leave the virtual cable unmuted and its volume at 100%; CompuSync does not change endpoint volume or mute. Use the physical playback slider to adjust local loudness. If another app keeps an active session on physical output after a two-second migration grace period, sharing stops with guidance instead of claiming that output is synchronized. This check is conservative and can reject silent but active sessions.
+Apps must use **System default** in shared mode. Restart playback after sharing starts if an app does not follow output changes. Avoid exclusive/ASIO playback and protected audio. Disable Windows **Listen to this device**, direct hardware monitoring, or any other monitor of CABLE Output; these would add an unscheduled copy. Leave the virtual cable unmuted and its volume at 100%; CompuSync does not change endpoint volume or mute. Use the physical playback slider to adjust local loudness. After a two-second migration grace period, CompuSync samples audio-session peak meters on non-bus outputs. Silent sessions do not trigger a notice. Nonzero activity produces an advisory in Audio manager with the executable name and PID (or Windows system sounds), and clears when the activity disappears. It does not stop sharing: Windows also lists loopback recorders here, and their meters can reflect the scheduled playback they are recording. Session activity cannot prove that an app is bypassing the capture bus. Explicitly routed playback remains outside the synchronized mix; set playback apps to System default if sound is missing or doubled. Device removal, unexpected default changes, capture failure, and lost heartbeats still stop sharing and restore defaults.
 
 Windows does not show an audio-recording permission dialog for WASAPI output loopback. Firewall approval can still be needed. If formats are unsupported, select stereo 48 kHz in the capture bus's advanced Windows Sound properties.
 
@@ -83,6 +110,8 @@ The **Latency Monitor → Audio** section shows the active direction, scheduled 
 
 A separate hidden recovery helper owns all three default-output changes (console, multimedia, communications). It saves each prior endpoint before switching, rolls back partial setup failures, checks endpoint availability/default changes, and restores on STOP, stdin EOF, or a three-second heartbeat timeout. Native capture sends heartbeats every 250 ms. A named mutex prevents overlapping routes. Capture errors and invalid/stalled timestamps stop playback and release the route even if Electron is unresponsive.
 
+Windows can link console and multimedia defaults, so switching one can also switch the other. Setup validates all original roles before changing any, accepts roles already moved to the capture bus by a preceding switch, and verifies the complete route afterward. An unrelated output selection still aborts setup and is preserved during recovery.
+
 The helper writes a recovery journal under the user's local app data directory (the folder is named `CompuSync`, file `audio-route.json`). If both processes are terminated, the next app launch/refresh attempts restoration before routing. It restores only roles still pointing at the recorded bus, preserves later user selections, and falls back to the pinned physical output if a previous output was unplugged. Failed restoration retains the journal for retry; if no physical output remains, choose one in Windows Sound settings. Do not manually kill the recovery helper during sharing.
 
 Changing Windows defaults uses the isolated, undocumented IPolicyConfig interface, with activation checks and endpoint readback. Microsoft exposes no supported public API to set a user's default endpoint. This is a Windows compatibility boundary: validate default switching and recovery on supported Windows releases before distributing broadly. Apps still control whether they follow default-device changes. See Microsoft's [loopback documentation](https://learn.microsoft.com/en-us/windows/win32/coreaudio/loopback-recording) and [stream routing documentation](https://learn.microsoft.com/en-us/windows/win32/coreaudio/automatic-stream-routing).
@@ -99,6 +128,6 @@ PCM uses roughly 1.7 Mbit/s before UDP/IP overhead. Allow CompuSync through the 
 
 Automated checks cover authenticated timing metadata, directional nonces, replay/reordering, clock-offset estimation, timestamp-preserving resampling, scheduled silence/loss handling, drift correction, epoch recovery, native UDP clock agreement, actual Windows device playback deadlines, cancellation, negotiation, and Electron controls. The Mac target is type-checked from Windows. Windows policy tests cover distinct default roles, partial rollback, user changes, unplugged originals, and restoration errors. Native missing-driver checks must not change defaults.
 
-Windows VB-CABLE capture, actual default switching/crash recovery, Mac receive playback, and physical alignment still require the two-laptop test with the driver installed. Mac-to-Windows capture was verified manually before adding the reverse route. Automated checks cannot substitute for this hardware acceptance test. Device playback timestamps are predictions. The displayed clock uncertainty excludes driver errors, downstream device latency, and sound propagation.
+The native recovery helper's default switching and restoration have been verified with VB-CABLE on Windows. The opt-in test in `native/windows-audio/tests/live_guard.rs` checks every role before and after a real route; it is ignored by default because it temporarily changes actual system outputs. Windows capture, process-crash recovery, Mac receive playback, and physical alignment still require hardware acceptance tests. Mac-to-Windows capture was verified manually before adding the reverse route. Device playback timestamps are predictions. The displayed clock uncertainty excludes driver errors, downstream device latency, and sound propagation.
 
 For acoustic acceptance, record a periodic click from both outputs using two channels of one recorder/interface, with equal microphone distances or direct wired capture. Compare click sample positions at startup and throughout a long run, then repeat with network load and a forced resync. Report median, 95th percentile, maximum inter-output skew, dropouts, and recovery behavior. Define an acceptable measured skew for the specific devices before claiming an accuracy figure; automated clock tests do not prove sample-exact speaker alignment.

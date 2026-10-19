@@ -1,4 +1,5 @@
 mod buffer;
+mod channel;
 mod clock;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod device;
@@ -19,7 +20,7 @@ use parking_lot::Mutex;
 use std::{
     net::{IpAddr, UdpSocket},
     sync::{
-        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering},
         Arc,
     },
     thread::JoinHandle,
@@ -59,6 +60,7 @@ pub struct AudioSnapshot {
     pub late_packets: f64,
     pub resyncs: f64,
     pub phase_error_ms: f64,
+    pub warning: Option<String>,
     pub error: Option<String>,
 }
 pub struct Stats {
@@ -79,6 +81,7 @@ pub struct Stats {
     pub device_clock_invalid: AtomicBool,
     pub output_lead_ns: AtomicI64,
     pub output_clock_ready: AtomicBool,
+    pub warning: Mutex<Option<String>>,
     pub error: Mutex<Option<String>>,
     pub started: Instant,
 }
@@ -104,6 +107,7 @@ impl Stats {
             device_clock_invalid: AtomicBool::new(false),
             output_lead_ns: AtomicI64::new(0),
             output_clock_ready: AtomicBool::new(false),
+            warning: Mutex::new(None),
             error: Mutex::new(None),
             started: Instant::now(),
         }
@@ -144,6 +148,7 @@ struct State {
     generation: AtomicU64,
     running: Mutex<Option<Running>>,
     pending: Mutex<Option<Arc<Stats>>>,
+    playback_channel: Arc<AtomicU8>,
 }
 #[napi]
 pub struct NativeAudio {
@@ -165,6 +170,10 @@ impl NativeAudio {
     #[napi]
     pub fn protocol_version(&self) -> u32 {
         packet::VERSION
+    }
+    #[napi]
+    pub fn set_playback_channel(&self, channel: String) -> Result<()> {
+        channel::set(&self.state.playback_channel, &channel).map_err(fail)
     }
     #[napi]
     pub fn routing_status(&self, source_id: String, output_id: String) -> Result<AudioRouting> {
@@ -300,6 +309,7 @@ impl NativeAudio {
             late_packets: count(|s| &s.late_packets),
             resyncs: count(|s| &s.resyncs),
             phase_error_ms: ms(|s| &s.phase_error_ns),
+            warning: stats.and_then(|s| s.warning.lock().clone()),
             error: stats.and_then(|s| s.error.lock().clone()),
         }
     }
@@ -377,7 +387,13 @@ impl Task for StartAudio {
             StartKind::Receiver { output_id, .. } => {
                 let (producer, consumer) = rtrb::RingBuffer::new(128);
                 let output = device::output_device(output_id).map_err(fail)?;
-                let stream = device::playback(&output, consumer, stats.clone()).map_err(fail)?;
+                let stream = device::playback(
+                    &output,
+                    consumer,
+                    stats.clone(),
+                    self.state.playback_channel.clone(),
+                )
+                .map_err(fail)?;
                 let worker_stats = stats.clone();
                 let worker = std::thread::Builder::new()
                     .name("compusync-audio-receive".into())
@@ -420,8 +436,13 @@ impl Task for StartAudio {
                     let output = device::output_device(&format!("wasapi:{}", plan.snapshot.output))
                         .map_err(fail)?;
                     let (local, consumer) = rtrb::RingBuffer::new(128);
-                    let stream =
-                        device::playback(&output, consumer, stats.clone()).map_err(fail)?;
+                    let stream = device::playback(
+                        &output,
+                        consumer,
+                        stats.clone(),
+                        self.state.playback_channel.clone(),
+                    )
+                    .map_err(fail)?;
                     let (producer, input) = rtrb::RingBuffer::new(24_000);
                     // The tap aggregate follows the selected device's nominal rate.
                     #[cfg(target_os = "macos")]

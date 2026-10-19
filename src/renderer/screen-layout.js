@@ -165,6 +165,28 @@
     return { mac, windows };
   }
 
+  function stereoAssignment(layouts = {}, settings = {}) {
+    const values = Object.values(layouts);
+    const mac = values.find((layout) => layout.platform === 'darwin');
+    const windows = values.find((layout) => layout.platform === 'win32');
+    if (![mac, windows].every((layout) => layout?.displays?.some((display) => display.primary))) {
+      return { ready: false, reason: 'Connect both laptops and wait for their main displays in Screen layout.' };
+    }
+    // Use the same geometry and scale as the screen editor, including each
+    // primary display's position inside a computer with multiple monitors.
+    const groups = monitorGroups({ mac, windows });
+    const rects = relativeRects(settings.macPosition, settings.displayOffset, groups);
+    const center = (name) => {
+      const monitor = groups[name].monitors.find((display) => display.primary);
+      return monitor ? rects[name].x + monitor.x + monitor.w / 2 : NaN;
+    };
+    const delta = center('mac') - center('windows');
+    if (!Number.isFinite(delta) || Math.abs(delta) < 0.000001) {
+      return { ready: false, reason: 'The main displays are horizontally aligned. Move one left or right in Screen layout to split stereo.' };
+    }
+    return { ready: true, channels: { mac: delta < 0 ? 'left' : 'right', windows: delta < 0 ? 'right' : 'left' } };
+  }
+
   function arrangeDiagram(width, height, macPosition, displayOffset, sizes) {
     const rects = relativeRects(macPosition, displayOffset, sizes);
     const left = Math.min(rects.mac.x, rects.windows.x);
@@ -229,6 +251,7 @@
     MAX_ZOOM,
     monitorGroup,
     monitorGroups,
+    stereoAssignment,
     normalizeView,
     diagramToViewport,
     viewportToDiagram,

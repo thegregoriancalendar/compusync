@@ -108,6 +108,20 @@ struct RouteGuard {
     replies: mpsc::Receiver<String>,
     stats: Arc<Stats>,
 }
+fn route_message(stats: &Stats, message: &str) -> Result<(), String> {
+    if let Some(warning) = message.strip_prefix("WARNING ") {
+        *stats.warning.lock() = if warning.is_empty() {
+            None
+        } else {
+            Some(warning.chars().take(500).collect())
+        };
+        return Ok(());
+    }
+    Err(message
+        .strip_prefix("ERROR ")
+        .unwrap_or("Windows audio routing stopped. Check output devices and retry.")
+        .to_owned())
+}
 impl RouteGuard {
     fn start(
         path: &str,
@@ -171,11 +185,8 @@ impl RouteGuard {
         .map_err(|e| e.to_string())
     }
     fn heartbeat(&mut self) -> Result<(), String> {
-        if let Ok(message) = self.replies.try_recv() {
-            return Err(message
-                .strip_prefix("ERROR ")
-                .unwrap_or("Windows audio routing stopped. Check output devices and retry.")
-                .into());
+        while let Ok(message) = self.replies.try_recv() {
+            route_message(&self.stats, &message)?;
         }
         if self.child.try_wait().map_err(|e| e.to_string())?.is_some() {
             return Err(
@@ -325,5 +336,29 @@ fn silence(device: &cpal::Device, stats: Arc<Stats>) -> Result<cpal::Stream, Str
         cpal::SampleFormat::I16 => build::<i16>(device, config.config(), stats),
         cpal::SampleFormat::I32 => build::<i32>(device, config.config(), stats),
         _ => Err("Select a 16-bit or 32-bit Windows capture bus format.".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_diagnostics_can_update_and_clear_without_stopping_audio() {
+        let stats = Stats::new();
+        route_message(&stats, "WARNING screenpipe-app.exe has an audio session.").unwrap();
+        assert_eq!(
+            stats.warning.lock().as_deref(),
+            Some("screenpipe-app.exe has an audio session.")
+        );
+        assert!(!stats.stopped.load(Ordering::Acquire));
+        assert!(stats.error.lock().is_none());
+        route_message(&stats, "WARNING ").unwrap();
+        assert!(stats.warning.lock().is_none());
+        assert_eq!(
+            route_message(&stats, "ERROR Windows output disconnected."),
+            Err("Windows output disconnected.".into())
+        );
+        assert!(route_message(&stats, "RESTORED").is_err());
     }
 }

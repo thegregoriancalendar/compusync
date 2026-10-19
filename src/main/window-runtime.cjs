@@ -132,6 +132,12 @@ class WindowHandoffRuntime extends EventEmitter {
     this._moveStart = (id) => { void this.handleMoveStart(id); };
     this._moveEnd = (id) => { void this.handleMoveEnd(id); };
     this._nativeEvent = (event) => {
+      if (event?.kind === 'windowDragDiagnostic') {
+        writeHandoffLog(this.logger, 'drag.lifecycle', {
+          event: 'native-drag-watch', id: event.windowId ?? event.window_id ?? null,
+          role: 'source', phase: 'detecting', at: this.now(), reason: event.message,
+        });
+      }
       if (this.nativeLoopTerminated && event?.kind === 'cursorButton'
         && event.button === 'left' && event.down === false) void this.handleMoveEnd(this.sourceWindowId, { physical: true });
     };

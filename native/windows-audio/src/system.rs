@@ -7,11 +7,15 @@ use windows::{
         Devices::FunctionDiscovery::{
             PKEY_DeviceInterface_FriendlyName, PKEY_Device_DeviceDesc, PKEY_Device_FriendlyName,
         },
-        Foundation::{PROPERTYKEY, RPC_E_CHANGED_MODE},
-        Media::Audio::*,
+        Foundation::{CloseHandle, PROPERTYKEY, RPC_E_CHANGED_MODE},
+        Media::Audio::{Endpoints::IAudioMeterInformation, *},
         System::Com::{
             StructuredStorage::{PropVariantClear, PropVariantToStringAlloc},
             *,
+        },
+        System::Threading::{
+            OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+            PROCESS_QUERY_LIMITED_INFORMATION,
         },
     },
 };
@@ -63,6 +67,29 @@ fn owned_string(value: PWSTR) -> String {
     let result = unsafe { value.to_string() }.unwrap_or_default();
     unsafe { CoTaskMemFree(Some(value.0.cast())) };
     result
+}
+fn process_name(pid: u32) -> String {
+    let name = (|| {
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+        let mut buffer = vec![0u16; 32_768];
+        let mut length = buffer.len() as u32;
+        let result = unsafe {
+            QueryFullProcessImageNameW(
+                handle,
+                PROCESS_NAME_WIN32,
+                PWSTR(buffer.as_mut_ptr()),
+                &mut length,
+            )
+        };
+        let _ = unsafe { CloseHandle(handle) };
+        result.ok()?;
+        let path = String::from_utf16_lossy(&buffer[..length as usize]);
+        Some(path.rsplit('\\').next()?.to_owned())
+    })();
+    match name {
+        Some(name) => format!("{name} (PID {pid})"),
+        None => format!("Process {pid}"),
+    }
 }
 fn property(device: &IMMDevice, key: &PROPERTYKEY) -> Result<String, String> {
     let store = unsafe { device.OpenPropertyStore(STGM_READ) }.map_err(|e| e.to_string())?;
@@ -156,7 +183,10 @@ impl System {
             originals,
         })
     }
-    pub fn check_bypass(&self, owner: u32) -> Result<(), String> {
+    /// Session enumeration includes loopback recorders as well as renderers.
+    /// Even a nonzero meter can be a recorder measuring our scheduled output;
+    /// it is evidence for a diagnostic, never proof of unscheduled playback.
+    pub fn bypass_warning(&self, owner: u32) -> Result<Option<String>, String> {
         for endpoint in self.endpoints()?.into_iter().filter(|d| !d.bus) {
             let device = self.device(&endpoint.id)?;
             let manager: IAudioSessionManager2 =
@@ -173,12 +203,27 @@ impl System {
                     continue;
                 }
                 let control: IAudioSessionControl2 = session.cast().map_err(|e| e.to_string())?;
-                if unsafe { control.GetProcessId() }.map_err(|e| e.to_string())? != owner {
-                    return Err(format!("An app is still using {} directly. Set that app's output to System default (shared mode), restart its playback, and retry sharing.", endpoint.label));
+                let pid = unsafe { control.GetProcessId() }.map_err(|e| e.to_string())?;
+                if pid == owner {
+                    continue;
                 }
+                let peak = session
+                    .cast::<IAudioMeterInformation>()
+                    .ok()
+                    .and_then(|meter| unsafe { meter.GetPeakValue() }.ok())
+                    .unwrap_or_default();
+                if !peak.is_finite() || peak <= 0.00001 {
+                    continue;
+                }
+                let app = if unsafe { control.IsSystemSoundsSession() }.0 == 0 {
+                    "Windows system sounds".to_owned()
+                } else {
+                    process_name(pid)
+                };
+                return Ok(Some(format!("Other audio activity: {app} has an audio session on {}. This may be a recorder. If sound is missing or doubled, set playback apps to System default and restart their playback.", endpoint.label)));
             }
         }
-        Ok(())
+        Ok(None)
     }
 }
 impl Defaults for System {
