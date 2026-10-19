@@ -8,6 +8,8 @@ const { ChromePrepare, boundsFromVU } = require('../src/main/adapters/chrome/pre
 const { createChromeHandoffAdapter } = require('../src/main/adapters/chrome/index.cjs');
 const { NativeAdapter } = require('../native/index.cjs');
 const { geometryToVU } = require('../src/main/window-runtime.cjs');
+const { sanitizePeerMessage } = require('../src/main/messages.cjs');
+const { createChromeExtensionAdapter } = require('../src/main/adapters/chrome/extension-adapter.cjs');
 
 function descriptor(overrides = {}) {
   return {
@@ -327,6 +329,48 @@ test('high-level adapter delegates Apple operations and marks maximized windows 
   await adapter.close(handle);
   assert.deepEqual(calls.find(([name]) => name === 'prepare')[2], { x: 2002, y: 40, width: 800, height: 600 });
   assert.deepEqual(calls.find(([name]) => name === 'position')[2], { x: 200, y: 100, width: 800, height: 600 });
+});
+
+test('a Chrome window created on Mac can be captured and prepared on Windows without prior handoff records', async () => {
+  const geometry = { x: -900, y: 50, w: 800, h: 600 };
+  const source = { id: 'ax:9:0', processName: 'Google Chrome', visible: true,
+    title: 'Mac page', bounds: { x: 100, y: 50, width: 800, height: 600 } };
+  const tabs = [{ index: 0, url: 'https://example.com/mac-created', title: 'Mac page', pinned: false }];
+  const mac = createChromeHandoffAdapter({
+    platform: 'darwin', machineId: 'mac', uuid: () => 'new-mac-window',
+    placement: { machineId: 'mac', origin: { x: -1000, y: 0 }, size: { w: 1000, h: 800 }, scale: 2 },
+    execFile(_file, args, _options, callback) {
+      if (args[3].includes('compusync:chrome:capture')) callback(null, JSON.stringify([{
+        chromeWindowId: '91', chromeWindowIndex: 1, title: source.title,
+        bounds: [100, 50, 900, 650], activeIdx: 0, tabs,
+      }]), '');
+      else callback(null, JSON.stringify({ unavailable: true }), '');
+    },
+  });
+  const captured = await mac.capture(source, geometry);
+  const offer = sanitizePeerMessage({ type: 'window.offer', descriptor: captured });
+  assert.ok(offer);
+  assert.equal(offer.descriptor.origin, 'mac');
+  assert.equal(offer.descriptor.id, 'new-mac-window');
+  assert.deepEqual(offer.descriptor.payload.tabs, tabs);
+  assert.equal(offer.descriptor.payload.tabs[0].history, undefined);
+
+  const calls = [];
+  const win = createChromeExtensionAdapter({
+    machineId: 'win', native: { enumerateWindows: () => [] },
+    bridge: { request: async (method, params) => {
+      calls.push({ method, params });
+      if (method === 'windows.list') return { windows: [] };
+      assert.ok(['window.prepare.begin', 'window.prepare.finish'].includes(method));
+      return { windowId: 92, tabs: [{ tabId: 93, index: 0, url: tabs[0].url, active: true }] };
+    } },
+  });
+  const handle = await win.prepare(offer.descriptor, { originVU: { x: 10, y: 50 },
+    targetPlacement: { machineId: 'win', origin: { x: 0, y: 0 }, size: { w: 1920, h: 1080 }, scale: 1.25 } });
+  assert.equal(handle.windowId, 92);
+  const prepared = calls.find(({ method }) => method === 'window.prepare.begin').params;
+  assert.deepEqual(prepared.tabs, tabs);
+  assert.deepEqual(prepared.bounds, { x: 13, y: 63, width: 1000, height: 750 });
 });
 
 test('VU-derived Windows CDP positions are converted back to OS-global coordinates', async () => {

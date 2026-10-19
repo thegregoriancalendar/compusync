@@ -2,6 +2,8 @@
 
 const { EventEmitter } = require('node:events');
 const os = require('node:os');
+const path = require('node:path');
+const { execFile } = require('node:child_process');
 const { AUDIO_VERSION } = require('../core/audio-contract.cjs');
 
 function supportsMacCapture(release = os.release()) {
@@ -10,29 +12,47 @@ function supportsMacCapture(release = os.release()) {
 }
 
 class RustAudioEngine extends EventEmitter {
-  constructor({ binding, platform = process.platform, release = os.release() } = {}) {
+  constructor({ binding, bindingPath, platform = process.platform, release = os.release() } = {}) {
     super();
     this.native = binding?.NativeAudio ? new binding.NativeAudio() : null;
     this.available = this.native?.protocolVersion?.() === AUDIO_VERSION;
-    this.canSend = this.available && platform === 'darwin' && supportsMacCapture(release);
+    this.canSend = this.available && (platform === 'win32' || (platform === 'darwin' && supportsMacCapture(release)));
+    this.canReceive = this.available && ['darwin', 'win32'].includes(platform);
+    this.guardPath = bindingPath ? path.join(path.dirname(bindingPath), 'compusync-recovery-guard.exe') : '';
     this.platform = platform;
     this.route = null;
   }
 
+  prepareRouting() {
+    if (this.platform !== 'win32' || !this.available) return Promise.resolve();
+    if (!this.guardPath) return Promise.reject(new Error('Windows audio recovery helper is unavailable. Rebuild the native addon.'));
+    this.prepared ||= new Promise((resolve, reject) => {
+      execFile(this.guardPath, ['--audio-recover'], { windowsHide: true }, (error, stdout) => {
+        if (error) { this.prepared = null; reject(new Error(stdout.trim().replace(/^ERROR /, '') || 'Windows audio recovery helper is unavailable. Rebuild the native addon.')); }
+        else resolve();
+      });
+    });
+    return this.prepared;
+  }
+
   async receive({ id, key, peerIp, outputId }) {
-    if (!this.available || this.platform !== 'win32') throw new Error('Rebuild the native addon on Windows to enable audio playback.');
+    if (!this.canReceive) throw new Error('Rebuild the native addon to enable audio playback.');
     const route = this.route = { id, role: 'receiver', connected: false };
+    await this.prepareRouting();
+    if (this.route !== route) throw new Error('Audio start cancelled.');
     const port = await this.native.startReceiver(key, peerIp || '', outputId);
     if (this.route === route) this.poll(route);
     return port;
   }
 
-  async send({ id, key, peerIp, port }) {
+  async send({ id, key, peerIp, port, outputId = '', sourceId = '' }) {
     if (!this.canSend) throw new Error('Synchronized Mac audio needs the rebuilt native addon and macOS 14.6 or later.');
+    const route = this.route = { id, role: 'sender', startedAt: Date.now() };
+    await this.prepareRouting();
+    if (this.route !== route) throw new Error('Audio start cancelled.');
     // The pinned Electron runtime includes NSAudioCaptureUsageDescription, so
     // development launches can request the same native OS permission as a build.
-    const route = this.route = { id, role: 'sender', startedAt: Date.now() };
-    await this.native.startSender(key, peerIp || '', port);
+    await this.native.startSender(key, peerIp || '', port, outputId, sourceId, this.guardPath);
     if (this.route === route) this.poll(route);
   }
 
@@ -54,7 +74,7 @@ class RustAudioEngine extends EventEmitter {
           this.emit('event', { type: 'connected', id: route.id });
         } else if (route.role === 'sender' && !state.capturedFrames && Date.now() - route.startedAt > 10_000) {
           this.emit('event', { type: 'error', id: route.id,
-            message: 'No Mac system audio samples were captured. Play sound on the Mac and check System Audio Recording permission for CompuSync, Electron, or the terminal used to launch it, then restart the app and try again.' });
+            message: this.platform === 'win32' ? 'No Windows audio samples were captured. Check VB-CABLE and the selected output, then retry.' : 'No Mac system audio samples were captured. Play sound on the Mac and check System Audio Recording permission for CompuSync, Electron, or the terminal used to launch it, then restart the app and try again.' });
         }
       } catch (error) { this.emit('event', { type: 'error', id: route.id, message: error.message }); }
     }, 500);
@@ -66,8 +86,24 @@ class RustAudioEngine extends EventEmitter {
     this.emit('event', { type: 'outputs', outputs: this.native.outputs() });
   }
 
+  routingStatus(sourceId = '', outputId = '') {
+    if (!this.available) return { ready: false, reason: 'Rebuild the native addon on both laptops.', buses: [] };
+    return this.native.routingStatus(sourceId, outputId);
+  }
+
+  volume(outputId) {
+    if (typeof this.native?.volume !== 'function') throw new Error('Update the native addon to enable volume controls.');
+    return this.native.volume(outputId);
+  }
+
+  setVolume(outputId, level) {
+    if (typeof this.native?.setVolume !== 'function') throw new Error('Update the native addon to enable volume controls.');
+    return this.native.setVolume(outputId, level);
+  }
+
   stop() {
     this.route = null;
+    this.prepared = null;
     clearInterval(this.timer);
     this.native?.stop(); // Also cancels a start still waiting on OS permissions.
   }

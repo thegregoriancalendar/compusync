@@ -2,7 +2,7 @@ use aes_gcm::{
     aead::{AeadInPlace, KeyInit},
     Aes256Gcm, Nonce, Tag,
 };
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 pub const RATE: u32 = 48_000;
 pub const FRAMES: usize = 240;
 pub const BLOCK_NS: i64 = 5_000_000;
@@ -29,13 +29,13 @@ pub enum Message {
 /// duplicates and packets older than the 256-counter replay window are rejected.
 pub struct Wire {
     cipher: Aes256Gcm,
-    mac: bool,
+    sender: bool,
     counter: u64,
     highest: Option<u64>,
     seen: [u64; 4],
 }
 impl Wire {
-    pub fn new(key: &str, mac: bool) -> Result<Self, String> {
+    pub fn new(key: &str, sender: bool) -> Result<Self, String> {
         if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err("Audio requires a fresh 256-bit session key.".into());
         }
@@ -45,7 +45,7 @@ impl Wire {
         }
         Ok(Self {
             cipher: Aes256Gcm::new((&bytes).into()),
-            mac,
+            sender,
             counter: 0,
             highest: None,
             seen: [0; 4],
@@ -93,7 +93,7 @@ impl Wire {
             .checked_add(1)
             .ok_or("Audio nonce exhausted. Restart sharing.")?;
         let mut packet = Vec::with_capacity(HEADER + body.len() + 16);
-        packet.extend(if self.mac { b"CSM2" } else { b"CSW2" });
+        packet.extend(if self.sender { b"CSS3" } else { b"CSR3" });
         packet.extend(counter.to_be_bytes());
         let tag = self
             .cipher
@@ -106,7 +106,7 @@ impl Wire {
     pub fn decode(&mut self, packet: &[u8]) -> Option<Message> {
         if packet.len() < HEADER + 17
             || packet.len() > MAX_PACKET
-            || &packet[..4] != if self.mac { b"CSW2" } else { b"CSM2" }
+            || &packet[..4] != if self.sender { b"CSR3" } else { b"CSS3" }
         {
             return None;
         }
@@ -195,9 +195,9 @@ mod tests {
     #[test]
     fn timestamps_are_authenticated_and_directions_cannot_reuse_nonces_or_reflect() {
         let key = "42".repeat(32);
-        let mut mac = Wire::new(&key, true).unwrap();
+        let mut sender = Wire::new(&key, true).unwrap();
         let mut windows = Wire::new(&key, false).unwrap();
-        let packet = mac
+        let packet = sender
             .encode(&Message::Audio(Box::new(AudioPacket {
                 epoch: 3,
                 frame: 240,
@@ -207,7 +207,7 @@ mod tests {
             })))
             .unwrap();
         assert!(packet.len() < MAX_PACKET);
-        assert!(mac.decode(&packet).is_none());
+        assert!(sender.decode(&packet).is_none());
         let mut corrupt = packet.clone();
         corrupt[20] ^= 1;
         assert!(windows.decode(&corrupt).is_none());
@@ -220,7 +220,7 @@ mod tests {
         assert!(windows.decode(&packet).is_none());
         let back = windows.encode(&Message::Ready).unwrap();
         assert_ne!(&back[..12], &packet[..12]);
-        assert!(matches!(mac.decode(&back), Some(Message::Ready)));
+        assert!(matches!(sender.decode(&back), Some(Message::Ready)));
     }
     #[test]
     fn replay_window_accepts_reordering_and_expires_old_counters() {

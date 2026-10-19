@@ -26,6 +26,8 @@ npm start
 
 `npm start` automatically appends application output and errors to `compusync.log` in the project root, with a timestamp marking each launch. The log is readable while CompuSync is running and is ignored by Git.
 
+When both laptops run this version with `npm start`, they also share logs automatically over the existing encrypted paired connection. Each laptop keeps its own output in `compusync.log` and saves the other laptop's output in `compusync-peer.log` beside it. Peer log headers identify the source laptop, platform, and time. Both files are readable while the apps run and are ignored by Git. Sharing catches up from the last received byte after reconnecting, with a maximum backlog of 128 KB; headers record any skipped older bytes. Received logs are never sent back to the peer.
+
 Do not copy `node_modules` or native build output between operating systems. The build creates the platform addon used for global input, cursor recovery, native window discovery, and Chrome handoff. See the [Mac setup guide](docs/mac-setup.md) for macOS prerequisites and permissions.
 
 ## Pair the computers
@@ -80,7 +82,7 @@ Control messages are authenticated and encrypted. Cursor input is not queued whi
 
 CompuSync is not remote desktop, a virtual machine, file synchronization, or application streaming. The retired workspace and editor code is outside the active v3 product surface and is never instantiated by the app.
 
-## Mirror Mac audio to Windows
+## Share synchronized audio in either direction
 
 **Connection & settings → Audio manager** plays Mac audio on both laptops using a shared playback schedule. Rust captures and suppresses the Mac's immediate output, then buffers a local copy and the selected Windows output against authenticated playback timestamps. Clock exchanges and device-timestamp feedback keep both outputs on the timeline. Stopping restores ordinary Mac playback. Rebuild the native addon on both laptops; macOS 14.6 or later and System Audio Recording approval are required. Both `npm start` and packaged builds are supported. See the [audio routing test guide](docs/audio-routing.md) for setup, timing, recovery, and physical alignment verification. Reverse routing is not implemented yet; speaker accuracy must be measured on the actual devices.
 

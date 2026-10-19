@@ -1,16 +1,16 @@
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 use super::buffer::{CapturedFrame, Resampler};
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 use super::{clock::ClockFilter, packet::FRAMES};
 use super::{
     clock::{self, MS},
     packet::{AudioPacket, Message, Wire, BLOCK_NS, MAX_PACKET},
     Stats,
 };
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 use rtrb::Consumer;
 use rtrb::Producer;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 use std::{collections::VecDeque, time::Instant};
 use std::{
     io::ErrorKind,
@@ -28,7 +28,7 @@ fn transmit(socket: &UdpSocket, wire: &mut Wire, message: &Message) -> Result<()
         Err(error) => Err(format!("Audio connection stopped: {error}")),
     }
 }
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn receive_one(
     socket: &UdpSocket,
     wire: &mut Wire,
@@ -59,7 +59,7 @@ fn publish_estimate(stats: &Stats, offset: i64, rtt: i64) {
 
 /// Complete clock agreement before opening the muted Mac tap. After this
 /// handshake the sender worker keeps clocks alive while the OS asks permission.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub fn synchronize(
     socket: &UdpSocket,
     wire: &mut Wire,
@@ -128,7 +128,7 @@ pub fn synchronize(
     Err("Audio clocks could not synchronize within 5 ms estimated uncertainty. Check the connection and firewall, then retry.".into())
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub fn send(
     socket: UdpSocket,
     mut wire: Wire,
@@ -155,7 +155,7 @@ pub fn send(
         while !stats.stopped.load(Ordering::Acquire) {
             let now = clock::now_ns();
             if stats.device_clock_invalid.load(Ordering::Relaxed) {
-                return Err("The Mac output cannot provide a supported playback timestamp. Choose built-in or wired speakers.".into());
+                return Err("The source output cannot provide a supported playback timestamp. Choose built-in or wired speakers.".into());
             }
             if now >= next_ping {
                 transmit(&socket, &mut wire, &Message::Ping { t1: now })?;
@@ -201,7 +201,7 @@ pub fn send(
             }
             if now - last_input > 90_000 * MS {
                 return Err(
-                    "No Mac audio samples were captured. Check the system audio permission.".into(),
+                    "No source audio samples were captured. Check the audio devices and permissions.".into(),
                 );
             }
             if stats.resync_requested.swap(false, Ordering::AcqRel) {
@@ -410,7 +410,8 @@ pub fn receive(
             }
             if now - last_audio > (if has_audio { 5_000 } else { 90_000 }) * MS {
                 return Err(
-                    "No Mac audio is arriving. Check permissions, connection, and firewall.".into(),
+                    "No source audio is arriving. Check permissions, connection, and firewall."
+                        .into(),
                 );
             }
             if stats.resync_requested.load(Ordering::Acquire)

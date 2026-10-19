@@ -11,6 +11,7 @@ let layoutRects = null;
 let layoutDrag = null;
 let layoutViewportDrag = null;
 let layoutView = { zoom: 1, panX: 0, panY: 0 };
+const volumeEdits = new Map();
 
 const localCursorDefaults = {
   macPosition: 'left',
@@ -59,7 +60,7 @@ function renderMonitorGroup(element, platform, group, computerName) {
 }
 
 function renderScreenLayout(next = details) {
-  if (!next || !window.CompuSyncScreenLayout) return;
+  if (!next || !window.CompuSyncScreenLayout || $('connection-page').hidden) return;
   const editor = $('screen-layout-editor');
   const groups = diagramGroups(next);
   layoutBaseRects = window.CompuSyncScreenLayout.arrangeDiagram(
@@ -137,6 +138,16 @@ function tab(join) {
   $('join-tab').setAttribute('aria-selected', String(join));
   $('share-panel').hidden = join;
   $('join-panel').hidden = !join;
+}
+
+function showPage(page) {
+  for (const name of ['connection', 'latency-monitor']) {
+    const selected = name === page;
+    $(`${name}-tab`).setAttribute('aria-selected', String(selected));
+    $(`${name}-tab`).tabIndex = selected ? 0 : -1;
+    $(`${name}-page`).hidden = !selected;
+  }
+  if (page === 'connection') renderScreenLayout();
 }
 
 function render(next) {
@@ -243,15 +254,28 @@ function renderAudio(next) {
   $('audio-timing').textContent = timing?.clockReady
     ? `Buffered delay: ${Math.round(timing.delayMs)} ms · Clock uncertainty estimate: ±${Number(timing.uncertaintyMs).toFixed(2)} ms · Recoveries: ${timing.resyncs}`
     : '';
-  $('audio-start').hidden = windows;
+  $('audio-start').hidden = false;
+  $('audio-start').textContent = `Play ${windows ? 'Windows' : 'Mac'} audio on both laptops`;
   $('audio-start').disabled = !audio?.canStart;
   $('audio-stop').disabled = !active;
-  $('audio-windows-output').hidden = !windows;
+  $('audio-windows-output').hidden = false;
+  $('audio-windows-source').hidden = !windows;
+  $('audio-source').disabled = active || !audio?.available;
+  const buses = audio?.routing?.buses || [];
+  $('audio-setup').hidden = !windows || buses.length > 0;
+  const sources = [{ id: '', label: 'Detect standard VB-CABLE' }, ...buses];
+  if (audio?.sourceId && !buses.some((bus) => bus.id === audio.sourceId)) sources.push({ id: audio.sourceId, label: 'Saved capture bus (unavailable)' });
+  const sourceSignature = JSON.stringify(sources);
+  if ($('audio-source').dataset.sources !== sourceSignature) {
+    $('audio-source').replaceChildren(...sources.map((bus) => new Option(bus.label, bus.id)));
+    $('audio-source').dataset.sources = sourceSignature;
+  }
+  $('audio-source').value = audio?.sourceId || '';
   $('audio-output').disabled = active || !audio?.available;
   $('audio-refresh').disabled = active || !audio?.available;
   const select = $('audio-output');
-  const outputs = audio?.outputs || [];
-  const options = [{ id: '', label: 'Windows default output' }, ...outputs];
+  const outputs = (audio?.outputs || []).filter((output) => !buses.some((bus) => bus.id === output.id));
+  const options = [{ id: '', label: `${windows ? 'Windows' : 'Mac'} default output` }, ...outputs];
   if (audio?.outputId && !outputs.some((output) => output.id === audio.outputId)) {
     options.push({ id: audio.outputId, label: 'Saved output (refresh to check availability)' });
   }
@@ -261,10 +285,33 @@ function renderAudio(next) {
     select.dataset.outputs = signature;
   }
   select.value = audio?.outputId || '';
+  for (const [device, platform] of [['mac', 'darwin'], ['windows', 'win32']]) {
+    const slider = $(`audio-volume-${device}`);
+    const volume = audio?.volumes?.[device];
+    const available = Number.isInteger(volume?.level) && !volume.error;
+    slider.disabled = !available;
+    const edit = volumeEdits.get(device);
+    if (!available && edit) {
+      clearTimeout(edit.timer);
+      volumeEdits.delete(device);
+    }
+    if (!available || !edit) {
+      slider.value = available ? volume.level : 0;
+      const value = available ? `${volume.muted ? 'Muted · ' : ''}${volume.level}%` : 'Unavailable';
+      $(`audio-volume-${device}-value`).textContent = value;
+      slider.setAttribute('aria-valuetext', value);
+    }
+    $(`audio-volume-${device}-status`).textContent = volume?.error || (available
+      ? `${volume.label}${next.platform === platform ? ' · This laptop' : ''}`
+      : next.platform === platform ? 'Reading output volume…'
+        : next.status.phase === 'connected' ? 'Volume controls are unavailable on the other laptop.'
+          : `Connect ${device === 'mac' ? 'the Mac' : 'Windows'} to adjust its volume.`);
+  }
   $('audio-help').textContent = !audio?.available
     ? 'Rebuild the native addon on both laptops to enable audio routing.'
     : windows
-      ? 'Choose an output, then start sharing from the Mac. Stop sharing before changing devices.'
+      ? active ? 'Windows output is temporarily routed through VB-CABLE. Stop sharing to restore your previous outputs.'
+        : audio.routing?.reason || 'Choose physical speakers or headphones. Apps must use System default in shared mode; close other monitors of VB-CABLE. Start here to share Windows audio.'
       : !audio.canCapture
         ? 'Mac audio capture requires macOS 14.6 or later.'
         : !audio.peerReady && next.status.phase === 'connected'
@@ -281,6 +328,26 @@ async function audioCommand(name, data) {
     $('audio-error').textContent = error.message;
     $('audio-error').hidden = false;
   }
+}
+
+function previewVolume(device, level) {
+  const value = `${level}%`;
+  $(`audio-volume-${device}-value`).textContent = value;
+  $(`audio-volume-${device}`).setAttribute('aria-valuetext', value);
+}
+
+async function sendVolume(device) {
+  const edit = volumeEdits.get(device);
+  if (!edit || edit.sending) return;
+  clearTimeout(edit.timer);
+  edit.sending = true;
+  const level = edit.level;
+  await audioCommand('audio-volume', { platform: device === 'mac' ? 'darwin' : 'win32', level });
+  if (volumeEdits.get(device) !== edit) return;
+  edit.sending = false;
+  if (edit.level !== level) { void sendVolume(device); return; }
+  volumeEdits.delete(device);
+  if (details) renderAudio(details);
 }
 
 function cursorSettingsFromForm() {
@@ -316,6 +383,22 @@ async function command(name, data) {
     $('error').hidden = false;
     return false;
   }
+}
+
+for (const name of ['connection', 'latency-monitor']) {
+  const button = $(`${name}-tab`);
+  button.addEventListener('click', () => showPage(name));
+  button.addEventListener('keydown', (event) => {
+    let page;
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      page = name === 'connection' ? 'latency-monitor' : 'connection';
+    } else if (event.key === 'Home') page = 'connection';
+    else if (event.key === 'End') page = 'latency-monitor';
+    else return;
+    event.preventDefault();
+    showPage(page);
+    $(`${page}-tab`).focus();
+  });
 }
 
 $('share-tab').addEventListener('click', () => tab(false));
@@ -472,10 +555,24 @@ $('cursor-mode').addEventListener('click', () => command(details?.cursorSettings
 $('toggle-ownership').addEventListener('click', () => command('cursor-toggle-ownership'));
 $('update-check').addEventListener('click', () => command('update-check'));
 $('update-install').addEventListener('click', () => command('update-install'));
+$('audio-source').addEventListener('change', () => audioCommand('audio-source', { id: $('audio-source').value }));
+$('audio-setup').addEventListener('click', () => audioCommand('audio-setup'));
 $('audio-start').addEventListener('click', () => audioCommand('audio-start'));
 $('audio-stop').addEventListener('click', () => audioCommand('audio-stop'));
 $('audio-refresh').addEventListener('click', () => audioCommand('audio-outputs'));
 $('audio-output').addEventListener('change', () => audioCommand('audio-output', { id: $('audio-output').value }));
+for (const device of ['mac', 'windows']) {
+  const slider = $(`audio-volume-${device}`);
+  slider.addEventListener('input', () => {
+    const edit = volumeEdits.get(device) || { sending: false };
+    clearTimeout(edit.timer);
+    edit.level = Number(slider.value);
+    volumeEdits.set(device, edit);
+    previewVolume(device, edit.level);
+    edit.timer = setTimeout(() => void sendVolume(device), 80);
+  });
+  slider.addEventListener('change', () => void sendVolume(device));
+}
 if (/Mac/.test(navigator.platform)) for (const id of ['shortcut', 'unlink-shortcut', 'ownership-shortcut']) $(id).textContent = '⌘';
 api.onDetails(render);
 api.bootstrap().then(render);

@@ -13,13 +13,13 @@ const now = () => process.hrtime.bigint();
 function macWire(key) {
   let counter = 0n;
   return (body) => {
-    const header = Buffer.alloc(12); header.write('CSM2'); header.writeBigUInt64BE(counter++, 4);
+    const header = Buffer.alloc(12); header.write('CSS3'); header.writeBigUInt64BE(counter++, 4);
     const encrypt = createCipheriv('aes-256-gcm', key, header); encrypt.setAAD(header);
     return Buffer.concat([header, encrypt.update(body), encrypt.final(), encrypt.getAuthTag()]);
   };
 }
 function decodeWindows(key, packet) {
-  assert.equal(packet.subarray(0, 4).toString(), 'CSW2');
+  assert.equal(packet.subarray(0, 4).toString(), 'CSR3');
   const header = packet.subarray(0, 12); const decrypt = createDecipheriv('aes-256-gcm', key, header);
   decrypt.setAAD(header); decrypt.setAuthTag(packet.subarray(-16));
   return Buffer.concat([decrypt.update(packet.subarray(12, -16)), decrypt.final()]);
@@ -31,7 +31,7 @@ async function until(predicate) {
 
 test('Windows native output honors authenticated future playback timestamps and reports device-clock timing', { skip: !supported }, async (t) => {
   const audio = new binding.NativeAudio(); t.after(() => audio.stop());
-  assert.equal(audio.protocolVersion(), 2);
+  assert.equal(audio.protocolVersion(), 3);
   if (!audio.outputs().length) { t.skip('No physical Windows audio output is available.'); return; }
   const key = randomBytes(32); const encode = macWire(key);
   const port = await audio.startReceiver(key.toString('hex'), '127.0.0.1', '');
@@ -76,6 +76,6 @@ test('native audio cancellation cannot leave a late device stream running', { sk
   const pending = audio.startReceiver(randomBytes(32).toString('hex'), '127.0.0.1', ''); audio.stop();
   await assert.rejects(pending); assert.equal(audio.status().running, false);
   await assert.rejects(audio.startReceiver('bad-key', '127.0.0.1', ''));
-  await assert.rejects(audio.startSender(randomBytes(32).toString('hex'), '127.0.0.1', 45123), /Start audio sharing from the Mac/);
+  await assert.rejects(audio.startSender(randomBytes(32).toString('hex'), '127.0.0.1', 45123, '', 'invalid', ''), /Windows audio device/);
   audio.stop();
 });

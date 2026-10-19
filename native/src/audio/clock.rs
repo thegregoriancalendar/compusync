@@ -1,5 +1,5 @@
 //! One host monotonic clock for sockets and device timestamps, never wall time.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 use std::collections::VecDeque;
 pub const MS: i64 = 1_000_000;
 pub fn now_ns() -> i64 {
@@ -55,18 +55,18 @@ pub fn mac_host_ns(ticks: u64) -> i64 {
     (ticks as u128 * numer as u128 / denom as u128) as i64
 }
 #[derive(Clone, Copy, Debug)]
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub struct Estimate {
     /// Receiver host time minus Mac host time.
     pub offset: i64,
     pub rtt: i64,
 }
 /// NTP four-timestamp estimator; retain a bounded, recent low-delay window.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub struct ClockFilter {
     samples: VecDeque<(i64, Estimate)>,
 }
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 impl ClockFilter {
     pub fn new() -> Self {
         Self {

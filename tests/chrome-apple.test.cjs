@@ -120,6 +120,23 @@ test('capture matches a native window, preserves tab data, and reuses prepared d
   assert.doesNotMatch(calls[0].args[3], /\.execute\s*\(|javascript\s*:/i);
 });
 
+test('a background New Tab blocks fresh Mac capture with an actionable explanation', async () => {
+  const adapter = createAppleChromeAdapter({
+    execFile: execMock({ capture: [{ ...capturedWindow, activeIdx: 0, tabs: [
+      { index: 0, url: 'https://example.com/', title: 'Website' },
+      { index: 1, url: 'chrome://newtab/', title: 'New Tab' },
+    ] }] }),
+  });
+  await assert.rejects(() => adapter.capture({
+    id: 'ax:fresh', title: capturedWindow.title, bounds: { x: 10, y: 20, width: 800, height: 600 },
+  }, { x: 10, y: 20, w: 800, h: 600 }), (error) => {
+    assert.equal(error.code, 'CHROME_UNSUPPORTED_TABS');
+    assert.match(error.message, /every tab/);
+    assert.match(error.message, /New Tab/);
+    return true;
+  });
+});
+
 test('prepared Apple window retains received all-tab history for an unchanged round trip', async () => {
   const nativeWindow = {
     id: 'ax:prepared', processName: 'Google Chrome', visible: true,

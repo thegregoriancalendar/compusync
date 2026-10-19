@@ -22,6 +22,7 @@ class Engine extends EventEmitter {
   constructor(canSend = false) {
     super(); this.available = true; this.canSend = canSend; this.calls = []; this.stops = 0;
   }
+  routingStatus() { return { ready: true, buses: [{ id: 'bus', label: 'VB-CABLE' }], outputId: 'speakers' }; }
   async receive(options) { this.calls.push(['receive', options]); return this.pending || 45123; }
   async send(options) { this.calls.push(['send', options]); }
   async listOutputs() { this.emit('event', { type: 'outputs', outputs: [{ id: 'speakers', label: 'Speakers' }] }); }
@@ -40,12 +41,12 @@ class Peer extends EventEmitter {
   }
 }
 
-async function pair(t) {
+async function pair(t, reverse = false) {
   const macSession = new Peer('mac');
   const windowsSession = new Peer('windows');
   macSession.other = windowsSession; windowsSession.other = macSession;
   const macEngine = new Engine(true);
-  const windowsEngine = new Engine();
+  const windowsEngine = new Engine(reverse);
   const mac = new AudioRouter({ session: macSession, engine: macEngine, platform: 'darwin' });
   const windows = new AudioRouter({ session: windowsSession, engine: windowsEngine, platform: 'win32' });
   mac.start(); windows.start();
@@ -61,14 +62,14 @@ test('audio messages bound inputs, strip extra fields and reject malformed keys 
   assert.equal(sanitizeAudioMessage({ type: 'audio.hello', version: 1, platform: 'darwin', canSend: true, canReceive: false }), null);
   assert.deepEqual(sanitizeAudioMessage({ type: 'audio.offer', id: 'route', injected: 'ignore' }), { type: 'audio.offer', id: 'route' });
   assert.deepEqual(sanitizeAudioMessage({ type: 'audio.hello', version: AUDIO_VERSION, platform: 'win32', canSend: true, canReceive: true }),
-    { type: 'audio.hello', version: AUDIO_VERSION, platform: 'win32', canSend: false, canReceive: true });
+    { type: 'audio.hello', version: AUDIO_VERSION, platform: 'win32', canSend: true, canReceive: true });
 });
 
 test('negotiates Mac-to-Windows with a fresh key and reports streaming only after receiver acknowledgement', async (t) => {
   const { mac, windows, macEngine, windowsEngine } = await pair(t);
   assert.equal(mac.state().canStart, true);
   assert.equal(windows.state().canStart, false);
-  assert.throws(() => windows.startRoute(), /Start audio sharing from/);
+  assert.throws(() => windows.startRoute(), /Connect to a Mac/);
   mac.startRoute();
   await settle();
   const receiver = windowsEngine.calls[0][1];
@@ -103,6 +104,42 @@ test('disconnect stops native audio and reconnect never restarts capture automat
   assert.equal(mac.state().canStart, true);
   assert.equal(mac.route, null);
   assert.equal(macEngine.calls.length, 1);
+});
+
+test('Windows sends through its capture bus with physical local playback and Mac receives', async (t) => {
+  const { mac, windows, macEngine, windowsEngine } = await pair(t, true);
+  await windows.setSource('bus');
+  assert.equal(windows.state().canStart, true);
+  windows.startRoute(); await settle();
+  assert.equal(windowsEngine.calls[0][0], 'send');
+  assert.equal(windowsEngine.calls[0][1].outputId, 'speakers');
+  assert.equal(windowsEngine.calls[0][1].sourceId, 'bus');
+  assert.equal(macEngine.calls[0][0], 'receive');
+  assert.equal(windowsEngine.calls[0][1].key, macEngine.calls[0][1].key);
+  await assert.rejects(windows.setSource(''), /Stop sharing/);
+  macEngine.emit('event', { type: 'connected', id: mac.route.id }); await settle();
+  assert.equal(windows.phase, 'streaming'); assert.equal(mac.phase, 'receiving');
+  windows.stopRoute(); await settle();
+  assert.equal(mac.route, null); assert.ok(windowsEngine.stops > 0);
+});
+
+test('simultaneous offers settle on one sender and one receiver with a common route', async (t) => {
+  const { mac, windows, macEngine, windowsEngine } = await pair(t, true);
+  mac.startRoute(); windows.startRoute(); await settle(); await settle();
+  assert.equal(mac.route.id, windows.route.id);
+  assert.notEqual(mac.route.role, windows.route.role);
+  assert.equal([...macEngine.calls, ...windowsEngine.calls].filter(([call]) => call === 'send').length, 1);
+  assert.equal([...macEngine.calls, ...windowsEngine.calls].filter(([call]) => call === 'receive').length, 1);
+});
+
+test('Windows setup failures block sending while leaving Mac-to-Windows reception available', async (t) => {
+  const { mac, windows, windowsEngine } = await pair(t, true);
+  windowsEngine.routingStatus = () => ({ ready: false, buses: [], reason: 'Install VB-CABLE.' });
+  windows.refreshRouting();
+  assert.equal(windows.state().canStart, false);
+  assert.throws(() => windows.startRoute(), /Install VB-CABLE/);
+  mac.startRoute(); await settle();
+  assert.equal(windows.route.role, 'receiver');
 });
 
 test('stopping while receiver startup is pending prevents late negotiation and capture', async (t) => {
@@ -171,7 +208,7 @@ test('Mac development launches reach native capture so macOS can request permiss
   t.after(() => engine.stop());
   const key = '42'.repeat(32);
   await engine.send({ id: 'development', key, peerIp: '192.168.1.5', port: 45123 });
-  assert.deepEqual(calls, [[key, '192.168.1.5', 45123]]);
+  assert.deepEqual(calls, [[key, '192.168.1.5', 45123, '', '', '']]);
   assert.equal(engine.route.role, 'sender');
 });
 
@@ -194,6 +231,43 @@ test('stale native addons cannot advertise synchronized audio support', () => {
   assert.equal(engine.canSend, false);
 });
 
+test('cancelling during helper preparation cannot start a late native stream in either role', async () => {
+  for (const role of ['send', 'receive']) {
+    let finish; let starts = 0;
+    class NativeAudio {
+      protocolVersion() { return AUDIO_VERSION; }
+      startSender() { starts++; }
+      startReceiver() { starts++; }
+      stop() {}
+    }
+    const engine = new RustAudioEngine({ binding: { NativeAudio }, platform: 'win32' });
+    engine.prepareRouting = () => new Promise((resolve) => { finish = resolve; });
+    const pending = engine[role]({ id: 'cancel', key: '42'.repeat(32), peerIp: '127.0.0.1', port: 45123, outputId: '' });
+    engine.stop(); finish();
+    await assert.rejects(pending, /cancelled/);
+    assert.equal(starts, 0); assert.equal(engine.route, null);
+  }
+});
+
+test('native engine supports Windows sending and Mac receiving with the same transport API', async (t) => {
+  const calls = [];
+  class NativeAudio {
+    protocolVersion() { return AUDIO_VERSION; }
+    async startSender(...args) { calls.push(['send', ...args]); }
+    async startReceiver(...args) { calls.push(['receive', ...args]); return 45123; }
+    stop() {}
+  }
+  const windows = new RustAudioEngine({ binding: { NativeAudio }, bindingPath: require('node:path').resolve('native/test.node'), platform: 'win32' });
+  windows.prepareRouting = async () => {};
+  const mac = new RustAudioEngine({ binding: { NativeAudio }, platform: 'darwin', release: '23.5.0' });
+  t.after(() => { windows.stop(); mac.stop(); });
+  const key = '42'.repeat(32);
+  await windows.send({ id: 'reverse', key, peerIp: '127.0.0.1', port: 45123, outputId: 'speakers', sourceId: 'bus' });
+  await mac.receive({ id: 'reverse', key, peerIp: '127.0.0.1', outputId: 'mac-speakers' });
+  assert.equal(mac.canSend, false); assert.equal(mac.canReceive, true);
+  assert.deepEqual(calls, [['send', key, '127.0.0.1', 45123, 'speakers', 'bus', windows.guardPath], ['receive', key, '127.0.0.1', 'mac-speakers']]);
+});
+
 test('receiving packets alone cannot report synchronized playback; the device must have played scheduled frames', async (t) => {
   t.mock.timers.enable({ apis: ['setInterval'] });
   let state = { running: true, packets: 10, clockReady: true, playedFrames: 0 };
@@ -205,6 +279,7 @@ test('receiving packets alone cannot report synchronized playback; the device mu
   }
   const engine = new RustAudioEngine({ binding: { NativeAudio }, platform: 'win32' });
   t.after(() => engine.stop());
+  engine.prepareRouting = async () => {};
   const events = []; engine.on('event', (event) => events.push(event));
   await engine.receive({ id: 'timed', key: '42'.repeat(32), peerIp: '127.0.0.1', outputId: '' });
   t.mock.timers.tick(500);

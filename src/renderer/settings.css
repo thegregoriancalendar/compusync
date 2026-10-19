@@ -85,7 +85,15 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-
 .row { display: flex; align-items: center; gap: 12px; }
 #copy-status { color: #349473; font-size: 12px; }
 #error { color: #aa4747; font-size: 12px; margin: 12px 0 0; }
-#audio-windows-output { margin-top: 16px; }
+#audio-windows-output, #audio-windows-source { margin-top: 16px; }
+.audio-volumes { display: grid; gap: 16px; margin-top: 18px; }
+.audio-volume-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.audio-volume-heading label { margin: 0; font-weight: 550; }
+.audio-volume-heading output { color: #44546a; font-size: 12px; font-variant-numeric: tabular-nums; }
+.audio-volume input[type=range] { display: block; width: 100%; height: 20px; margin: 7px 0 3px; accent-color: #526fa7; cursor: pointer; }
+.audio-volume input[type=range]:disabled { cursor: default; opacity: .45; }
+.audio-volume input[type=range]:focus-visible { outline: 2px solid #526fa7; outline-offset: 3px; border-radius: 4px; }
+.audio-volume .small { margin: 0; font-size: 11px; }
 #audio-output { min-width: 0; flex: 1; margin-bottom: 0; }
 #audio-refresh { flex: none; }
 #audio-error, .audio-error-text { color: #aa4747; }

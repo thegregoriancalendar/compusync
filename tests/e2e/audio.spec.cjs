@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-test('Windows audio manager lists native outputs and cannot start reverse capture', async () => {
+test('Windows audio manager exposes routing setup and refuses capture before pairing', async () => {
   test.skip(process.platform !== 'win32', 'The first audio receiver runs on Windows.');
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'compusync-audio-e2e-'));
   const env = { ...process.env, COMPUSYNC_PROFILE: profile, COMPUSYNC_PORT: '0', COMPUSYNC_BIND_HOST: '127.0.0.1' };
@@ -18,7 +18,9 @@ test('Windows audio manager lists native outputs and cannot start reverse captur
     const errors = [];
     page.on('pageerror', (error) => errors.push(error.message));
     await expect(page.locator('#audio-mode')).toHaveText('Separate');
-    await expect(page.locator('#audio-start')).toBeHidden();
+    await expect(page.locator('#audio-start')).toBeVisible();
+    await expect(page.locator('#audio-start')).toBeDisabled();
+    await expect(page.locator('#audio-windows-source')).toBeVisible();
     await expect(page.locator('#audio-stop')).toBeDisabled();
     await expect(page.locator('#audio-refresh')).toBeEnabled();
     await page.locator('#audio-refresh').click();
@@ -26,7 +28,7 @@ test('Windows audio manager lists native outputs and cannot start reverse captur
     const audio = await page.evaluate(async () => (await window.compusync.bootstrap()).audio);
     expect(audio.available).toBe(true);
     expect(audio.canStart).toBe(false);
-    expect(await page.locator('#audio-output option').count()).toBe(audio.outputs.length + 1);
+    expect(await page.locator('#audio-output option').count()).toBe(audio.outputs.filter((output) => !audio.routing.buses.some((bus) => bus.id === output.id)).length + 1);
     expect(await page.evaluate(() => window.compusync.command('audio-start'))).toMatchObject({ ok: false });
     expect(await page.evaluate(() => window.compusync.command('audio-output', { id: 'missing-device' }))).toMatchObject({ ok: false });
     await page.screenshot({ path: 'test-results/audio-manager-windows.png', fullPage: true });

@@ -132,6 +132,7 @@ name = "compusync-native"
 version = "0.3.0"
 dependencies = [
  "aes-gcm",
+ "compusync-windows-audio",
  "cpal",
  "napi",
  "napi-build",
@@ -146,6 +147,17 @@ dependencies = [
  "rtrb",
  "serde",
  "serde_json",
+ "windows",
+]
+
+[[package]]
+name = "compusync-windows-audio"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "windows",
+ "windows-core",
 ]
 
 [[package]]

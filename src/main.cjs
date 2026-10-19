@@ -12,6 +12,7 @@ const { EDGES } = require('./core/state.cjs');
 const { cursorSettingsFromSaved, validateCursorSettings } = require('./core/cursor-preferences.cjs');
 const { SharedInputRuntime } = require('./main/runtime.cjs');
 const { ClipboardSync } = require('./main/clipboard-sync.cjs');
+const { LogSync } = require('./main/log-sync.cjs');
 const { AudioRouter } = require('./main/audio-router.cjs');
 const { RustAudioEngine } = require('./main/audio-engine.cjs');
 const { WindowHandoffRuntime } = require('./main/window-runtime.cjs');
@@ -37,6 +38,7 @@ if (!hasLock) app.quit();
 
 let settings, messagesWindow, tray, sync, inputRuntime, windowRuntime, clipboardSync, messagesService, seamOverlay, nativeInput, updateService, config;
 let audioRouter;
+let logSync;
 let quitting = false;
 let changingSession = false;
 let backgroundLaunch = false;
@@ -89,6 +91,7 @@ function readConfig() {
     chromeExtensionSetupPrompted: Boolean(saved.chromeExtensionSetupPrompted),
     macPermissionsPromptedV3: Boolean(saved.macPermissionsPromptedV3),
     clipboardSync: saved.clipboardSync !== false,
+    audioSourceId: typeof saved.audioSourceId === 'string' && saved.audioSourceId.length <= 256 ? saved.audioSourceId : '',
     audioOutputId: typeof saved.audioOutputId === 'string' && saved.audioOutputId.length <= 256 ? saved.audioOutputId : '',
     cursorSettings: cursorSettingsFromSaved(saved.cursorSettings),
     dismissedNotices: Array.isArray(saved.dismissedNotices)
@@ -454,6 +457,8 @@ function stopInputRuntime(reason = 'session-stop') {
 
 async function startSession() {
   stopInputRuntime('session-restart');
+  logSync?.stop();
+  logSync = null;
   audioRouter?.stop();
   audioRouter = null;
   clipboardSync?.stop();
@@ -463,9 +468,18 @@ async function startSession() {
   if (sync) await sync.stop();
   const layout = localLayout();
   sync = new Session({ ...config, layout, startClosed: backgroundLaunch });
+  if (process.env.COMPUSYNC_LOG_PATH) {
+    logSync = new LogSync({
+      session: sync, logPath: process.env.COMPUSYNC_LOG_PATH,
+      onError: (error) => console.warn('CompuSync could not share logs:', error.message),
+    });
+    logSync.start();
+  }
+  const audioBinding = loadBinding();
   audioRouter = new AudioRouter({
     session: sync,
-    engine: new RustAudioEngine({ binding: loadBinding().binding }),
+    engine: new RustAudioEngine({ binding: audioBinding.binding, bindingPath: audioBinding.path }),
+    sourceId: config.audioSourceId,
     outputId: config.audioOutputId,
   });
   audioRouter.on('state', refreshStatus);
@@ -566,6 +580,14 @@ function setupIpc() {
         audioRouter.stopRoute();
       } else if (command === 'audio-outputs') {
         await audioRouter.refreshOutputs();
+      } else if (command === 'audio-volume') {
+        await audioRouter.setVolume(data?.platform, data?.level);
+      } else if (command === 'audio-setup') {
+        await shell.openExternal('https://vb-audio.com/Cable/');
+      } else if (command === 'audio-source') {
+        await audioRouter.setSource(data?.id);
+        config.audioSourceId = audioRouter.sourceId;
+        saveConfig();
       } else if (command === 'audio-output') {
         await audioRouter.setOutput(data?.id);
         config.audioOutputId = audioRouter.outputId;
@@ -628,6 +650,8 @@ app.on('before-quit', (event) => {
   clearTimeout(layoutTimer);
   cancelOwnedDrag();
   stopInputRuntime('process-exit');
+  logSync?.stop();
+  logSync = null;
   audioRouter?.stop();
   audioRouter = null;
   clipboardSync?.stop();

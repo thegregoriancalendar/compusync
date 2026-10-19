@@ -160,10 +160,11 @@ class WindowHandoffRuntime extends EventEmitter {
       this.setSeam(state);
       this.#settleSource();
     });
-    this.drag.on('abort', ({ reason }) => {
+    this.drag.on('abort', ({ reason, error }) => {
       this.setSeam(null);
       this.#settleSource();
-      if (!['peer-abort', 'late-ready'].includes(reason)) this.#noticeError(Object.assign(new Error('The source Chrome window was kept in place.'), { code: reason }));
+      if (!['peer-abort', 'late-ready'].includes(reason)) this.#noticeError(error
+        || Object.assign(new Error('The source Chrome window was kept in place.'), { code: reason }));
     });
     this.drag.on('committed', () => {
       this.setSeam(null);
@@ -198,14 +199,29 @@ class WindowHandoffRuntime extends EventEmitter {
   }
 
   async handleMoveStart(id) {
-    if (!this.started || !this.input.cursor.linked || this.drag.active) return false;
+    this.#logMoveDetection(id, 'observed');
+    if (!this.started || !this.input.cursor.linked || this.drag.active) {
+      this.#logMoveDetection(id, !this.started ? 'runtime-stopped'
+        : !this.input.cursor.linked ? 'cursor-unlinked' : 'handoff-busy');
+      return false;
+    }
     const windows = await this.windows();
     const window = windows.find((candidate) => String(candidate.id) === String(id));
-    if (processIdOf(window) === this.processId) return false;
+    if (processIdOf(window) === this.processId) {
+      this.#logMoveDetection(id, 'compusync-window');
+      return false;
+    }
     const geometryVU = geometryToVU(window, this.localPlacement());
-    if (!window || !geometryVU) return false;
+    if (!window || !geometryVU) {
+      this.#logMoveDetection(id, window ? 'source-geometry-unavailable' : 'source-window-unavailable');
+      return false;
+    }
     const began = this.drag.begin({ window, geometryVU, cursorVU: this.input.cursor.virtualCursor });
-    if (!began) return false;
+    if (!began) {
+      this.#logMoveDetection(id, 'drag-start-declined');
+      return false;
+    }
+    if (!this.drag.active?.adapter) this.#logMoveDetection(id, 'chrome-adapter-unavailable');
     this.sourceWindowId = String(id);
     this.sourceStartBounds = boundsOf(window);
     this.sourceGeometryVU = { ...geometryVU };
@@ -214,6 +230,15 @@ class WindowHandoffRuntime extends EventEmitter {
     this.pollTimer = setInterval(() => { void this.poll(); }, this.frameMs);
     this.pollTimer.unref?.();
     return true;
+  }
+
+  #logMoveDetection(id, reason) {
+    // A missing AX/window join used to disappear before the drag controller
+    // could log anything. Keep these records free of window titles and URLs.
+    writeHandoffLog(this.logger, 'drag.lifecycle', {
+      type: 'drag.lifecycle', event: 'native-move-detection', id: id == null ? null : String(id),
+      role: 'source', phase: 'detecting', at: this.now(), reason,
+    });
   }
 
   async poll() {

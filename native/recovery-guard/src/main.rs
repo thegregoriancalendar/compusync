@@ -29,6 +29,37 @@ struct RecoveryGuardState {
 }
 
 fn main() -> ExitCode {
+    #[cfg(windows)]
+    if std::env::args().nth(1).as_deref() == Some("--audio-recover") {
+        return match compusync_windows_audio::recover_previous() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                println!("ERROR {}", error.replace(['\r', '\n'], " "));
+                ExitCode::FAILURE
+            }
+        };
+    }
+    #[cfg(windows)]
+    if std::env::args().nth(1).as_deref() == Some("--audio-route") {
+        let args: Vec<_> = std::env::args().collect();
+        let result = args
+            .get(2)
+            .zip(args.get(3))
+            .ok_or("Missing Windows routing endpoints.".to_owned())
+            .and_then(|(bus, output)| {
+                args.get(4)
+                    .and_then(|pid| pid.parse().ok())
+                    .ok_or("Missing Windows audio owner PID.".to_owned())
+                    .and_then(|pid| compusync_windows_audio::run_guard(bus, output, pid))
+            });
+        return match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                println!("ERROR {}", error.replace(['\r', '\n'], " "));
+                ExitCode::from(1)
+            }
+        };
+    }
     let Some(pid) = std::env::args()
         .nth(1)
         .and_then(|value| value.parse::<u32>().ok())

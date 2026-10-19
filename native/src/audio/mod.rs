@@ -5,7 +5,12 @@ mod device;
 #[cfg(target_os = "macos")]
 mod mac_tap;
 mod packet;
+#[cfg(any(target_os = "windows", test))]
+mod pcm;
 mod transport;
+mod volume;
+#[cfg(target_os = "windows")]
+mod windows_capture;
 
 use crate::napi_error as fail;
 use napi::{bindgen_prelude::AsyncTask, Env, Result, Task};
@@ -24,6 +29,19 @@ use std::{
 #[napi(object)]
 pub struct AudioOutput {
     pub id: String,
+    pub label: String,
+}
+#[napi(object)]
+pub struct AudioRouting {
+    pub ready: bool,
+    pub reason: Option<String>,
+    pub buses: Vec<AudioOutput>,
+    pub output_id: Option<String>,
+}
+#[napi(object)]
+pub struct AudioVolume {
+    pub level: u32,
+    pub muted: bool,
     pub label: String,
 }
 #[napi(object)]
@@ -104,18 +122,18 @@ impl Stats {
 struct Running {
     stats: Arc<Stats>,
     worker: Option<JoinHandle<()>>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     capture: Option<Arc<Mutex<Option<device::Capture>>>>,
 }
 impl Drop for Running {
     fn drop(&mut self) {
         self.stats.stopped.store(true, Ordering::Release);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             if let Some(capture) = self.capture.take() {
                 capture.lock().take();
             }
-        } // Restore un-delayed Mac playback before waiting.
+        } // Restore normal source playback before waiting.
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -149,6 +167,46 @@ impl NativeAudio {
         packet::VERSION
     }
     #[napi]
+    pub fn routing_status(&self, source_id: String, output_id: String) -> Result<AudioRouting> {
+        #[cfg(target_os = "windows")]
+        {
+            let mut system = compusync_windows_audio::System::new().map_err(fail)?;
+            let buses = system
+                .endpoints()
+                .map_err(fail)?
+                .into_iter()
+                .filter(|d| d.bus)
+                .map(|d| AudioOutput {
+                    id: format!("wasapi:{}", d.id),
+                    label: d.label,
+                })
+                .collect();
+            let result = system
+                .enable_policy()
+                .and_then(|_| windows_capture::plan(&source_id, &output_id));
+            let output_id = result
+                .as_ref()
+                .ok()
+                .map(|p| format!("wasapi:{}", p.snapshot.output));
+            Ok(AudioRouting {
+                ready: result.is_ok(),
+                reason: result.err(),
+                buses,
+                output_id,
+            })
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = (source_id, output_id);
+            Ok(AudioRouting {
+                ready: cfg!(target_os = "macos"),
+                reason: None,
+                buses: vec![],
+                output_id: None,
+            })
+        }
+    }
+    #[napi]
     pub fn outputs(&self) -> Result<Vec<AudioOutput>> {
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         {
@@ -160,6 +218,19 @@ impl NativeAudio {
         }
     }
     #[napi]
+    pub fn volume(&self, output_id: String) -> Result<AudioVolume> {
+        volume::get(&output_id).map_err(napi::Error::from_reason)
+    }
+    #[napi]
+    pub fn set_volume(&self, output_id: String, level: u32) -> Result<AudioVolume> {
+        if level > 100 {
+            return Err(napi::Error::from_reason(
+                "Volume must be between 0 and 100.",
+            ));
+        }
+        volume::set(&output_id, level).map_err(napi::Error::from_reason)
+    }
+    #[napi]
     pub fn start_receiver(
         &self,
         key: String,
@@ -169,8 +240,25 @@ impl NativeAudio {
         self.begin(StartKind::Receiver { peer_ip, output_id }, key)
     }
     #[napi]
-    pub fn start_sender(&self, key: String, peer_ip: String, port: u32) -> AsyncTask<StartAudio> {
-        self.begin(StartKind::Sender { peer_ip, port }, key)
+    pub fn start_sender(
+        &self,
+        key: String,
+        peer_ip: String,
+        port: u32,
+        output_id: String,
+        source_id: String,
+        guard_path: String,
+    ) -> AsyncTask<StartAudio> {
+        self.begin(
+            StartKind::Sender {
+                peer_ip,
+                port,
+                output_id,
+                source_id,
+                guard_path,
+            },
+            key,
+        )
     }
     #[napi]
     pub fn stop(&self) {
@@ -234,8 +322,17 @@ impl Drop for NativeAudio {
     }
 }
 enum StartKind {
-    Receiver { peer_ip: String, output_id: String },
-    Sender { peer_ip: String, port: u32 },
+    Receiver {
+        peer_ip: String,
+        output_id: String,
+    },
+    Sender {
+        peer_ip: String,
+        port: u32,
+        output_id: String,
+        source_id: String,
+        guard_path: String,
+    },
 }
 pub struct StartAudio {
     state: Arc<State>,
@@ -292,34 +389,42 @@ impl Task for StartAudio {
                 Running {
                     stats,
                     worker: Some(worker),
-                    #[cfg(target_os = "macos")]
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
                     capture: None,
                 }
             }
-            StartKind::Sender { port, .. } => {
+            StartKind::Sender {
+                port,
+                output_id,
+                source_id,
+                guard_path,
+                ..
+            } => {
                 if *port == 0 || *port > u16::MAX as u32 {
                     return Err(fail("Invalid audio receiver port."));
                 }
-                #[cfg(not(target_os = "macos"))]
                 {
-                    return Err(fail(
-                        "Start audio sharing from the Mac. Windows capture is not enabled yet.",
-                    ));
-                }
-                #[cfg(target_os = "macos")]
-                {
+                    #[cfg(target_os = "windows")]
+                    let plan = windows_capture::plan(source_id, output_id).map_err(fail)?;
+                    #[cfg(target_os = "macos")]
+                    let _ = (output_id, source_id, guard_path);
                     let mut wire = wire;
                     socket
                         .connect((address, *port as u16))
                         .map_err(|e| fail(e.to_string()))?;
                     let filter = transport::synchronize(&socket, &mut wire, &stats, cancelled)
                         .map_err(fail)?;
+                    #[cfg(target_os = "macos")]
                     let output = device::output_device("").map_err(fail)?;
+                    #[cfg(target_os = "windows")]
+                    let output = device::output_device(&format!("wasapi:{}", plan.snapshot.output))
+                        .map_err(fail)?;
                     let (local, consumer) = rtrb::RingBuffer::new(128);
                     let stream =
                         device::playback(&output, consumer, stats.clone()).map_err(fail)?;
                     let (producer, input) = rtrb::RingBuffer::new(24_000);
                     // The tap aggregate follows the selected device's nominal rate.
+                    #[cfg(target_os = "macos")]
                     let rate = {
                         use cpal::traits::DeviceTrait;
                         output
@@ -327,6 +432,8 @@ impl Task for StartAudio {
                             .map_err(|e| fail(e.to_string()))?
                             .sample_rate()
                     };
+                    #[cfg(target_os = "windows")]
+                    let rate = plan.rate;
                     let worker_stats = stats.clone();
                     let capture_slot = Arc::new(Mutex::new(None));
                     let worker_capture = capture_slot.clone();
@@ -335,7 +442,7 @@ impl Task for StartAudio {
                         .spawn(move || {
                             let _stream = stream;
                             transport::send(socket, wire, filter, input, rate, local, worker_stats);
-                            // Native failures restore original Mac audio even
+                            // Native failures restore original source audio even
                             // if Electron's event loop cannot process status.
                             worker_capture.lock().take();
                         })
@@ -351,15 +458,27 @@ impl Task for StartAudio {
                             || stats.stopped.load(Ordering::Acquire)
                             || Instant::now() > deadline
                         {
-                            return Err(fail("The Mac output did not provide a valid playback clock. Choose built-in or wired speakers and retry."));
+                            return Err(fail("The local output did not provide a valid playback clock. Choose built-in or wired speakers and retry."));
                         }
                         std::thread::sleep(std::time::Duration::from_millis(1));
                     }
                     if cancelled() || stats.stopped.load(Ordering::Acquire) {
                         return Err(fail("Audio start cancelled."));
                     }
+                    #[cfg(target_os = "macos")]
                     let (capture, capture_rate) =
                         device::capture(&output, producer, stats.clone()).map_err(fail)?;
+                    #[cfg(target_os = "windows")]
+                    let (capture, capture_rate) = (
+                        windows_capture::Capture::start(
+                            plan,
+                            guard_path.clone(),
+                            producer,
+                            stats.clone(),
+                        )
+                        .map_err(fail)?,
+                        rate,
+                    );
                     if capture_rate != rate {
                         return Err(fail("The Mac tap sample rate changed. Choose built-in speakers and restart sharing."));
                     }

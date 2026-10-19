@@ -168,3 +168,6 @@ pub fn capture(
 ) -> Result<(Capture, u32), String> {
     super::mac_tap::MutedTap::new(output, producer, stats)
 }
+
+#[cfg(target_os = "windows")]
+pub type Capture = super::windows_capture::Capture;

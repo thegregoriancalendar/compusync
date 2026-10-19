@@ -339,7 +339,7 @@ class DragController extends EventEmitter {
     return false;
   }
 
-  async abort(reason = 'abort', notify = true) {
+  async abort(reason = 'abort', notify = true, error = null) {
     const state = this.active;
     if (!state) return false;
     state.aborted = true;
@@ -363,7 +363,9 @@ class DragController extends EventEmitter {
       }
     } finally {
       this.#setPhase(state, 'aborted', 'aborted', { reason, status: 'failed' });
-      this.emit('abort', { reason, state: this.snapshot() });
+      // Keep the local capture explanation for the settings notice. The peer
+      // and lifecycle logger receive the reason without this Error object.
+      this.emit('abort', { reason, error, state: this.snapshot() });
       this.#clear();
     }
     return true;
@@ -429,7 +431,7 @@ class DragController extends EventEmitter {
       this.#lifecycle(state, 'offer-sent', { instant: state.instant });
       this.emit('offer', this.snapshot());
       if (!state.instant) this.#beginStraddle(state);
-    } catch (error) { await this.abort(this.#reason(error, 'capture-failed')); }
+    } catch (error) { await this.abort(this.#reason(error, 'capture-failed'), true, error); }
   }
 
   async #positionSource(state) {

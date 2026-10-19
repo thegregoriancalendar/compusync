@@ -46,7 +46,7 @@ function runtimeFixture(options = {}) {
   const runtime = new WindowHandoffRuntime({
     input, native, chrome, frameMs: options.frameMs || 100000,
     setSeam: options.setSeam, showHint: options.showHint, logger: options.logger,
-    processId: options.processId, livenessMs: 0,
+    processId: options.processId, livenessMs: 0, onNotice: options.onNotice,
   });
   runtime.start();
   return {
@@ -83,6 +83,22 @@ test('CompuSync never hands one of its own Electron windows to an adapter', asyn
   assert.equal(fixture.sent.length, 0);
   assert.equal(fixture.nativeCalls.length, 0);
   await fixture.runtime.stop();
+});
+
+test('a Mac native move that cannot be joined to a window is logged before capture', async () => {
+  const logs = [];
+  const fixture = runtimeFixture({ platformName: 'darwin',
+    logger: (event, details) => logs.push({ event, details }) });
+  try {
+    assert.equal(await fixture.runtime.handleMoveStart('ax:missing'), false);
+    assert.equal(fixture.runtime.drag.active, null);
+    assert.equal(fixture.sent.length, 0);
+    assert.deepEqual(logs.map(({ details }) => [details.event, details.reason, details.id]), [
+      ['native-move-detection', 'observed', 'ax:missing'],
+      ['native-move-detection', 'source-window-unavailable', 'ax:missing'],
+    ]);
+    assert.doesNotMatch(JSON.stringify(logs), /https?:\/\//);
+  } finally { await fixture.runtime.stop(); }
 });
 
 test('native device-pixel window geometry converts to the shared VU placement', () => {
@@ -127,6 +143,30 @@ test('native move events poll at the drag boundary and emit one Chrome offer', a
   await runtime.poll();
   assert.equal(sent.filter(({ type }) => type === 'window.offer').length, 1);
   await runtime.stop();
+});
+
+test('a fresh Mac capture failure explains which tabs block handoff', async () => {
+  const notices = [];
+  const captureError = Object.assign(new Error('Open a website in every tab; New Tab pages cannot be transferred.'),
+    { code: 'CHROME_UNSUPPORTED_TABS' });
+  const fixture = runtimeFixture({
+    platformName: 'darwin',
+    window: { id: 'ax:fresh', processName: 'Google Chrome', visible: true,
+      bounds: { x: 700, y: 100, width: 400, height: 300 } },
+    capture: async () => { throw captureError; },
+    onNotice: (notice) => notices.push(notice),
+  });
+  try {
+    assert.equal(await fixture.runtime.handleMoveStart('ax:fresh'), true);
+    fixture.input.cursor.virtualCursor = { x: 910, y: 150 };
+    await fixture.runtime.poll();
+    assert.equal(fixture.sent.some(({ type }) => type === 'window.offer'), false);
+    assert.equal(notices.length, 1);
+    assert.equal(notices[0].message, captureError.message);
+    assert.match(notices[0].message, /New Tab/);
+    assert.match(notices[0].message, /every tab/i);
+    assert.equal(fixture.runtime.drag.active, null);
+  } finally { await fixture.runtime.stop(); }
 });
 
 test('physical mouse-up waits for an in-flight capture instead of discarding the offer', async () => {

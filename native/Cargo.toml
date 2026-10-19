@@ -18,6 +18,10 @@ serde_json = "1"
 aes-gcm = "0.10.3"
 rtrb = "0.3.2"
 
+[target.'cfg(windows)'.dependencies]
+compusync-windows-audio = { path = "windows-audio" }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Media_Audio_Endpoints", "Win32_System_Com_StructuredStorage", "Win32_System_Variant"] }
+
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 cpal = "=0.18.2"
 

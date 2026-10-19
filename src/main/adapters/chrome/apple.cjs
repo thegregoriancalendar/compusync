@@ -458,7 +458,7 @@ function createAppleChromeAdapter(options = {}) {
       }));
     const activeIdx = tabs.findIndex((tab) => tab.originalIndex === activeOriginalIndex);
     if (!tabs.length || activeIdx < 0 || tabs.some((tab) => !validUrl(tab.url))) {
-      throw new AppleChromeError('CHROME_UNSUPPORTED_TABS', 'This Chrome window contains a tab that Compusync cannot safely hand off. Open an HTTP or HTTPS page in that tab and try again.');
+      throw new AppleChromeError('CHROME_UNSUPPORTED_TABS', 'Open an HTTP or HTTPS website in every tab before handing off this window. New Tab, Chrome settings, and local-file pages cannot be transferred.');
     }
     for (const tab of tabs) delete tab.originalIndex;
 

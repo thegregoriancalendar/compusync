@@ -14,6 +14,11 @@
       <div><h1>CompuSync</h1><p>Two laptops. One little space.</p></div>
     </header>
 
+    <div class="tabs" role="tablist" aria-label="Connection manager pages">
+      <button id="connection-tab" role="tab" aria-selected="true" aria-controls="connection-page">Connection</button>
+      <button id="latency-monitor-tab" role="tab" aria-selected="false" aria-controls="latency-monitor-page" tabindex="-1">Latency Monitor</button>
+    </div>
+
     <section class="connection" aria-live="polite">
       <span id="status-dot" class="dot"></span>
       <div><strong id="status">Starting…</strong><p id="status-description">Getting CompuSync ready.</p></div>
@@ -21,6 +26,7 @@
 
     <section id="notices" class="notice-list" aria-live="polite" aria-label="CompuSync notices" hidden></section>
 
+    <div id="connection-page" role="tabpanel" aria-labelledby="connection-tab">
     <section id="pairing-card" class="card">
       <h2>Connect your laptops</h2>
       <p>Keep both laptops on the same Wi-Fi or wired network, with CompuSync running on each.</p>
@@ -67,23 +73,6 @@
       <p class="small hotkeys"><kbd id="unlink-shortcut">Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>U</kbd> toggles linking. <kbd id="ownership-shortcut">Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Y</kbd> moves ownership to the other laptop.</p>
     </section>
 
-    <section class="card" aria-labelledby="mouse-latency-heading">
-      <div class="card-heading">
-        <h2 id="mouse-latency-heading">Mouse latency</h2>
-        <span class="mode-badge latency-estimate">Estimated</span>
-      </div>
-      <p id="mouse-latency-status" class="small">Connect both laptops and link cursors to measure.</p>
-      <table class="latency-table" aria-describedby="mouse-latency-help">
-        <thead><tr><th scope="col">Direction</th><th scope="col">Typical</th><th scope="col">Slow (p95)</th></tr></thead>
-        <tbody>
-          <tr><th scope="row">Mac &rarr; Windows</th><td id="latency-mac-windows">&mdash;</td><td id="latency-mac-windows-p95">&mdash;</td></tr>
-          <tr><th scope="row">Windows &rarr; Mac</th><td id="latency-windows-mac">&mdash;</td><td id="latency-windows-mac-p95">&mdash;</td></tr>
-        </tbody>
-      </table>
-      <p id="mouse-latency-network" class="small"></p>
-      <p id="mouse-latency-help" class="small">Move the Mac's mouse with the cursor on Windows, then the Windows mouse with the cursor on Mac. Typical is the median over the last 10 seconds; p95 shows slower updates. Starts when CompuSync receives mouse input and includes batching, network travel and the destination cursor update. Device/OS input delivery and screen redraw are excluded. One-way estimates assume similar network delay in both directions.</p>
-    </section>
-
     <section class="card">
       <h2>Screen layout</h2>
       <p>Each physical monitor is shown inside its computer group. Drag any monitor to move that computer; drag empty space to pan, and scroll to zoom. Positions within each group follow the operating system’s display settings.</p>
@@ -120,18 +109,35 @@
       </div>
       <p id="audio-status" class="small" role="status">Audio stays on each laptop.</p>
       <p id="audio-timing" class="small" hidden></p>
+      <div class="audio-volumes" role="group" aria-label="Device volumes">
+        <div class="audio-volume">
+          <div class="audio-volume-heading"><label for="audio-volume-mac">Mac volume</label><output id="audio-volume-mac-value" for="audio-volume-mac">Unavailable</output></div>
+          <input id="audio-volume-mac" type="range" min="0" max="100" step="1" value="0" aria-describedby="audio-volume-mac-status" disabled>
+          <p id="audio-volume-mac-status" class="small">Connect the Mac to adjust its volume.</p>
+        </div>
+        <div class="audio-volume">
+          <div class="audio-volume-heading"><label for="audio-volume-windows">Windows volume</label><output id="audio-volume-windows-value" for="audio-volume-windows">Unavailable</output></div>
+          <input id="audio-volume-windows" type="range" min="0" max="100" step="1" value="0" aria-describedby="audio-volume-windows-status" disabled>
+          <p id="audio-volume-windows-status" class="small">Connect Windows to adjust its volume.</p>
+        </div>
+      </div>
       <div id="audio-windows-output" hidden>
-        <label for="audio-output">Windows playback device</label>
+        <label for="audio-output">Playback device on this laptop</label>
         <div class="row">
           <select id="audio-output"><option value="">Windows default output</option></select>
           <button id="audio-refresh" type="button">Refresh devices</button>
         </div>
       </div>
+      <div id="audio-windows-source" hidden>
+        <label for="audio-source">Windows capture bus</label>
+        <select id="audio-source"><option value="">Detect standard VB-CABLE</option></select>
+        <button id="audio-setup" type="button" hidden>Get VB-CABLE driver</button>
+      </div>
       <div class="row cursor-actions">
-        <button id="audio-start" class="primary" type="button" disabled>Play Mac audio on Windows</button>
+        <button id="audio-start" class="primary" type="button" disabled>Play local audio on both laptops</button>
         <button id="audio-stop" type="button" disabled>Stop sharing audio</button>
       </div>
-      <p id="audio-help" class="small">Start sharing from the Mac. Both outputs are buffered to play together.</p>
+      <p id="audio-help" class="small">Start sharing from the laptop whose audio you want to hear. Both outputs are buffered to play together.</p>
       <p id="audio-error" role="alert" hidden></p>
     </section>
 
@@ -155,6 +161,24 @@
         <button id="update-install" class="primary" hidden>Restart and install</button>
       </div>
       <p id="app-version" class="small"></p>
+    </section>
+    </div>
+
+    <section id="latency-monitor-page" class="card" role="tabpanel" aria-labelledby="latency-monitor-tab" hidden>
+      <div class="card-heading">
+        <h2 id="mouse-latency-heading">Latency Monitor</h2>
+        <span class="mode-badge latency-estimate">Estimated</span>
+      </div>
+      <p id="mouse-latency-status" class="small">Connect both laptops and link cursors to measure.</p>
+      <table class="latency-table" aria-describedby="mouse-latency-help">
+        <thead><tr><th scope="col">Direction</th><th scope="col">Typical</th><th scope="col">Slow (p95)</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">Mac &rarr; Windows</th><td id="latency-mac-windows">&mdash;</td><td id="latency-mac-windows-p95">&mdash;</td></tr>
+          <tr><th scope="row">Windows &rarr; Mac</th><td id="latency-windows-mac">&mdash;</td><td id="latency-windows-mac-p95">&mdash;</td></tr>
+        </tbody>
+      </table>
+      <p id="mouse-latency-network" class="small"></p>
+      <p id="mouse-latency-help" class="small">Move the Mac's mouse with the cursor on Windows, then the Windows mouse with the cursor on Mac. Typical is the median over the last 10 seconds; p95 shows slower updates. Starts when CompuSync receives mouse input and includes batching, network travel and the destination cursor update. Device/OS input delivery and screen redraw are excluded. One-way estimates assume similar network delay in both directions.</p>
     </section>
 
     <footer>

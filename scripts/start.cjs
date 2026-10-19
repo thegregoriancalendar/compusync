@@ -13,6 +13,7 @@ function start() {
     fs.writeSync(log, `\n[${new Date().toISOString()}] Starting CompuSync\n`);
     const env = { ...process.env };
     delete env.ELECTRON_RUN_AS_NODE;
+    env.COMPUSYNC_LOG_PATH = logPath;
     // Pass the file directly so stdout and stderr remain readable while the
     // app is running, including output from native code and early failures.
     const child = spawn(require('electron'), ['.', ...process.argv.slice(2)], {

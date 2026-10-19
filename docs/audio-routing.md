@@ -1,10 +1,10 @@
-# Synchronized Mac-to-Windows audio
+# Synchronized audio between Mac and Windows
 
-The Electron Audio manager controls a Rust audio engine. While sharing, CompuSync captures the Mac's selected system output, suppresses its original immediate playback, and renders a delayed copy on both laptops against the same presentation timeline. Stopping sharing restores normal Mac output. Windows-to-Mac capture is not implemented yet.
+The Electron Audio manager controls a Rust audio engine. Either laptop can send. CompuSync suppresses the source's immediate playback and renders a delayed copy on both laptops against the same presentation timeline. Mac uses a muted Core Audio tap. Windows uses WASAPI loopback on a dedicated VB-CABLE virtual output and pins delayed playback to physical speakers. Stopping restores ordinary source playback. Only one direction runs at a time.
 
 ## Prepare both laptops
 
-Use the same current source revision on both laptops. Quit any running CompuSync instance before rebuilding: Windows locks a loaded native addon. Audio protocol v2 requires rebuilding the addon on **both** computers; older addons cannot advertise synchronized audio.
+Use the same current source revision on both laptops. Quit any running CompuSync instance before rebuilding: Windows locks a loaded native addon. Audio protocol v3 requires rebuilding the addon on **both** computers; older addons cannot advertise synchronized audio.
 
 On Windows and on a Mac running **macOS 14.6 or newer**:
 
@@ -17,7 +17,7 @@ npm start
 
 Use **built-in or wired speakers** for the first test. Outputs with a predicted device lead above 100 ms are refused; Bluetooth and other devices with variable downstream latency are outside the initial verification target. The Mac tap follows its selected output device. It never opens a microphone or captures the screen.
 
-No extra npm flag or administrator access is needed. The pinned Electron runtime includes `NSAudioCaptureUsageDescription`. [macOS requests System Audio Recording permission the first time recording starts](https://developer.apple.com/documentation/CoreAudio/capturing-system-audio-with-core-audio-taps), after creating the tap and aggregate device. Creating the tap alone does not trigger the prompt. During development the prompt may name Electron or the terminal/IDE that launched it; packaged builds use CompuSync. After a denial, enable the relevant entry in **System Settings → Privacy & Security → Screen & System Audio Recording**, then fully quit and restart the app.
+No extra npm flag is needed. Normal app operation does not require administrator access; the one-time Windows driver installation does. The pinned Electron runtime includes `NSAudioCaptureUsageDescription`. [macOS requests System Audio Recording permission the first time recording starts](https://developer.apple.com/documentation/CoreAudio/capturing-system-audio-with-core-audio-taps), after creating the tap and aggregate device. Creating the tap alone does not trigger the prompt. During development the prompt may name Electron or the terminal/IDE that launched it; packaged builds use CompuSync. After a denial, enable the relevant entry in **System Settings → Privacy & Security → Screen & System Audio Recording**, then fully quit and restart the app.
 
 If `npm start` never produces a prompt, the launching terminal or IDE may lack its own audio usage description. [Electron documents the parent-application requirement](https://www.electronjs.org/docs/latest/api/desktop-capturer#macos-versions-142-or-higher). Quit the development app and launch its bundle through macOS Launch Services from the project root:
 
@@ -27,44 +27,76 @@ open -n -a "$PWD/node_modules/electron/dist/Electron.app" --args "$PWD"
 
 This launch bypasses npm's log redirection. Alternatively, use `npm run build` and open CompuSync.app under `dist/mac*`. Each permission identity needs its own approval.
 
+## Device volumes
+
+The Audio manager has separate Mac and Windows volume sliders with percentage
+readouts and mute status. Either laptop can adjust both outputs while paired;
+local volume also works while disconnected and without starting audio sharing.
+The sliders control the output devices' system volume, so other apps using those
+outputs are affected too. Changes made with the system volume controls appear
+within about one second. Windows follows the selected playback output, including
+the physical output pinned by an active sharing route. Outputs without software
+volume control show a disabled slider and an explanation.
+
+Volume controls require the updated native addon on both laptops. Rebuild with
+`npm run native:build` after quitting CompuSync, then restart it.
+
+## Windows sender setup
+
+Windows needs the **standard VB-CABLE** driver; receiving Mac audio does not. Download it from [VB-Audio](https://vb-audio.com/Cable/), extract the package, run its installer as administrator, and reboot as the vendor instructs. CompuSync does not install or redistribute the driver. The Audio manager links to that same official download page.
+
+Keep physical speakers/headphones selected as both Windows default output and default communications output before starting. In Audio manager, refresh devices, choose physical local playback, and leave capture bus on Detect standard VB-CABLE. The bus is verified using the driver interface and endpoint description, not an editable display name; Cable A/B, C/D, Voicemeeter, and arbitrary virtual drivers are not yet supported.
+
+Apps must use **System default** in shared mode. Restart playback after sharing starts if an app does not follow output changes. Avoid exclusive/ASIO playback and protected audio. Disable Windows **Listen to this device**, direct hardware monitoring, or any other monitor of CABLE Output; these would add an unscheduled copy. Leave the virtual cable unmuted and its volume at 100%; CompuSync does not change endpoint volume or mute. Use the physical playback slider to adjust local loudness. If another app keeps an active session on physical output after a two-second migration grace period, sharing stops with guidance instead of claiming that output is synchronized. This check is conservative and can reject silent but active sessions.
+
+Windows does not show an audio-recording permission dialog for WASAPI output loopback. Firewall approval can still be needed. If formats are unsupported, select stereo 48 kHz in the capture bus's advanced Windows Sound properties.
+
 ## Test
 
 1. Pair the laptops and wait for Connected. Cursor linking can remain off.
-2. On Windows, open Connection & settings → Audio manager, refresh devices, and choose an output.
-3. Play a click track or music on the Mac.
-4. Start sharing on the Mac and approve System Audio Recording. Clock negotiation finishes before the muted tap is opened; a short buffered startup gap is expected.
-5. Confirm the original immediate Mac sound is replaced by delayed local playback, and both laptops follow the same schedule. The manager reports buffered delay, estimated network clock uncertainty, and recovery count. These values do not measure acoustic speaker alignment.
-6. Stop from either laptop. Windows stops and the Mac returns to ordinary immediate playback. Verify the Mac's volume and default device settings were not changed.
-7. Repeat start/stop, permission denial, cancellation while the permission dialog is open, unplugged outputs, default-device changes, settings closed, network loss, sleep/wake, and process exit. In particular, confirm ordinary Mac output returns after every failed start or stopped route. Disconnect and sleep stop sharing; reconnect never starts capture automatically.
+2. On both laptops, open Connection & settings → Audio manager, refresh devices, and choose an output.
+3. Play a click track or music on the source laptop.
+4. Start sharing on the source. For Mac sending, approve System Audio Recording. For Windows sending, finish VB-CABLE setup first. Clock negotiation and a valid physical playback clock are required before muting/rerouting; a short buffered startup gap is expected.
+5. Confirm the original immediate source sound is replaced by delayed local playback, and both laptops follow the same schedule. The manager reports buffered delay, estimated network clock uncertainty, and recovery count. These values do not measure acoustic speaker alignment.
+6. Stop from either laptop. Both scheduled outputs stop, and the source returns to ordinary immediate playback. Verify volume is unchanged. Windows restores each previous default output role; a default you changed manually while sharing is left alone.
+7. Repeat start/stop, permission denial, cancellation while the permission dialog is open, unplugged outputs, default-device changes, settings closed, network loss, sleep/wake, and process exit. In particular, confirm ordinary source output returns after every failed start or stopped route. Disconnect and sleep stop sharing; reconnect never starts capture automatically.
 8. Brief network jitter or a scheduling discontinuity should preserve the presentation timeline or trigger a new shared epoch. Late/lost audio becomes silence rather than shifting later audio. Larger failures stop the route with a retry message.
 
-Audio buffering also delays sound relative to video playing independently on the Mac. This feature does not control the video player's timeline.
+Audio buffering also delays sound relative to video playing independently on the source. This feature does not control the video player's timeline.
 
 ## Timing and recovery
 
-- Both hosts use native monotonic clocks: mach_absolute_time on Mac and QueryPerformanceCounter on Windows. CPAL 0.18.2 output timestamps use those same host clock domains. Mac capture uses the native IOProc input timestamp, converted from mach host time.
-- The Mac sends authenticated four-timestamp ping/pong exchanges. Startup requires eight valid observations and a best round-trip delay no higher than 10 ms, corresponding to at most 5 ms estimated network offset uncertainty. Models continue every 250 ms, using a recent bounded low-delay window. Small offset updates are slewed; large changes request a resynchronization.
-- Every 5 ms audio block carries an epoch, first frame index, capture timestamp, and absolute playback timestamp in Mac host time. Capture timestamps survive sample-rate conversion. Both local and remote outputs receive the same samples and deadlines.
+- Both hosts use native monotonic clocks: mach_absolute_time on Mac and QueryPerformanceCounter on Windows. CPAL 0.18.2 output timestamps use those same host clock domains. Mac capture uses the native IOProc input timestamp, converted from mach host time. Windows capture uses WASAPI GetBuffer QPC timestamps (100 ns units converted to the same native QPC timeline), handles silent buffers, and requests resync on discontinuities.
+- The source sends authenticated four-timestamp ping/pong exchanges. Startup requires eight valid observations and a best round-trip delay no higher than 10 ms, corresponding to at most 5 ms estimated network offset uncertainty. Models continue every 250 ms, using a recent bounded low-delay window. Small offset updates are slewed; large changes request a resynchronization.
+- Every 5 ms audio block carries an epoch, first frame index, capture timestamp, and absolute playback timestamp in source host time. Capture timestamps survive sample-rate conversion. Both local and remote outputs receive the same samples and deadlines.
 - Initial shared delay is `clamp(120 ms + 4 × best RTT, 150 ms, 500 ms)`. The receiver translates deadlines into its own clock domain. Each output uses CPAL's predicted DAC playback time, rather than callback invocation or packet arrival time, to select samples.
 - A device-clock servo adjusts sample consumption by at most ±0.2% to follow the timeline smoothly. Errors above 20 ms re-anchor the cursor and request a new epoch. It does not use independent queue fullness as its timing reference.
 - Queues are bounded. A preallocated presentation buffer reorders packets; missing deadlines produce silence. Old packets are discarded without delaying subsequent samples. Callback code performs no allocation, locking, networking, or JavaScript calls.
-- Recovery is owned by the Mac: a resync request starts a new epoch, clears stale capture data, and increases the shared delay by 25 ms up to 500 ms. Both outputs use the new packets' future deadlines. Previously queued audio may play until that scheduled transition; late packets from retired epochs are rejected.
-- Losing clock replies for three seconds, losing established audio for five seconds, invalid device timestamps, or a device error stops the route. The Mac clock worker continues while the OS permission request is pending.
+- Recovery is owned by the source: a resync request starts a new epoch, clears stale capture data, and increases the shared delay by 25 ms up to 500 ms. Both outputs use the new packets' future deadlines. Previously queued audio may play until that scheduled transition; late packets from retired epochs are rejected.
+- Losing clock replies for three seconds, losing established audio for five seconds, invalid device timestamps, or a device error stops the route. The source clock worker continues while the OS permission request is pending.
 - The private, device-scoped Core Audio tap uses MutedWhenTapped and excludes CompuSync's audio process. That prevents capturing or suppressing our own delayed copy. Stopping/destroying the tap restores original playback without changing system volume or the default device.
 - Capture opens the private aggregate directly using the AudioDeviceID returned by Core Audio. It does not search the public device list, where private devices are absent. Native input accepts 32-bit float PCM in interleaved, planar, or mono buffers; unsupported tap formats return an explicit error.
+
+### Windows default-output recovery
+
+A separate hidden recovery helper owns all three default-output changes (console, multimedia, communications). It saves each prior endpoint before switching, rolls back partial setup failures, checks endpoint availability/default changes, and restores on STOP, stdin EOF, or a three-second heartbeat timeout. Native capture sends heartbeats every 250 ms. A named mutex prevents overlapping routes. Capture errors and invalid/stalled timestamps stop playback and release the route even if Electron is unresponsive.
+
+The helper writes a recovery journal under the user's local app data directory (the folder is named `CompuSync`, file `audio-route.json`). If both processes are terminated, the next app launch/refresh attempts restoration before routing. It restores only roles still pointing at the recorded bus, preserves later user selections, and falls back to the pinned physical output if a previous output was unplugged. Failed restoration retains the journal for retry; if no physical output remains, choose one in Windows Sound settings. Do not manually kill the recovery helper during sharing.
+
+Changing Windows defaults uses the isolated, undocumented IPolicyConfig interface, with activation checks and endpoint readback. Microsoft exposes no supported public API to set a user's default endpoint. This is a Windows compatibility boundary: validate default switching and recovery on supported Windows releases before distributing broadly. Apps still control whether they follow default-device changes. See Microsoft's [loopback documentation](https://learn.microsoft.com/en-us/windows/win32/coreaudio/loopback-recording) and [stream routing documentation](https://learn.microsoft.com/en-us/windows/win32/coreaudio/automatic-stream-routing).
 
 ## Transport and security
 
 48 kHz, 16-bit stereo PCM travels over direct UDP, authenticated/encrypted with AES-256-GCM. Packets remain below 1200 bytes. Receiver keys are fresh for each route and negotiated over the existing encrypted paired connection. Endpoint IPs come from that connection; a UDP endpoint is pinned only after an authenticated clock request.
 
-Protocol v2 uses separate Mac/Windows nonce prefixes and monotonically increasing counters covering control and audio packets. A 256-counter replay window accepts reordering and rejects duplicates. Timing metadata is authenticated. Old v1 datagrams and peers are rejected.
+Protocol v3 uses separate sender/receiver nonce prefixes (CSS3/CSR3) and monotonically increasing counters covering control and audio packets. A 256-counter replay window accepts reordering and rejects duplicates. Timing metadata is authenticated. Old v1/v2 datagrams and peers are rejected.
 
 PCM uses roughly 1.7 Mbit/s before UDP/IP overhead. Allow CompuSync through the Windows firewall on the private network; audio uses a negotiated ephemeral UDP port in addition to pairing/control ports. No cloud relay is used.
 
 ## Verification boundary and physical alignment
 
-Automated checks cover authenticated timing metadata, directional nonces, replay/reordering, clock-offset estimation, timestamp-preserving resampling, scheduled silence/loss handling, drift correction, epoch recovery, native UDP clock agreement, actual Windows device playback deadlines, cancellation, negotiation, and Electron controls. The Mac target is type-checked from Windows.
+Automated checks cover authenticated timing metadata, directional nonces, replay/reordering, clock-offset estimation, timestamp-preserving resampling, scheduled silence/loss handling, drift correction, epoch recovery, native UDP clock agreement, actual Windows device playback deadlines, cancellation, negotiation, and Electron controls. The Mac target is type-checked from Windows. Windows policy tests cover distinct default roles, partial rollback, user changes, unplugged originals, and restoration errors. Native missing-driver checks must not change defaults.
 
-Actual Mac capture/muting, permission prompts, automatic restoration of original output, and physical alignment still require the two-laptop test. Device playback timestamps are predictions. The displayed clock uncertainty excludes driver errors, downstream device latency, and sound propagation.
+Windows VB-CABLE capture, actual default switching/crash recovery, Mac receive playback, and physical alignment still require the two-laptop test with the driver installed. Mac-to-Windows capture was verified manually before adding the reverse route. Automated checks cannot substitute for this hardware acceptance test. Device playback timestamps are predictions. The displayed clock uncertainty excludes driver errors, downstream device latency, and sound propagation.
 
 For acoustic acceptance, record a periodic click from both outputs using two channels of one recorder/interface, with equal microphone distances or direct wired capture. Compare click sample positions at startup and throughout a long run, then repeat with network load and a forced resync. Report median, 95th percentile, maximum inter-output skew, dropouts, and recovery behavior. Define an acceptable measured skew for the specific devices before claiming an accuracy figure; automated clock tests do not prove sample-exact speaker alignment.

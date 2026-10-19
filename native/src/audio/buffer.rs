@@ -2,11 +2,11 @@ use super::{
     clock::MS,
     packet::{AudioPacket, BLOCK_NS, FRAMES, RATE},
 };
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 use std::collections::VecDeque;
 
 #[derive(Clone, Copy, Debug, Default)]
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub struct CapturedFrame {
     pub samples: [f32; 2],
     pub time_ns: i64,
@@ -45,13 +45,13 @@ pub fn push_capture_block(
 
 /// Carries capture time through sample-rate conversion. Never invents capture
 /// times from socket send time, including after dropped capture callbacks.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub struct Resampler {
     frames: VecDeque<CapturedFrame>,
     position: f64,
     step: f64,
 }
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 impl Resampler {
     pub fn new(input_rate: u32) -> Self {
         Self {

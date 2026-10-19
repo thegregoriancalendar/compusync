@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-test('settings displays both directional mouse timings and clears unlinked readings', async () => {
+test('Latency Monitor has its own page, displays directional timings and clears unlinked readings', async () => {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'compusync-latency-e2e-'));
   const env = { ...process.env, COMPUSYNC_PROFILE: profile, COMPUSYNC_PORT: '0' };
   delete env.ELECTRON_RUN_AS_NODE;
@@ -13,6 +13,15 @@ test('settings displays both directional mouse timings and clears unlinked readi
   try {
     await expect.poll(() => app.windows().some((page) => page.url().endsWith('settings.html'))).toBe(true);
     const page = app.windows().find((candidate) => candidate.url().endsWith('settings.html'));
+    const connectionTab = page.getByRole('tab', { name: 'Connection', exact: true });
+    const latencyTab = page.getByRole('tab', { name: 'Latency Monitor' });
+    await expect(connectionTab).toHaveAttribute('aria-selected', 'true');
+    await expect(page.locator('#connection-page')).toBeVisible();
+    await expect(page.locator('#latency-monitor-page')).toBeHidden();
+    await latencyTab.click();
+    await expect(latencyTab).toHaveAttribute('aria-selected', 'true');
+    await expect(page.locator('#connection-page')).toBeHidden();
+    await expect(page.getByRole('heading', { name: 'Latency Monitor' })).toBeVisible();
     await expect(page.locator('#mouse-latency-status')).toContainText('Connect both laptops');
     await page.evaluate(async () => {
       const next = await window.compusync.bootstrap();
@@ -38,6 +47,15 @@ test('settings displays both directional mouse timings and clears unlinked readi
     await expect(page.locator('#latency-mac-windows')).toHaveText('\u2014');
     await expect(page.locator('#latency-windows-mac-p95')).toHaveText('\u2014');
     await expect(page.locator('#mouse-latency-network')).toHaveText('');
+    await latencyTab.press('ArrowLeft');
+    await expect(connectionTab).toBeFocused();
+    await expect(connectionTab).toHaveAttribute('aria-selected', 'true');
+    await expect(page.locator('#connection-page')).toBeVisible();
+    await expect(page.locator('#latency-monitor-page')).toBeHidden();
+    await page.locator('#layout-mac').scrollIntoViewIfNeeded();
+    const mac = await page.locator('#layout-mac').boundingBox();
+    expect(mac.width).toBeGreaterThan(0);
+    expect(mac.height).toBeGreaterThan(0);
   } finally {
     await app.close();
     fs.rmSync(profile, { recursive: true, force: true });
