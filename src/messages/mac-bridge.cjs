@@ -2,6 +2,7 @@
 
 const { MessagesAutomation } = require('./mac-automation.cjs');
 const { MessagesHistoryStore } = require('./history-store.cjs');
+const { MessagesContactsStore } = require('./contacts-store.cjs');
 const { conversation, historyResult, command } = require('./contracts.cjs');
 
 class MessagesMacBridge {
@@ -9,6 +10,7 @@ class MessagesMacBridge {
     this.platform = options.platform || process.platform;
     this.automation = options.automation || new MessagesAutomation(options);
     this.historyStore = options.historyStore || new MessagesHistoryStore(options);
+    this.contactsStore = options.contactsStore || new MessagesContactsStore(options);
   }
 
   state() {
@@ -25,7 +27,14 @@ class MessagesMacBridge {
     }
     const raw = this.historyStore.listConversations();
     if (!Array.isArray(raw)) throw new Error('Messages returned an invalid conversation list.');
-    return raw.map(conversation).filter(Boolean);
+    let names = new Map();
+    try { names = this.contactsStore.namesFor(raw.flatMap((chat) => chat.participants.map((person) => person.handle))); }
+    catch { /* Conversation access is independent of contact access. */ }
+    return raw.map((chat) => {
+      const participants = chat.participants.map((person) => ({ ...person, name: names.get(person.handle) || person.name }));
+      const name = chat.name || participants.map((person) => person.name || person.handle).filter(Boolean).join(', ').slice(0, 512);
+      return conversation({ ...chat, name, participants });
+    }).filter(Boolean);
   }
 
   async history(payload) {

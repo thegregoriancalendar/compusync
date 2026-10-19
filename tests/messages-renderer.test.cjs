@@ -121,3 +121,35 @@ test('late bootstrap cannot replace a newer connected state', async () => {
   assert.equal(ui.get('#status').textContent, 'Select a conversation.');
   assert.equal(ui.get('#conversation-list').children.length, 1);
 });
+
+test('resolved contact names appear in the list, header and incoming sender label', async () => {
+  const contact = {
+    ...conversation, name: 'Ada Lovelace',
+    participants: [{ id: '+14155550123', handle: '+14155550123', name: 'Ada Lovelace' }],
+  };
+  const ui = renderer({ command: async (method, payload) => method === 'conversations.list' ? [contact] : {
+    conversationId: payload.conversationId, before: 1, hasMore: false,
+    messages: [{ id: 'm1', sender: '+14155550123', text: 'Hello', sentAt: 0, fromMe: false, status: 'received' }],
+  } });
+  await flush();
+  const button = ui.get('#conversation-list').children[0];
+  assert.equal(button.children[1].children[0].textContent, 'Ada Lovelace');
+  button.listeners.click();
+  await flush();
+  assert.equal(ui.get('#conversation-title').textContent, 'Ada Lovelace');
+  assert.equal(ui.get('#messages').children[0].children[0].textContent, 'Ada Lovelace');
+});
+
+test('saved group titles remain searchable by a participant contact name', async () => {
+  const group = {
+    ...conversation, name: 'Project group',
+    participants: [{ id: 'ada@example.test', handle: 'ada@example.test', name: 'Ada Lovelace' }],
+  };
+  const ui = renderer({ command: async () => [group] });
+  await flush();
+  ui.get('#search').value = 'lovelace';
+  ui.get('#search').listeners.input();
+  const buttons = ui.get('#conversation-list').children;
+  assert.equal(buttons.length, 1);
+  assert.equal(buttons[0].children[1].children[0].textContent, 'Project group');
+});

@@ -44,7 +44,8 @@ function renderList() {
   for (const conversation of state.conversations) {
     const name = displayName(conversation);
     const handles = conversation.participants.map((person) => person.handle).filter(Boolean).join(', ');
-    if (query && !`${name} ${handles}`.toLocaleLowerCase().includes(query)) continue;
+    const participantNames = conversation.participants.map((person) => person.name).filter(Boolean).join(', ');
+    if (query && !`${name} ${handles} ${participantNames}`.toLocaleLowerCase().includes(query)) continue;
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'conversation-item';
@@ -76,7 +77,8 @@ function renderMessages({ preserveScroll = false } = {}) {
     if (!item.fromMe && item.sender) {
       const sender = document.createElement('div');
       sender.className = 'sender';
-      sender.textContent = item.sender;
+      const senderName = selectedConversation()?.participants.find((person) => person.handle === item.sender)?.name;
+      sender.textContent = senderName || item.sender;
       row.append(sender);
     }
     const bubble = document.createElement('div');

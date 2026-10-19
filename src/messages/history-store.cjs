@@ -95,7 +95,7 @@ class MessagesHistoryStore {
       const rawService = String(chat.service || String(chat.id).split(';')[0]).toLowerCase();
       const service = ({ imessage: 'iMessage', sms: 'SMS', rcs: 'RCS' })[rawService] || 'unknown';
       return {
-        id: String(chat.id), name: String(chat.name || people.map((person) => person.handle).join(', ')).slice(0, 512),
+        id: String(chat.id), name: String(chat.name || '').slice(0, 512),
         service, participants: people,
       };
     });
