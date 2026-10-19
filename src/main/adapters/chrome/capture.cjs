@@ -15,6 +15,12 @@ class ChromeCaptureError extends Error {
 }
 
 function nativeWindowId(value) {
+  // Prepared handles have a transfer UUID in `id` before a native handle is
+  // known. An explicit null must not turn that UUID into a Win32 HWND.
+  if (value && typeof value === 'object') {
+    if ('nativeWindowId' in value) return value.nativeWindowId ?? null;
+    if ('native_window_id' in value) return value.native_window_id ?? null;
+  }
   return value?.nativeWindowId ?? value?.native_window_id ?? value?.nativeWindow?.id ?? value?.id ?? null;
 }
 

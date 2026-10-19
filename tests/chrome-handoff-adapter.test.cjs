@@ -6,6 +6,8 @@ const test = require('node:test');
 const { ChromeCapture, DescriptorIdentityCache } = require('../src/main/adapters/chrome/capture.cjs');
 const { ChromePrepare, boundsFromVU } = require('../src/main/adapters/chrome/prepare.cjs');
 const { createChromeHandoffAdapter } = require('../src/main/adapters/chrome/index.cjs');
+const { NativeAdapter } = require('../native/index.cjs');
+const { geometryToVU } = require('../src/main/window-runtime.cjs');
 
 function descriptor(overrides = {}) {
   return {
@@ -337,6 +339,51 @@ test('VU-derived Windows CDP positions are converted back to OS-global coordinat
   });
   await adapter.position({ windowId: 77, geometryVU: { x: 0, y: 0, w: 640, h: 480 } }, { x: 96, y: 40 });
   assert.deepEqual(calls, [{ id: 77, bounds: { x: -1800, y: -850, width: 800, height: 600 } }]);
+});
+
+test('125% Windows capture prepares an 800x600 point Retina window and preserves logical drag distance', async () => {
+  const windowsPlacement = { machineId: 'win', origin: { x: 0, y: 0 }, size: { w: 2560, h: 1440 }, scale: 1.25 };
+  const geometry = geometryToVU({
+    normalizedBounds: { x: 125, y: 75, width: 1000, height: 750 },
+  }, windowsPlacement);
+  assert.deepEqual(geometry, { x: 100, y: 60, w: 800, h: 600 });
+  let created = false;
+  const nativeCalls = [];
+  class NativeSubstrate {
+    constructor() { this.platformName = 'darwin'; }
+    displayMetrics() { return [{ bounds: { x: 0, y: 0, width: 1512, height: 982 }, scale: 2, primary: true }]; }
+    enumerateWindows() {
+      return created ? [{
+        id: 'ax-created', processName: 'Google Chrome', title: 'A', visible: true,
+        bounds: { x: 10, y: 30, width: 800, height: 600 },
+      }] : [];
+    }
+    setWindowBounds(id, bounds) { nativeCalls.push({ id, bounds }); }
+  }
+  const native = new NativeAdapter({ NativeSubstrate }, 'native.node');
+  const macPlacement = { machineId: 'mac', origin: { x: -1512, y: 0 }, size: { w: 1512, h: 982 }, scale: 2 };
+  const adapter = createChromeHandoffAdapter({
+    platform: 'darwin', native, placement: macPlacement,
+    execFile(_file, _args, _options, callback) {
+      created = true;
+      callback(null, JSON.stringify({ chromeWindowId: '42', chromeWindowIndex: 1, title: 'A', bounds: [10, 30, 810, 630] }), '');
+    },
+  });
+  const handle = await adapter.prepare(descriptor({ geometryVU: geometry }), {
+    originVU: { x: -1600, y: 30 }, targetPlacement: macPlacement,
+  });
+  assert.deepEqual(nativeCalls.at(-1), {
+    id: 'ax-created', bounds: { x: -88, y: 30, width: 800, height: 600 },
+  });
+  await adapter.position(handle, { x: -1000, y: 130 });
+  const before = nativeCalls.at(-1).bounds;
+  await adapter.position(handle, { x: -900, y: 230 });
+  const after = nativeCalls.at(-1).bounds;
+  assert.deepEqual(after, { x: 612, y: 230, width: 800, height: 600 });
+  assert.equal(after.x - before.x, 100);
+  assert.equal(after.y - before.y, 100);
+  await adapter.position({ ...handle, geometryVU: { ...geometry, w: 400, h: 300 } }, { x: -900, y: 230 });
+  assert.deepEqual(nativeCalls.at(-1).bounds, { x: 612, y: 230, width: 400, height: 300 });
 });
 
 test('descriptor validation rejects unsafe input before any Chrome side effect', async () => {

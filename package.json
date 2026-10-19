@@ -7,7 +7,7 @@
   "author": "CompuSync",
   "license": "UNLICENSED",
   "scripts": {
-    "start": "electron .",
+    "start": "node scripts/start.cjs",
     "dev": "electron .",
     "test": "node --test tests/*.test.cjs",
     "test:e2e": "playwright test",

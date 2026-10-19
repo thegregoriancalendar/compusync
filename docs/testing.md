@@ -70,7 +70,11 @@ A temporary transparent seam overlay during a Chrome straddle is expected. It mu
 7. Exercise Ctrl/Cmd+Shift+U while settings is closed and while its renderer is busy. Verify immediate unlink, visible local cursors, released buttons/modifiers, and normal local input on both computers.
 8. Repeat with multi-monitor desktops, negative and above-primary origins, mixed Windows scale factors, Retina modes, and display hotplug. Verify topology refreshes without overlap, invalid-screen notices, cursor jumps, or a stranded cursor.
 
+With cursor linking active and Windows owning the cursor, use the Windows mouse and trackpad to drag-select text in Notepad and a Chrome text field. Test a short selection, several lines, reversing direction while held, and dragging beyond the text area to scroll. Confirm release ends the selection and a subsequent drag starts a fresh selection. Repeat after a Mac-to-Windows handoff, on secondary monitors with different scale factors, and using the Mac input device to select Windows text. Verify unlink restores ordinary local selection.
+
 ## macOS permissions
+
+For the Mac-to-Windows cursor regression, close CompuSync settings and keep another Mac app in the foreground. Using the Mac trackpad, cross to Windows and keep moving, clicking, and scrolling there for at least 30 seconds. Verify the Mac pointer stays hidden and Mac apps receive none of that input. Cross back and repeat with an external Mac mouse, with either computer hosting the session, and after switching the foreground Mac app. Confirm unlinking immediately restores ordinary Mac input.
 
 1. Deny Accessibility, Input Monitoring, and Chrome Automation individually on fresh permission state. Verify each denial remains visible with the correct System Settings remediation action and cursor/window capture does not silently proceed.
 2. Grant Accessibility and Input Monitoring, fully restart CompuSync if requested by macOS, reconnect, and verify cursor linking succeeds.

@@ -52,6 +52,11 @@ function prepareBounds(descriptor, options, fallbackPlacement) {
   return boundsFromVU(originVU, descriptor.geometryVU, placement);
 }
 
+function chromeBounds(native, normalizedBounds) {
+  if (typeof native.toDesktopDIPBounds === 'function') return native.toDesktopDIPBounds(normalizedBounds);
+  return typeof native.toPlatformBounds === 'function' ? native.toPlatformBounds(normalizedBounds) : normalizedBounds;
+}
+
 function orderedTabs(descriptor) {
   const active = descriptor.payload.tabs[descriptor.payload.activeIdx];
   const tabs = [...descriptor.payload.tabs].sort((a, b) => a.index - b.index);
@@ -151,8 +156,7 @@ class ChromePrepare {
     const descriptor = sanitizeWindowDescriptor(inputDescriptor);
     if (!descriptor) throw new ChromePrepareError('CHROME_INVALID_DESCRIPTOR', 'The Chrome handoff descriptor is invalid.');
     const normalizedBounds = prepareBounds(descriptor, options, this.placement);
-    const bounds = typeof this.native.toPlatformBounds === 'function'
-      ? this.native.toPlatformBounds(normalizedBounds) : normalizedBounds;
+    const bounds = chromeBounds(this.native, normalizedBounds);
     const { tabs, active, activeIndex } = orderedTabs(descriptor);
     await this.cdp.connect?.();
     let created;
@@ -255,6 +259,7 @@ module.exports = {
   ChromePrepare,
   ChromePrepareError,
   boundsFromVU,
+  chromeBounds,
   createChromePrepare: (options) => new ChromePrepare(options),
   loadWaiter,
   mapConcurrent,

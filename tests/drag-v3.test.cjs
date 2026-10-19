@@ -94,6 +94,54 @@ test('crossing math and seam-side offscreen prewarm are deterministic', () => {
     { x: 599, y: 100 });
 });
 
+test('a large-monitor window can commit to a smaller laptop even below half its original area', async () => {
+  const screens = [
+    { machineId: 'a', origin: { x: 0, y: 0 }, size: { w: 3000, h: 1800 }, scale: 1.25 },
+    { machineId: 'b', origin: { x: -1200, y: 450 }, size: { w: 1200, h: 900 }, scale: 2 },
+  ];
+  const sourceLog = [], destinationLog = [], outbound = [], replies = [], positionedHandles = [];
+  const destinationAdapter = adapter(destinationLog);
+  const originalPosition = destinationAdapter.position;
+  destinationAdapter.position = async (handle, origin) => {
+    positionedHandles.push(handle);
+    return originalPosition(handle, origin);
+  };
+  const source = new DragController({ machineId: 'a', getPlacements: () => screens,
+    adapterForWindow: () => adapter(sourceLog), send: (message) => { outbound.push(message); return true; } });
+  const destination = new DragController({ machineId: 'b', getPlacements: () => screens,
+    adapterForId: () => destinationAdapter, send: (message) => { replies.push(message); return true; } });
+  source.begin({ window: { id: 'large-source' }, geometryVU: { x: 10, y: 0, w: 2400, h: 1600 },
+    cursorVU: { x: 1610, y: 480 } });
+  await source.frame({ cursorVU: { x: 1600, y: 480 } });
+  await destination.receive(outbound.find(({ type }) => type === 'window.offer'));
+  await source.receive(replies.find(({ type }) => type === 'window.ready'));
+  await source.frame({ cursorVU: { x: -200, y: 480 } });
+  const rect = source.active.geometry;
+  assert.ok(crossedFraction(rect, screens[1]) < 0.5);
+  for (const message of outbound.filter(({ type }) => type === 'window.position')) await destination.receive(message);
+  await source.end();
+  const commit = outbound.find(({ type }) => type === 'window.commit');
+  assert.equal(commit.winner, 'destination');
+  await destination.receive(commit);
+  assert.equal(destinationLog.some(([type]) => type === 'close'), false);
+  assert.equal(destinationLog.at(-1)[0], 'focus');
+  assert.equal(positionedHandles.at(-1).geometryVU.w, 1200);
+  assert.equal(positionedHandles.at(-1).geometryVU.h, 800);
+  await source.receive(replies.find(({ type }) => type === 'window.committed'));
+  assert.equal(sourceLog.at(-1)[0], 'close');
+});
+
+test('a drop before the midpoint retains the source and closes only the prepared copy', async () => {
+  const setup = sourceController();
+  await armSource(setup);
+  await setup.drag.receive({ type: 'window.ready', id: 'stable-window-id' });
+  await setup.drag.frame({ cursorVU: { x: 890, y: 180 } });
+  await setup.drag.end();
+  assert.equal(setup.sent.find(({ type }) => type === 'window.commit').winner, 'source');
+  await setup.drag.receive({ type: 'window.committed', id: 'stable-window-id' });
+  assert.equal(setup.log.some(([type]) => type === 'close'), false);
+});
+
 test('wide windows arm from their leading edge and vertical helpers support an upper peer', async () => {
   const setup = sourceController();
   assert.equal(setup.drag.begin({

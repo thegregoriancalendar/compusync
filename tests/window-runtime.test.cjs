@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
+const { CursorController } = require('../src/main/cursor.cjs');
 const { sanitizeHandoffLog, geometryToVU, processIdOf, cursorAtSharedEdge, WindowHandoffRuntime } = require('../src/main/window-runtime.cjs');
 
 function runtimeFixture(options = {}) {
@@ -20,9 +21,11 @@ function runtimeFixture(options = {}) {
   const peer = { machineId: 'b', origin: { x: 1000, y: 0 }, size: { w: 1000, h: 800 }, scale: 1 };
   const input = new EventEmitter();
   input.machineId = 'a';
-  input.cursor = { linked: true, placements: [placement, peer], virtualCursor: { x: 800, y: 150 }, placementFor: () => placement };
+  input.cursor = options.realCursor ? new CursorController({ machineId: 'a', native,
+    placements: [placement, peer], initialPosition: { x: 800, y: 150 }, send: () => true })
+    : { linked: true, placements: [placement, peer], virtualCursor: { x: 800, y: 150 }, placementFor: () => placement };
   input.send = (message) => { sent.push(message); return true; };
-  input.setDragging = () => {};
+  input.setDragging = (dragging) => input.cursor.setDragging?.(dragging);
   input.setWindowController = (value) => { input.windowController = value; };
   input.watchdog = { trigger() {} };
   const positions = [];
@@ -208,6 +211,97 @@ test('synchronous MOVESIZEEND from terminating the modal drag cannot roll back t
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(runtime.drag.active?.role, 'source');
   assert.notEqual(runtime.drag.active?.phase, 'dropping');
+  await runtime.stop();
+});
+
+test('arming takes over the native drag before either copy is positioned', async () => {
+  const fixture = runtimeFixture();
+  const { runtime, input, native, nativeCalls } = fixture;
+  native.terminateMoveLoop = (id) => {
+    assert.equal(fixture.positions.length, 0);
+    nativeCalls.push(['terminate', id]);
+    native.emit('moveSizeEnd', id);
+  };
+  await runtime.handleMoveStart('hwnd');
+  input.cursor.virtualCursor = { x: 900, y: 150 };
+  await runtime.poll();
+  assert.equal(runtime.nativeLoopTerminated, true);
+  assert.equal(nativeCalls.filter(([kind]) => kind === 'terminate').length, 1);
+  assert.ok(fixture.positions.length > 0);
+  await runtime.stop();
+});
+
+test('a drag restored from maximized captures the restored size and grab offset', async () => {
+  const fixture = runtimeFixture({ window: { id: 'hwnd', processName: 'chrome.exe', maximized: true,
+    bounds: { x: 0, y: 0, width: 1000, height: 800 } } });
+  const { runtime, input } = fixture;
+  input.cursor.virtualCursor = { x: 800, y: 20 };
+  await runtime.handleMoveStart('hwnd');
+  fixture.setWindow({ id: 'hwnd', processName: 'chrome.exe', maximized: false,
+    bounds: { x: 500, y: 70, width: 600, height: 400 } });
+  input.cursor.virtualCursor = { x: 810, y: 90 };
+  await runtime.poll();
+  const offer = fixture.sent.find(({ type }) => type === 'window.offer');
+  assert.deepEqual(offer.descriptor.geometryVU, { x: 500, y: 70, w: 600, h: 400 });
+  assert.deepEqual(runtime.drag.active.grabOffsetVU, { x: 310, y: 20 });
+  assert.equal(runtime.drag.active.instant, false);
+  input.cursor.virtualCursor = { x: 850, y: 110 };
+  await runtime.poll();
+  assert.deepEqual(fixture.positions.at(-1).origin, { x: 540, y: 90 });
+  assert.deepEqual(fixture.sent.filter(({ type }) => type === 'window.position').at(-1).originVU,
+    { x: 540, y: 90 });
+  await runtime.stop();
+});
+
+for (const platformName of ['windows', 'darwin']) {
+  test(`a transported button release completes a managed ${platformName} source without a native drag-end`, async () => {
+    const fixture = runtimeFixture({ platformName, realCursor: true });
+    const { runtime, input, native, sent } = fixture;
+    const injected = [];
+    native.synthesizeButton = (...args) => injected.push(args);
+    input.cursor.receive({ type: 'cursor.button', button: 'left', down: true }, 'b');
+    await runtime.handleMoveStart('hwnd');
+    input.cursor.virtualCursor = { x: 900, y: 150 };
+    await runtime.poll();
+    await runtime.drag.receive({ type: 'window.ready', id: 'window-stable' });
+    input.cursor.virtualCursor = { x: 1100, y: 150 };
+    await runtime.poll();
+    if (platformName === 'darwin') input.cursor.ownerMachineId = 'b';
+    injected.length = 0;
+    input.cursor.receive({ type: 'cursor.button', button: 'left', down: false }, 'b');
+    assert.equal(input.cursor.state().buttons, 0);
+    assert.deepEqual(injected, []);
+    // Cursor frames continue after release even though managed dragging
+    // deliberately suppresses native injection and its drag-end event.
+    const cursorFrame = () => input.cursor.isOwner() ? input.cursor.flush()
+      : input.cursor.receive({ type: 'cursor.position', x: 1100, y: 150 }, 'b');
+    cursorFrame();
+    cursorFrame();
+    await new Promise((resolve) => setImmediate(resolve));
+    cursorFrame();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(sent.filter(({ type }) => type === 'window.commit'), [
+      { type: 'window.commit', id: 'window-stable', winner: 'destination' },
+    ]);
+    await runtime.stop();
+    assert.equal(input.cursor.listenerCount('position'), 0);
+  });
+}
+
+test('terminating a Mac native drag cannot be mistaken for the physical drop', async () => {
+  const fixture = runtimeFixture({ platformName: 'darwin', realCursor: true });
+  const { runtime, input, native, sent } = fixture;
+  input.cursor.localButton('left', true);
+  native.terminateMoveLoop = (id) => native.emit('moveSizeEnd', id);
+  await runtime.handleMoveStart('hwnd');
+  input.cursor.virtualCursor = { x: 900, y: 150 };
+  await runtime.poll();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(runtime.drag.active?.role, 'source');
+  assert.equal(runtime.drag.active?.phase, 'preparing');
+  assert.ok(runtime.pollTimer);
+  assert.equal(sent.some(({ type }) => type === 'window.commit'), false);
+  assert.equal(input.cursor.state().buttons, 1);
   await runtime.stop();
 });
 

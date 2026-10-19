@@ -3,6 +3,9 @@ use std::sync::Arc;
 
 pub type EventSink = Arc<dyn Fn(NativeEvent) + Send + Sync + 'static>;
 
+#[cfg(any(target_os = "macos", test))]
+mod macos_event_tap;
+
 pub trait Platform: Send {
     fn name(&self) -> &'static str;
     fn hide_cursor(&mut self) -> Result<(), String>;

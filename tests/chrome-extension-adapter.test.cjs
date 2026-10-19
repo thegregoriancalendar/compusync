@@ -88,7 +88,11 @@ test('extension prepare exposes a movable window before slow tab restoration fin
     if (method === 'window.position') return { windowId: params.windowId };
     throw new Error(`unexpected ${method}`);
   } };
-  const adapter = new ChromeExtensionAdapter({ bridge, sleep: async () => {} });
+  let nativePositionCalls = 0;
+  const adapter = new ChromeExtensionAdapter({ bridge, sleep: async () => {}, native: {
+    setWindowBoundsNormalized() { nativePositionCalls += 1; throw new Error('A transfer UUID is not a native HWND.'); },
+    toDesktopDIPBounds: (bounds) => Object.fromEntries(Object.entries(bounds).map(([key, value]) => [key, value / 1.25])),
+  } });
   const descriptor = {
     schemaVersion: 1, id: 'handoff', adapterId: 'chrome', origin: 'peer', capturedAt: 1,
     geometryVU: { x: 10, y: 20, w: 800, h: 600 }, state: 'normal',
@@ -103,7 +107,7 @@ test('extension prepare exposes a movable window before slow tab restoration fin
   let earlyHandle;
   const targetPlacement = {
     machineId: 'local', platform: 'win32', origin: { x: 0, y: 0 },
-    size: { w: 1920, h: 1080 }, scale: 1,
+    size: { w: 1920, h: 1080 }, scale: 1.25,
   };
   const preparing = adapter.prepare(descriptor, {
     originVU: { x: -900, y: 20 }, targetPlacement,
@@ -114,6 +118,10 @@ test('extension prepare exposes a movable window before slow tab restoration fin
   });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(earlyHandle.windowId, 44);
+  assert.equal(nativePositionCalls, 0);
+  assert.deepEqual(requests.find(([method]) => method === 'window.position')[1], {
+    windowId: 44, bounds: { x: 300, y: 200, width: 800, height: 600 },
+  });
   assert.deepEqual(requests.slice(0, 3).map(([method]) => method), [
     'window.prepare.begin', 'window.position', 'window.prepare.finish',
   ]);
@@ -121,4 +129,37 @@ test('extension prepare exposes a movable window before slow tab restoration fin
   const handle = await preparing;
   assert.equal(handle.windowId, 44);
   assert.deepEqual(handle.tabIds, [100, 101]);
+});
+
+test('Windows extension matches logical Chrome bounds and positions source and fitted destination in native pixels', async () => {
+  const requests = [];
+  const nativePositions = [];
+  const nativeWindow = {
+    id: '0x7', processName: 'chrome.exe', visible: true,
+    bounds: { x: 12.5, y: 25, width: 1000, height: 750 },
+    normalizedBounds: { x: 12.5, y: 25, width: 1000, height: 750 },
+  };
+  const placement = { machineId: 'win', origin: { x: 0, y: 0 }, size: { w: 2560, h: 1440 }, scale: 1.25 };
+  const adapter = new ChromeExtensionAdapter({
+    bridge: { connected: true, async request(method, params) {
+      requests.push([method, params]);
+      return method === 'windows.list' ? { windows: [{ ...source, focused: false }] } : source;
+    } },
+    machineId: 'win', placement,
+    native: {
+      enumerateWindows: () => [nativeWindow],
+      toDesktopDIPBounds: (bounds) => Object.fromEntries(Object.entries(bounds).map(([key, value]) => [key, value / 1.25])),
+      setWindowBoundsNormalized: (id, bounds) => nativePositions.push({ id, bounds }),
+    },
+  });
+  const descriptor = await adapter.capture(nativeWindow, { x: 10, y: 20, w: 800, h: 600 });
+  assert.equal(descriptor.state, 'normal');
+  await adapter.position(nativeWindow, { x: 110, y: 120 });
+  assert.deepEqual(nativePositions.at(-1), {
+    id: '0x7', bounds: { x: 138, y: 150, width: 1000, height: 750 },
+  });
+  await adapter.position({ nativeWindowId: '0x7', geometryVU: { ...descriptor.geometryVU, w: 400, h: 300 } }, { x: 20, y: 30 });
+  assert.deepEqual(nativePositions.at(-1), {
+    id: '0x7', bounds: { x: 25, y: 38, width: 500, height: 375 },
+  });
 });

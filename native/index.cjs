@@ -181,10 +181,11 @@ class FallbackNativeAdapter extends EventEmitter {
   toPlatformPoint(point) { return { ...validPoint(point) }; }
   toNormalizedBounds(bounds) { return { ...validBounds(bounds) }; }
   toPlatformBounds(bounds) { return { ...validBounds(bounds) }; }
+  toDesktopDIPBounds(bounds) { return this.toPlatformBounds(bounds); }
 }
 
 class NativeAdapter extends EventEmitter {
-  constructor(binding, bindingPath) {
+  constructor(binding, bindingPath, options = {}) {
     super();
     this.available = true;
     this.bindingPath = bindingPath;
@@ -193,6 +194,7 @@ class NativeAdapter extends EventEmitter {
     this.handlers = {};
     this.callbackInstalled = false;
     this._coordinateSpace = null;
+    this.screen = options.screen;
     this.guardPath = path.join(path.dirname(bindingPath), `compusync-recovery-guard${process.platform === 'win32' ? '.exe' : ''}`);
   }
 
@@ -277,6 +279,17 @@ class NativeAdapter extends EventEmitter {
   toPlatformPoint(point, displays) { return toPlatformPoint(point, this.coordinateSpace(displays)); }
   toNormalizedBounds(bounds, displays) { return toNormalizedBounds(bounds, this.coordinateSpace(displays)); }
   toPlatformBounds(bounds, displays) { return toPlatformBounds(bounds, this.coordinateSpace(displays)); }
+  toDesktopDIPBounds(bounds) {
+    const platformBounds = this.toPlatformBounds(bounds);
+    if (!['windows', 'win32'].includes(this.platformName)) return platformBounds;
+    // Chrome's window APIs use desktop DIPs; Win32 uses physical pixels.
+    // Let Chromium map monitor origins as well as dimensions. Dividing the
+    // whole desktop by the primary scale breaks mixed-DPI monitor layouts.
+    const screen = this.screen || require('electron').screen;
+    if (typeof screen?.screenToDipRect !== 'function') throw new TypeError('Desktop DIP conversion requires Electron screen.');
+    const rounded = Object.fromEntries(Object.entries(platformBounds).map(([key, value]) => [key, Math.round(value)]));
+    return validBounds(screen.screenToDipRect(null, rounded));
+  }
   enumerateWindows() {
     const windows = this.substrate.enumerateWindows();
     if (!Array.isArray(windows)) throw new TypeError('Native window enumeration must return an array.');
@@ -335,7 +348,7 @@ function createNativeAdapter(options = {}) {
     }
     return new FallbackNativeAdapter(loaded.failures);
   }
-  return new NativeAdapter(loaded.binding, loaded.path);
+  return new NativeAdapter(loaded.binding, loaded.path, options);
 }
 
 module.exports = {

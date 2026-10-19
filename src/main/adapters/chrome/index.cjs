@@ -11,6 +11,7 @@ const {
   ChromePrepare,
   ChromePrepareError,
   boundsFromVU,
+  chromeBounds,
   normalizePixelBounds,
   prepareBounds,
 } = require('./prepare.cjs');
@@ -150,8 +151,7 @@ class ChromeHandoffAdapter {
     const record = localRecord(this.records, handle);
     const windowId = handle?.windowId ?? record?.windowId;
     if (Number.isInteger(windowId)) {
-      const platformBounds = typeof this.native.toPlatformBounds === 'function'
-        ? this.native.toPlatformBounds(bounds) : bounds;
+      const platformBounds = chromeBounds(this.native, bounds);
       return this.cdp.setWindowBounds(windowId, platformBounds);
     }
     const id = nativeWindowId(handle);

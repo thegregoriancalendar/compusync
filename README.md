@@ -24,6 +24,8 @@ npm run native:smoke
 npm start
 ```
 
+`npm start` automatically appends application output and errors to `compusync.log` in the project root, with a timestamp marking each launch. The log is readable while CompuSync is running and is ignored by Git.
+
 Do not copy `node_modules` or native build output between operating systems. The build creates the platform addon used for global input, cursor recovery, native window discovery, and Chrome handoff. See the [Mac setup guide](docs/mac-setup.md) for macOS prerequisites and permissions.
 
 ## Pair the computers

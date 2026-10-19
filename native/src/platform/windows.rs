@@ -32,6 +32,7 @@ const WM_CANCELMODE: u32 = 0x001F;
 const WM_QUIT: u32 = 0x0012;
 const WM_DISPLAYCHANGE: u32 = 0x007E;
 const WM_INPUT: u32 = 0x00FF;
+const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_HOTKEY: u32 = 0x0312;
 const SMTO_ABORTIFHUNG: u32 = 0x0002;
 const RIM_TYPEMOUSE: u32 = 0;
@@ -49,6 +50,13 @@ const TOKEN_QUERY: u32 = 0x0008;
 const TOKEN_ELEVATION_CLASS: u32 = 20;
 const INPUT_MOUSE: u32 = 0;
 const INPUT_KEYBOARD: u32 = 1;
+const MOUSEEVENTF_MOVE: u32 = 0x0001;
+const MOUSEEVENTF_VIRTUALDESK: u32 = 0x4000;
+const MOUSEEVENTF_ABSOLUTE: u32 = 0x8000;
+const SM_XVIRTUALSCREEN: i32 = 76;
+const SM_YVIRTUALSCREEN: i32 = 77;
+const SM_CXVIRTUALSCREEN: i32 = 78;
+const SM_CYVIRTUALSCREEN: i32 = 79;
 const MOUSEEVENTF_LEFTDOWN: u32 = 0x0002;
 const MOUSEEVENTF_LEFTUP: u32 = 0x0004;
 const MOUSEEVENTF_RIGHTDOWN: u32 = 0x0008;
@@ -210,6 +218,7 @@ unsafe extern "system" {
     fn ClipCursor(rect: *const WinRect) -> Bool;
     fn SetCursorPos(x: i32, y: i32) -> Bool;
     fn GetCursorPos(point: *mut WinPoint) -> Bool;
+    fn GetSystemMetrics(index: i32) -> i32;
     fn EnumDisplayMonitors(
         dc: Handle,
         clip: *const WinRect,
@@ -498,6 +507,50 @@ fn hook_context() -> Option<Arc<HookContext>> {
     HOOK_CONTEXT.get()?.lock().clone()
 }
 
+fn should_suppress_mouse(message: u32, extra_info: usize, linked: bool, owner: bool) -> bool {
+    if !linked || extra_info == COMPUSYNC_EXTRA_INFO {
+        return false;
+    }
+    match message {
+        // Raw Input still supplies physical deltas. Only the authoritative,
+        // tagged move may change the linked pointer, on either computer.
+        WM_MOUSEMOVE => true,
+        // Preserve local button state and native mouse capture on the owner
+        // so text selection remains an ordinary Windows drag.
+        0x0201 | 0x0202 | 0x0204 | 0x0205 | 0x0207 | 0x0208 | 0x020A | 0x020B | 0x020C => !owner,
+        _ => false,
+    }
+}
+
+fn absolute_mouse_move(point: Point, desktop: WinRect) -> Result<Input, String> {
+    let width = i64::from(desktop.right) - i64::from(desktop.left);
+    let height = i64::from(desktop.bottom) - i64::from(desktop.top);
+    if width <= 0 || height <= 0 || !point.x.is_finite() || !point.y.is_finite() {
+        return Err("invalid cursor position or virtual desktop bounds".into());
+    }
+    let normalize = |position: f64, origin: i32, extent: i64| {
+        // Aim at the center of the target pixel's absolute-coordinate bucket.
+        // Including the virtual origin handles monitors left of/above primary.
+        let pixel = (position.round() - f64::from(origin)).clamp(0.0, (extent - 1) as f64);
+        (((pixel + 0.5) * 65536.0 / extent as f64) as i32).clamp(0, 65535)
+    };
+    Ok(Input {
+        kind: INPUT_MOUSE,
+        data: InputData {
+            mouse: MouseInput {
+                dx: normalize(point.x, desktop.left, width),
+                dy: normalize(point.y, desktop.top, height),
+                mouse_data: 0,
+                // Motion never repeats or releases a held button. Windows
+                // keeps the genuine local (or injected peer) drag state.
+                flags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                time: 0,
+                extra_info: COMPUSYNC_EXTRA_INFO,
+            },
+        },
+    })
+}
+
 fn should_suppress_left_up(
     message: u32,
     extra_info: usize,
@@ -683,12 +736,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: Wparam, lparam: Lpara
 }
 
 unsafe extern "system" fn mouse_hook(code: i32, wparam: Wparam, lparam: Lparam) -> Lresult {
-    if code == HC_ACTION
-        && matches!(
-            wparam as u32,
-            0x0201 | 0x0202 | 0x0204 | 0x0205 | 0x0207 | 0x0208 | 0x020A | 0x020B | 0x020C
-        )
-    {
+    if code == HC_ACTION {
         let mouse = unsafe { &*(lparam as *const MouseHook) };
         if let Some(context) = hook_context() {
             if should_suppress_left_up(
@@ -699,11 +747,13 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: Wparam, lparam: Lparam) 
             ) {
                 return 1;
             }
-            if mouse.extra_info != COMPUSYNC_EXTRA_INFO {
-                if context.linked.load(Ordering::Acquire) && !context.owner.load(Ordering::Acquire)
-                {
-                    return 1;
-                }
+            if should_suppress_mouse(
+                wparam as u32,
+                mouse.extra_info,
+                context.linked.load(Ordering::Acquire),
+                context.owner.load(Ordering::Acquire),
+            ) {
+                return 1;
             }
         }
     }
@@ -766,6 +816,13 @@ impl HostPlatform {
             capture: None,
         }
     }
+
+    fn manages_owner_motion(&self) -> bool {
+        self.capture.as_ref().is_some_and(|runtime| {
+            runtime.context.linked.load(Ordering::Acquire)
+                && runtime.context.owner.load(Ordering::Acquire)
+        })
+    }
 }
 
 impl Platform for HostPlatform {
@@ -796,6 +853,15 @@ impl Platform for HostPlatform {
         Ok(())
     }
     fn park_cursor(&mut self) -> Result<(), String> {
+        if self.manages_owner_motion() {
+            // The low-level hook blocks physical movement while tagged
+            // SendInput moves reach the owner normally. A 1px clip would
+            // also constrain those asynchronous moves and break native drags.
+            if self.parked {
+                self.release_cursor()?;
+            }
+            return Ok(());
+        }
         let mut p = WinPoint::default();
         if unsafe { GetCursorPos(&mut p) } == 0 {
             return Err(os_error("GetCursorPos"));
@@ -820,6 +886,7 @@ impl Platform for HostPlatform {
         Ok(())
     }
     fn warp_cursor(&mut self, point: Point) -> Result<(), String> {
+        let owner_motion = self.manages_owner_motion();
         let was_parked = self.parked;
         if was_parked {
             if unsafe { ClipCursor(null()) } == 0 {
@@ -827,10 +894,25 @@ impl Platform for HostPlatform {
             }
             self.parked = false;
         }
-        if unsafe { SetCursorPos(point.x.round() as i32, point.y.round() as i32) } == 0 {
+        if owner_motion {
+            let left = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+            let top = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+            let desktop = WinRect {
+                left,
+                top,
+                right: left + unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) },
+                bottom: top + unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) },
+            };
+            let input = absolute_mouse_move(point, desktop)?;
+            // Deliver actual mouse input so applications tracking a held
+            // button see movement, rather than only a cursor reposition.
+            if unsafe { SendInput(1, &input, size_of::<Input>() as i32) } != 1 {
+                return Err(os_error("SendInput(mouse move)"));
+            }
+        } else if unsafe { SetCursorPos(point.x.round() as i32, point.y.round() as i32) } == 0 {
             return Err(os_error("SetCursorPos"));
         }
-        if was_parked {
+        if was_parked && !owner_motion {
             let x = point.x.round() as i32;
             let y = point.y.round() as i32;
             let rect = WinRect {
@@ -1320,10 +1402,114 @@ impl Drop for HostPlatform {
 #[cfg(test)]
 mod tests {
     use super::{
-        fullscreen_from_window_state, hid_to_vk, should_suppress_left_up, vk_to_hid, WinRect,
-        COMPUSYNC_EXTRA_INFO, WS_CAPTION,
+        absolute_mouse_move, fullscreen_from_window_state, hid_to_vk, should_suppress_left_up,
+        should_suppress_mouse, vk_to_hid, WinRect, COMPUSYNC_EXTRA_INFO, INPUT_MOUSE,
+        MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, WM_MOUSEMOVE, WS_CAPTION,
     };
+    use crate::Point;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn linked_owner_preserves_local_selection_buttons_and_filters_device_motion() {
+        assert!(should_suppress_mouse(WM_MOUSEMOVE, 0, true, true));
+        assert!(!should_suppress_mouse(
+            WM_MOUSEMOVE,
+            COMPUSYNC_EXTRA_INFO,
+            true,
+            true
+        ));
+        // Both ends of a local selection must reach the application's capture
+        // window. Applying the motion barrier to buttons would strand a drag.
+        for message in [0x0201, 0x0202, 0x0204, 0x0205, 0x0207, 0x0208] {
+            assert!(!should_suppress_mouse(message, 0, true, true));
+            assert!(should_suppress_mouse(message, 0, true, false));
+            assert!(!should_suppress_mouse(
+                message,
+                COMPUSYNC_EXTRA_INFO,
+                true,
+                false
+            ));
+        }
+    }
+
+    #[test]
+    fn unlinked_input_is_local_for_either_previous_owner() {
+        for owner in [true, false] {
+            for message in [WM_MOUSEMOVE, 0x0201, 0x0202, 0x020A] {
+                assert!(!should_suppress_mouse(message, 0, false, owner));
+            }
+        }
+    }
+
+    #[test]
+    fn authoritative_moves_preserve_buttons_and_map_to_pixels_on_the_whole_desktop() {
+        let desktop = WinRect {
+            left: -1920,
+            top: -1080,
+            right: 3840,
+            bottom: 2160,
+        };
+        let width = i64::from(desktop.right - desktop.left);
+        let height = i64::from(desktop.bottom - desktop.top);
+        for (x, y) in [(-1920, -1080), (-1, -1), (0, 0), (1234, 567), (3839, 2159)] {
+            let input = absolute_mouse_move(
+                Point {
+                    x: f64::from(x),
+                    y: f64::from(y),
+                },
+                desktop,
+            )
+            .unwrap();
+            assert_eq!(input.kind, INPUT_MOUSE);
+            let mouse = unsafe { input.data.mouse };
+            // No button transition flags, so intermediate selection movement
+            // cannot become a fresh click or a premature release.
+            assert_eq!(
+                mouse.flags,
+                MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
+            );
+            assert_eq!(mouse.extra_info, COMPUSYNC_EXTRA_INFO);
+            assert_eq!(mouse.mouse_data, 0);
+            assert_eq!(
+                i64::from(mouse.dx) * width / 65536 + i64::from(desktop.left),
+                i64::from(x)
+            );
+            assert_eq!(
+                i64::from(mouse.dy) * height / 65536 + i64::from(desktop.top),
+                i64::from(y)
+            );
+        }
+    }
+
+    #[test]
+    fn absolute_motion_clamps_to_desktop_and_rejects_invalid_geometry() {
+        let desktop = WinRect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        let input = absolute_mouse_move(
+            Point {
+                x: -100.0,
+                y: 9000.0,
+            },
+            desktop,
+        )
+        .unwrap();
+        let mouse = unsafe { input.data.mouse };
+        assert_eq!(i64::from(mouse.dx) * 1920 / 65536, 0);
+        assert_eq!(i64::from(mouse.dy) * 1080 / 65536, 1079);
+        assert!(absolute_mouse_move(
+            Point {
+                x: f64::NAN,
+                y: 0.0
+            },
+            desktop
+        )
+        .is_err());
+        assert!(absolute_mouse_move(Point { x: 0.0, y: 0.0 }, WinRect::default()).is_err());
+    }
 
     #[test]
     fn move_loop_up_reaches_window_and_later_physical_up_is_suppressed_once() {

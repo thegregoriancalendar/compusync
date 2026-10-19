@@ -23,6 +23,19 @@ function crossedFraction(rect, targetPlacement) {
   return area > 0 ? intersectionArea(rect, targetPlacement) / area : 0;
 }
 
+function dropWinner(rect, source, target) {
+  const sourceArea = intersectionArea(rect, source);
+  const targetArea = intersectionArea(rect, target);
+  // Count the portions the user can actually see. Offscreen pixels of a
+  // large-monitor window must not make a smaller laptop impossible to win.
+  return targetArea > 0 && targetArea >= sourceArea ? 'destination' : 'source';
+}
+
+function fitToPlacement(rect, placement) {
+  const scale = Math.min(1, placement.size.w / rect.w, placement.size.h / rect.h);
+  return { ...rect, w: rect.w * scale, h: rect.h * scale };
+}
+
 function clampOriginToPlacement(rect, placement) {
   return {
     x: Math.max(placement.origin.x, Math.min(placement.origin.x + Math.max(0, placement.size.w - rect.w), rect.x)),
@@ -89,6 +102,8 @@ class DragController extends EventEmitter {
     this.getPlacements = typeof options.getPlacements === 'function' ? options.getPlacements : () => [];
     this.setDragging = typeof options.setDragging === 'function' ? options.setDragging : () => {};
     this.setBusy = typeof options.setBusy === 'function' ? options.setBusy : () => {};
+    this.refreshSource = typeof options.refreshSource === 'function' ? options.refreshSource : null;
+    this.beginManagedMove = typeof options.beginManagedMove === 'function' ? options.beginManagedMove : null;
     this.logger = options.logger || null;
     this.now = typeof options.now === 'function' ? options.now : Date.now;
     this.setTimer = typeof options.setTimeout === 'function' ? options.setTimeout : setTimeout;
@@ -150,9 +165,9 @@ class DragController extends EventEmitter {
 
   async end() {
     const state = this.active;
-    if (!state || state.role !== 'source') return false;
+    if (!state || state.role !== 'source' || state.winner) return false;
     if (!state.descriptor) { this.#clear(); return true; }
-    state.winner = state.instant || crossedFraction(state.geometry, state.target) >= 0.5 ? 'destination' : 'source';
+    state.winner = state.instant ? 'destination' : dropWinner(state.geometry, state.source, state.target);
     this.#setPhase(state, 'dropping', 'mouse-up', { winner: state.winner });
     if (state.winner === 'source') {
       try {
@@ -285,11 +300,33 @@ class DragController extends EventEmitter {
     this.#setPhase(state, 'capturing', 'armed');
     const captureStartedAt = this.now();
     try {
+      if (this.refreshSource) {
+        const refreshed = await this.refreshSource(state.window);
+        if (this.active !== state || state.aborted) return;
+        if (refreshed?.window) {
+          state.window = refreshed.window;
+          state.instant = excludedState(state.window);
+        }
+        if (this.#validGeometry(refreshed?.geometryVU) && point(refreshed.cursorVU)) {
+          state.geometry = { ...refreshed.geometryVU };
+          state.cursorVU = { ...refreshed.cursorVU };
+          state.grabOffsetVU = {
+            x: state.cursorVU.x - state.geometry.x,
+            y: state.cursorVU.y - state.geometry.y,
+          };
+        }
+      }
       const descriptor = await state.adapter.capture(state.window, state.geometry);
       this.#timing(state, 'capture', captureStartedAt, { status: 'ok' });
       if (this.active !== state || state.aborted) return;
       state.descriptor = descriptor;
       state.instant = state.instant || excludedState(descriptor);
+      // Stop the OS drag before moving either native copy. Otherwise its
+      // modal loop and our shared cursor apply different positions/gains.
+      if (!state.instant && this.beginManagedMove) {
+        await this.beginManagedMove(state.window);
+        if (this.active !== state || state.aborted) return;
+      }
       this.lateReadyIds.delete(descriptor.id);
       this.#setPhase(state, state.instant ? 'instant-preparing' : 'preparing', 'offer-created', { instant: state.instant });
       if (!this.send({ type: 'window.offer', descriptor })) throw new Error('offer-send-failed');
@@ -465,7 +502,8 @@ class DragController extends EventEmitter {
       if (this.active !== state || state.aborted) return false;
       state.pendingPosition = null;
       if (winner === 'destination') {
-        const rect = { ...state.descriptor.geometryVU, ...state.originVU };
+        const rect = fitToPlacement({ ...state.descriptor.geometryVU, ...state.originVU }, state.target);
+        state.handle = { ...state.handle, geometryVU: rect };
         await state.adapter.position(state.handle, clampOriginToPlacement(rect, state.target));
         await state.adapter.focus(state.handle);
       } else {
@@ -558,6 +596,6 @@ class DragController extends EventEmitter {
 
 module.exports = {
   ARM_DISTANCE_VU, MIN_WINDOW, PREPARE_WAIT_MS, REVERSE_KEEPALIVE_MS,
-  intersectionArea, crossedFraction, clampOriginToPlacement, offscreenOrigin,
+  intersectionArea, crossedFraction, dropWinner, fitToPlacement, clampOriginToPlacement, offscreenOrigin,
   targetForSource, motionTowardEdge, originDistanceToEdge, DragController,
 };

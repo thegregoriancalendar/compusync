@@ -51,6 +51,29 @@ test('Retina CoreGraphics points round-trip as normalized local device pixels', 
   assert.deepEqual(toPlatformBounds(normalized, space), { x: -1400, y: 50, width: 800, height: 600 });
 });
 
+test('Windows Chrome DIP conversion delegates mixed-DPI desktop origins to Chromium', () => {
+  const calls = [];
+  const native = new NativeAdapter(bindingFor({
+    platformName: 'windows', cursor: { x: 0, y: 0 },
+    displays: [
+      { bounds: { x: -1920, y: 0, width: 1920, height: 1080 }, scale: 1, primary: false },
+      { bounds: { x: 0, y: 0, width: 3200, height: 1800 }, scale: 1.25, primary: true },
+    ],
+  }), 'native.node', { screen: { screenToDipRect(window, bounds) {
+    calls.push({ window, bounds });
+    // The left monitor is 100%; a global divide by the primary 125% is wrong.
+    return bounds.x < 0 ? bounds : Object.fromEntries(Object.entries(bounds).map(([key, value]) => [key, value / 1.25]));
+  } } });
+  assert.deepEqual(native.toDesktopDIPBounds({ x: 2020, y: 50, width: 1000, height: 750 }),
+    { x: 80, y: 40, width: 800, height: 600 });
+  assert.deepEqual(native.toDesktopDIPBounds({ x: 120, y: 50, width: 800, height: 600 }),
+    { x: -1800, y: 50, width: 800, height: 600 });
+  assert.deepEqual(calls, [
+    { window: null, bounds: { x: 100, y: 50, width: 1000, height: 750 } },
+    { window: null, bounds: { x: -1800, y: 50, width: 800, height: 600 } },
+  ]);
+});
+
 test('native adapter hardens cursor coordinates without changing raw bounds used for CDP matching', () => {
   const displays = [
     { id: 'left', bounds: { x: -1512, y: 0, width: 1512, height: 982 }, scale: 2, primary: false },

@@ -5,7 +5,7 @@ const {
   ChromeCaptureError, DescriptorIdentityCache, geometryVU, isNativeChromeWindow,
   nativeWindowId, safeLog, selectAddressableWindow, hostOnly,
 } = require('./capture.cjs');
-const { ChromePrepareError, prepareBounds } = require('./prepare.cjs');
+const { ChromePrepareError, chromeBounds, prepareBounds } = require('./prepare.cjs');
 
 const MAX_WINDOWS = 100;
 const MAX_TABS = 500;
@@ -49,12 +49,12 @@ function boundsDistance(first, second) {
     : Infinity;
 }
 
-function joinNativeWindows(groups, nativeWindows, tolerance = 48) {
+function joinNativeWindows(groups, nativeWindows, tolerance = 48, boundsForNative = (window) => window) {
   const unused = new Set((nativeWindows || []).filter(isNativeChromeWindow));
   return groups.map((group) => {
     let match = null, distance = Infinity;
     for (const candidate of unused) {
-      const score = boundsDistance(group.bounds, candidate);
+      const score = boundsDistance(group.bounds, boundsForNative(candidate));
       if (score < distance) { match = candidate; distance = score; }
     }
     if (match && distance <= tolerance * 4) unused.delete(match);
@@ -94,7 +94,11 @@ class ChromeExtensionAdapter {
       throw chromeError('CHROME_EXTENSION_PROTOCOL', 'The Chrome helper returned an invalid window list.');
     }
     const groups = result.windows.map(normalizeWindow).filter(Boolean);
-    return joinNativeWindows(groups, nativeWindows);
+    return joinNativeWindows(groups, nativeWindows, 48, (window) => {
+      const normalized = window.normalizedBounds || this.native.toNormalizedBounds?.(window.bounds);
+      return normalized && typeof this.native.toDesktopDIPBounds === 'function'
+        ? this.native.toDesktopDIPBounds(normalized) : window;
+    });
   }
 
   async capture(window, inputGeometryVU, stableInput) {
@@ -181,8 +185,7 @@ class ChromeExtensionAdapter {
     if (!descriptor) throw new ChromePrepareError('CHROME_INVALID_DESCRIPTOR', 'The Chrome handoff descriptor is invalid.');
     const placement = options.targetPlacement || this.getPlacement();
     const normalizedBounds = prepareBounds(descriptor, options, placement);
-    const bounds = typeof this.native.toPlatformBounds === 'function'
-      ? this.native.toPlatformBounds(normalizedBounds) : normalizedBounds;
+    const bounds = chromeBounds(this.native, normalizedBounds);
     const payload = {
       bounds, state: descriptor.state, tabs: descriptor.payload.tabs, activeIdx: descriptor.payload.activeIdx,
     };
@@ -248,8 +251,8 @@ class ChromeExtensionAdapter {
     const id = nativeWindowId(handle);
     const record = id == null ? null : this.records.get(String(id));
     const descriptor = record?.descriptor;
-    return prepareBounds(descriptor || {
-      geometryVU: handle?.geometryVU,
+    return prepareBounds({
+      geometryVU: handle?.geometryVU || descriptor?.geometryVU,
     }, { originVU: position, targetPlacement: handle?.placement || this.getPlacement() }, this.getPlacement());
   }
 
@@ -262,7 +265,9 @@ class ChromeExtensionAdapter {
     }
     if (id != null && typeof this.native.setWindowBounds === 'function') return this.native.setWindowBounds(id, bounds);
     const windowId = handle?.windowId ?? record?.windowId;
-    if (Number.isInteger(windowId)) return this.bridge.request('window.position', { windowId, bounds });
+    if (Number.isInteger(windowId)) return this.bridge.request('window.position', {
+      windowId, bounds: chromeBounds(this.native, bounds),
+    });
     throw new ChromePrepareError('CHROME_NATIVE_WINDOW_UNAVAILABLE', 'The Chrome handoff window cannot be positioned.');
   }
 

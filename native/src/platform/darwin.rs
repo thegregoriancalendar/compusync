@@ -1,4 +1,4 @@
-use super::{EventSink, Platform};
+use super::{macos_event_tap, EventSink, Platform};
 use crate::{DisplayMetric, NativeEvent, Point, Rect, WindowInfo};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -46,8 +46,6 @@ const CG_EVENT_SCROLL_WHEEL: u32 = 22;
 const CG_EVENT_OTHER_DOWN: u32 = 25;
 const CG_EVENT_OTHER_UP: u32 = 26;
 const CG_EVENT_OTHER_DRAGGED: u32 = 27;
-const CG_EVENT_TAP_DISABLED_TIMEOUT: u32 = 0xFFFF_FFFE;
-const CG_EVENT_TAP_DISABLED_USER: u32 = 0xFFFF_FFFF;
 const CG_FIELD_MOUSE_BUTTON: u32 = 3;
 // Unlike kCGMouseEventDeltaX/Y, these fields contain raw device movement and
 // are not contaminated by CoreGraphics cursor acceleration or our own warps.
@@ -811,13 +809,24 @@ unsafe extern "C" fn event_tap(
     event: CgEvent,
     user: *mut c_void,
 ) -> CgEvent {
-    if user.is_null() || event.is_null() {
+    if user.is_null() {
         return event;
     }
     // A panic may not unwind through CoreGraphics' C callback. Returning the
     // original event keeps local input usable instead of aborting Electron.
-    catch_unwind(AssertUnwindSafe(|| unsafe {
-        event_tap_inner(proxy, kind, event, user)
+    catch_unwind(AssertUnwindSafe(|| {
+        macos_event_tap::dispatch(
+            kind,
+            event,
+            || {
+                let context = unsafe { &*(user as *const TapContext) };
+                let tap = *context.tap.lock();
+                if !tap.is_null() {
+                    unsafe { CGEventTapEnable(tap, true) };
+                }
+            },
+            || unsafe { event_tap_inner(proxy, kind, event, user) },
+        )
     }))
     .unwrap_or(event)
 }
@@ -829,15 +838,6 @@ unsafe fn event_tap_inner(
     user: *mut c_void,
 ) -> CgEvent {
     let context = unsafe { &*(user as *const TapContext) };
-    if kind == CG_EVENT_TAP_DISABLED_TIMEOUT || kind == CG_EVENT_TAP_DISABLED_USER {
-        let tap = *context.tap.lock();
-        if !tap.is_null() {
-            unsafe {
-                CGEventTapEnable(tap, true);
-            }
-        }
-        return event;
-    }
     let source_tag = unsafe { CGEventGetIntegerValueField(event, CG_FIELD_SOURCE_USER_DATA) };
     if source_tag == COMPUSYNC_MOVE_LOOP_TAG {
         // This release is delivered only to AppKit to leave its native drag;
@@ -1416,7 +1416,56 @@ impl Platform for HostPlatform {
         });
         let user = Arc::into_raw(context.clone()) as usize;
         let (sender, receiver) = std::sync::mpsc::sync_channel::<Result<usize, String>>(1);
-        let thread=thread::Builder::new().name("compusync-mac-input".into()).spawn(move||unsafe{let mask=[CG_EVENT_LEFT_DOWN,CG_EVENT_LEFT_UP,CG_EVENT_RIGHT_DOWN,CG_EVENT_RIGHT_UP,CG_EVENT_MOUSE_MOVED,CG_EVENT_LEFT_DRAGGED,CG_EVENT_RIGHT_DRAGGED,CG_EVENT_KEY_DOWN,CG_EVENT_KEY_UP,CG_EVENT_FLAGS_CHANGED,CG_EVENT_SCROLL_WHEEL,CG_EVENT_OTHER_DOWN,CG_EVENT_OTHER_UP,CG_EVENT_OTHER_DRAGGED].iter().fold(0u64,|m,v|m|(1u64<<v));let tap=CGEventTapCreate(1,0,0,mask,Some(event_tap),user as *mut c_void);if tap.is_null(){let _=sender.send(Err("CGEventTapCreate failed; grant Accessibility and Input Monitoring permissions".into()));drop(Arc::from_raw(user as *const TapContext));return}*(*(user as *const TapContext)).tap.lock()=tap;let source=CFMachPortCreateRunLoopSource(null(),tap,0);let run_loop=CFRunLoopGetCurrent();CFRunLoopAddSource(run_loop,source,kCFRunLoopCommonModes);CGEventTapEnable(tap,true);let _=sender.send(Ok(run_loop as usize));CFRunLoopRun();CFRelease(source);CFRelease(tap);drop(Arc::from_raw(user as *const TapContext));}).map_err(|e|e.to_string())?;
+        let thread = thread::Builder::new()
+            .name("compusync-mac-input".into())
+            .spawn(move || unsafe {
+                let mask = [
+                    CG_EVENT_LEFT_DOWN,
+                    CG_EVENT_LEFT_UP,
+                    CG_EVENT_RIGHT_DOWN,
+                    CG_EVENT_RIGHT_UP,
+                    CG_EVENT_MOUSE_MOVED,
+                    CG_EVENT_LEFT_DRAGGED,
+                    CG_EVENT_RIGHT_DRAGGED,
+                    CG_EVENT_KEY_DOWN,
+                    CG_EVENT_KEY_UP,
+                    CG_EVENT_FLAGS_CHANGED,
+                    CG_EVENT_SCROLL_WHEEL,
+                    CG_EVENT_OTHER_DOWN,
+                    CG_EVENT_OTHER_UP,
+                    CG_EVENT_OTHER_DRAGGED,
+                ]
+                .iter()
+                .fold(0u64, |mask, kind| mask | (1u64 << kind));
+                // Filter at the HID entry to WindowServer, before physical
+                // samples reach session handling. This gives non-owner motion
+                // the earliest public filtering point instead of relying on
+                // foreground-dependent mouse/cursor disassociation alone.
+                let tap = CGEventTapCreate(
+                    macos_event_tap::CG_HID_EVENT_TAP,
+                    0,
+                    0,
+                    mask,
+                    Some(event_tap),
+                    user as *mut c_void,
+                );
+                if tap.is_null() {
+                    let _ = sender.send(Err("CGEventTapCreate failed; grant Accessibility and Input Monitoring permissions".into()));
+                    drop(Arc::from_raw(user as *const TapContext));
+                    return;
+                }
+                *(*(user as *const TapContext)).tap.lock() = tap;
+                let source = CFMachPortCreateRunLoopSource(null(), tap, 0);
+                let run_loop = CFRunLoopGetCurrent();
+                CFRunLoopAddSource(run_loop, source, kCFRunLoopCommonModes);
+                CGEventTapEnable(tap, true);
+                let _ = sender.send(Ok(run_loop as usize));
+                CFRunLoopRun();
+                CFRelease(source);
+                CFRelease(tap);
+                drop(Arc::from_raw(user as *const TapContext));
+            })
+            .map_err(|e| e.to_string())?;
         let run_loop = receiver
             .recv_timeout(std::time::Duration::from_secs(2))
             .map_err(|_| "event tap thread did not start".to_string())??

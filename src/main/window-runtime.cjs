@@ -2,6 +2,7 @@
 
 const { EventEmitter } = require('node:events');
 const { DragController } = require('./drag.cjs');
+const { BUTTON_BITS } = require('./cursor.cjs');
 
 const WINDOW_FRAME_MS = 1000 / 60;
 const CURSOR_EDGE_CAPTURE_VU = 12;
@@ -102,6 +103,7 @@ class WindowHandoffRuntime extends EventEmitter {
     this.started = false;
     this.polling = false;
     this.pollPromise = null;
+    this.endingPromise = null;
     this.pollTimer = null;
     this.sourceWindowId = null;
     this.sourceStartBounds = null;
@@ -115,7 +117,6 @@ class WindowHandoffRuntime extends EventEmitter {
     // adapter can capture, move, or close a source window.
     this.processId = Number.isSafeInteger(options.processId) && options.processId > 0
       ? options.processId : process.pid;
-    this.isWindows = (this.native.platformName || (process.platform === 'win32' ? 'windows' : process.platform)) === 'windows';
     this.drag = new DragController({
       machineId: this.input.machineId,
       send: (message) => this.input.send(message),
@@ -124,13 +125,23 @@ class WindowHandoffRuntime extends EventEmitter {
       getPlacements: () => this.input.cursor.placements,
       setDragging: (dragging) => this.input.setDragging(dragging),
       setBusy: this.setBusy,
+      refreshSource: (window) => this.#refreshSource(window),
+      beginManagedMove: () => this.#enterProgrammaticMove(),
       logger: (event, details) => writeHandoffLog(this.logger, event, details),
     });
     this._moveStart = (id) => { void this.handleMoveStart(id); };
     this._moveEnd = (id) => { void this.handleMoveEnd(id); };
     this._nativeEvent = (event) => {
-      if (this.isWindows && this.nativeLoopTerminated && event?.kind === 'cursorButton'
+      if (this.nativeLoopTerminated && event?.kind === 'cursorButton'
         && event.button === 'left' && event.down === false) void this.handleMoveEnd(this.sourceWindowId, { physical: true });
+    };
+    this._cursorPosition = ({ buttons } = {}) => {
+      // Transported releases update logical button state without injecting
+      // native events during a managed drag. Cursor frames cover that path
+      // even after ownership has crossed to the other laptop.
+      if (this.nativeLoopTerminated && Number.isInteger(buttons) && !(buttons & BUTTON_BITS.left)) {
+        void this.handleMoveEnd(this.sourceWindowId, { physical: true });
+      }
     };
     this._mode = ({ linked, reason }) => {
       this.chrome.setLinked(linked);
@@ -165,6 +176,7 @@ class WindowHandoffRuntime extends EventEmitter {
     this.native.on?.('nativeEvent', this._nativeEvent);
     this.native.on?.('displayChanged', this._displayChanged);
     this.input.on?.('mode', this._mode);
+    this.input.cursor.on?.('position', this._cursorPosition);
     this.chrome.on?.('error', this._serviceError);
     this.chrome.setLinked(this.input.cursor.linked);
   }
@@ -213,10 +225,6 @@ class WindowHandoffRuntime extends EventEmitter {
       const geometryVU = this.sourceGeometryVU || this.drag.active?.geometry;
       const cursorVU = this.input.cursor.virtualCursor;
       const frame = this.drag.frame({ geometryVU, cursorVU });
-      if (!this.nativeLoopTerminated && this.drag.active?.adapter
-        && cursorAtSharedEdge(cursorVU, this.drag.active.source, this.drag.active.target)) {
-        if (!await this.#enterProgrammaticMove()) return false;
-      }
       await frame;
       if (this.drag.active !== sourceState || this.sourceWindowId !== sourceWindowId) return false;
       const at = this.now();
@@ -250,11 +258,17 @@ class WindowHandoffRuntime extends EventEmitter {
   async handleMoveEnd(id, options = {}) {
     if (!this.drag.active || this.drag.active.role !== 'source'
       || (id != null && String(id) !== this.sourceWindowId)) return false;
-    const sourceState = this.drag.active;
-    const sourceWindowId = this.sourceWindowId;
-    // terminateMoveLoop causes MOVESIZEEND on Windows, but the user's true
-    // physical left button is still held and raw deltas must keep driving.
-    if (this.isWindows && this.nativeLoopTerminated && !options.physical) return false;
+    // Ending the OS modal drag can emit a drag-end on either platform while
+    // the user's logical button is still held. Await a real release instead.
+    if (this.nativeLoopTerminated && !options.physical) return false;
+    if (this.endingPromise) return this.endingPromise;
+    const operation = this.#finishMove(this.drag.active, this.sourceWindowId);
+    this.endingPromise = operation;
+    try { return await operation; }
+    finally { if (this.endingPromise === operation) this.endingPromise = null; }
+  }
+
+  async #finishMove(sourceState, sourceWindowId) {
     clearInterval(this.pollTimer);
     this.pollTimer = null;
     if (this.pollPromise) {
@@ -280,6 +294,7 @@ class WindowHandoffRuntime extends EventEmitter {
     this.native.off?.('nativeEvent', this._nativeEvent);
     this.native.off?.('displayChanged', this._displayChanged);
     this.input.off?.('mode', this._mode);
+    this.input.cursor.off?.('position', this._cursorPosition);
     this.chrome.off?.('error', this._serviceError);
     this.input.setWindowController(null);
     await this.drag.abort(reason);
@@ -305,6 +320,20 @@ class WindowHandoffRuntime extends EventEmitter {
       try { await this.drag.abort(error?.code || 'native-move-loop-failed'); } catch { /* abort still clears its state */ }
       return false;
     }
+  }
+
+  async #refreshSource(window) {
+    // Windows can restore a maximized window after MOVESIZESTART. Capture
+    // the restored size and actual grab point once, before freezing geometry
+    // for the managed drag; keep expensive AX enumeration out of later frames.
+    const current = (await this.windows()).find((candidate) => String(candidate.id) === String(window.id));
+    const geometryVU = geometryToVU(current, this.localPlacement());
+    if (!current || !geometryVU) throw Object.assign(new Error('The source Chrome window disappeared.'), { code: 'source-quit' });
+    const resized = !this.sourceGeometryVU || Math.abs(geometryVU.w - this.sourceGeometryVU.w) > 0.5
+      || Math.abs(geometryVU.h - this.sourceGeometryVU.h) > 0.5;
+    this.sourceGeometryVU = { ...geometryVU };
+    return { window: current, geometryVU: resized ? geometryVU : null,
+      cursorVU: { ...this.input.cursor.virtualCursor } };
   }
 
   #settleSource() {
