@@ -21,6 +21,7 @@ const MESSAGE_POLICIES = Object.freeze({
   'cursor.position': { reliable: false, ordered: false, priority: 'realtime' },
   'scroll.delta': { reliable: false, ordered: false, priority: 'realtime' },
   'window.position': { reliable: false, ordered: false, priority: 'realtime' },
+  'window.pause': { reliable: true, ordered: true, priority: 'control' },
   'cursor.handoff': { reliable: true, ordered: true, priority: 'control' },
   'cursor.mode': { reliable: true, ordered: true, priority: 'control' },
   'cursor.layout': { reliable: true, ordered: true, priority: 'control' },
@@ -186,9 +187,18 @@ function sanitizePeerMessage(value, options = {}) {
       }
       break;
     }
+    case 'window.pause':
+      if (ID.test(value.id || '') && finite(value.originVU?.x) && finite(value.originVU?.y)
+        && Math.abs(value.originVU.x) <= MAX_COORDINATE && Math.abs(value.originVU.y) <= MAX_COORDINATE) {
+        result = { type: value.type, id: value.id, originVU: { x: value.originVU.x, y: value.originVU.y } };
+      }
+      break;
     case 'window.commit':
-      if (ID.test(value.id || '') && WINNERS.has(value.winner)) {
+      if (ID.test(value.id || '') && WINNERS.has(value.winner)
+        && (value.originVU === undefined || (finite(value.originVU?.x) && finite(value.originVU?.y)
+          && Math.abs(value.originVU.x) <= MAX_COORDINATE && Math.abs(value.originVU.y) <= MAX_COORDINATE))) {
         result = { type: value.type, id: value.id, winner: value.winner };
+        if (value.originVU) result.originVU = { x: value.originVU.x, y: value.originVU.y };
       }
       break;
     case 'window.abort':

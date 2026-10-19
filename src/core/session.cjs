@@ -506,6 +506,12 @@ class Session extends EventEmitter {
     });
   }
 
+  peerAddress() {
+    const socket = this.config.role === 'host' ? this.connections.values().next().value?.socket : this.socket;
+    const address = socket?._socket?.remoteAddress;
+    return typeof address === 'string' ? address.replace(/^::ffff:/, '') : null;
+  }
+
   sendData(message) {
     if (this.stopped) return false;
     const clean = sanitizeDataMessage(message);

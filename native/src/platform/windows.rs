@@ -959,6 +959,15 @@ impl Platform for HostPlatform {
                 unsafe {
                     let _ = GetDpiForMonitor(monitor, 0, &mut xdpi, &mut ydpi);
                 }
+                // Raw DPI describes measured screen density, independently
+                // of the user's effective UI scaling above. GDI HORZSIZE may
+                // be synthesized from 96 DPI by WDDM and is unsuitable here.
+                let mut raw_xdpi = 0;
+                let mut raw_ydpi = 0;
+                let physical_dpi_available =
+                    unsafe { GetDpiForMonitor(monitor, 2, &mut raw_xdpi, &mut raw_ydpi) } == 0
+                        && (20..=2000).contains(&raw_xdpi)
+                        && (20..=2000).contains(&raw_ydpi);
                 let rect = |r: WinRect| Rect {
                     x: r.left as f64,
                     y: r.top as f64,
@@ -971,6 +980,12 @@ impl Platform for HostPlatform {
                     work_area: rect(info.work),
                     scale: xdpi as f64 / 96.0,
                     primary: info.flags & MONITORINFOF_PRIMARY != 0,
+                    physical_width_mm: physical_dpi_available.then(|| {
+                        (info.monitor.right - info.monitor.left) as f64 * 25.4 / raw_xdpi as f64
+                    }),
+                    physical_height_mm: physical_dpi_available.then(|| {
+                        (info.monitor.bottom - info.monitor.top) as f64 * 25.4 / raw_ydpi as f64
+                    }),
                 });
             }
             1

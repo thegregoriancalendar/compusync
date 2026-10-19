@@ -123,7 +123,7 @@ class WindowHandoffRuntime extends EventEmitter {
       adapterForWindow: (window) => this.chrome.adapterForWindow(window),
       adapterForId: (id) => this.chrome.adapterForId(id),
       getPlacements: () => this.input.cursor.placements,
-      setDragging: (dragging) => this.input.setDragging(dragging),
+      setDragging: (dragging, options) => this.input.setDragging(dragging, options),
       setBusy: this.setBusy,
       refreshSource: (window) => this.#refreshSource(window),
       beginManagedMove: () => this.#enterProgrammaticMove(),
@@ -147,15 +147,19 @@ class WindowHandoffRuntime extends EventEmitter {
       this.chrome.setLinked(linked);
       if (!linked) {
         this.setSeam(null);
-        if (this.drag.active) void this.#restoreSafely(reason || 'unlinked');
+        if (this.drag.active || this.drag.parked.size) void this.#restoreSafely(reason || 'unlinked');
       }
     };
     this._displayChanged = () => {
-      if (this.drag.active) void this.#restoreSafely('display-changed');
+      if (this.drag.active || this.drag.parked.size) void this.#restoreSafely('display-changed');
     };
     this._serviceError = (error) => this.#noticeError(error);
     this.drag.on('hint', () => this.showHint('This window stays here. Only supported Chrome windows can cross between laptops.'));
     this.drag.on('position', (state) => this.setSeam(state));
+    this.drag.on('paused', (state) => {
+      this.setSeam(state);
+      this.#settleSource();
+    });
     this.drag.on('abort', ({ reason }) => {
       this.setSeam(null);
       this.#settleSource();
@@ -297,7 +301,7 @@ class WindowHandoffRuntime extends EventEmitter {
     this.input.cursor.off?.('position', this._cursorPosition);
     this.chrome.off?.('error', this._serviceError);
     this.input.setWindowController(null);
-    await this.drag.abort(reason);
+    await this.drag.restoreOnScreen(reason);
     this.setSeam(null);
     this.#settleSource();
     this.chrome.stop();

@@ -168,6 +168,7 @@ function render(next) {
   $('discovery-error').textContent = next.invitation?.discoveryError || '';
   $('auto-launch').checked = next.autoLaunch;
   $('clipboard-sync').checked = next.clipboardSync !== false;
+  renderAudio(next);
   $('auto-launch').disabled = !next.packaged;
   $('launch-note').hidden = next.packaged;
   const update = next.update || {
@@ -199,6 +200,56 @@ function render(next) {
   $('toggle-ownership').disabled = !connected || !cursor.linked;
   renderNotices(next.notices);
   if (!selectedTab) tab(status.role === 'join');
+}
+
+function renderAudio(next) {
+  const audio = next.audio;
+  const windows = next.platform === 'win32';
+  const active = audio?.active === true;
+  $('audio-mode').textContent = active ? 'Mac → Windows' : 'Separate';
+  $('audio-mode').className = `mode-badge${active ? '' : ' unlinked'}`;
+  $('audio-status').textContent = audio?.message || 'Audio stays on each laptop.';
+  $('audio-status').classList.toggle('audio-error-text', audio?.phase === 'error');
+  $('audio-start').hidden = windows;
+  $('audio-start').disabled = !audio?.canStart;
+  $('audio-stop').disabled = !active;
+  $('audio-windows-output').hidden = !windows;
+  $('audio-output').disabled = active || !audio?.available;
+  $('audio-refresh').disabled = active || !audio?.available;
+  const select = $('audio-output');
+  const outputs = audio?.outputs || [];
+  const options = [{ id: '', label: 'Windows default output' }, ...outputs];
+  if (audio?.outputId && !outputs.some((output) => output.id === audio.outputId)) {
+    options.push({ id: audio.outputId, label: 'Saved output (refresh to check availability)' });
+  }
+  const signature = JSON.stringify(options);
+  if (select.dataset.outputs !== signature) {
+    select.replaceChildren(...options.map((output) => new Option(output.label, output.id)));
+    select.dataset.outputs = signature;
+  }
+  select.value = audio?.outputId || '';
+  $('audio-help').textContent = !audio?.available
+    ? 'Rebuild the native addon on both laptops to enable audio routing.'
+    : windows
+      ? 'Choose an output, then start sharing from the Mac. Stop sharing before changing devices.'
+      : !audio.canCapture
+        ? 'Mac audio capture requires macOS 14.6 or later.'
+        : !next.packaged
+          ? 'For capture permissions, run the packaged Mac app built with npm run build. Select the Mac’s built-in speakers for the first test.'
+          : !audio.peerReady && next.status.phase === 'connected'
+            ? 'The other laptop has not announced audio support. Run the same current build on both laptops.'
+            : 'The Mac keeps playing locally. Allow System Audio Recording when prompted. Playback on Windows has a small delay.';
+}
+
+async function audioCommand(name, data) {
+  $('audio-error').hidden = true;
+  try {
+    const result = await api.command(name, data);
+    if (!result.ok) throw new Error(result.error);
+  } catch (error) {
+    $('audio-error').textContent = error.message;
+    $('audio-error').hidden = false;
+  }
 }
 
 function cursorSettingsFromForm() {
@@ -390,6 +441,10 @@ $('cursor-mode').addEventListener('click', () => command(details?.cursorSettings
 $('toggle-ownership').addEventListener('click', () => command('cursor-toggle-ownership'));
 $('update-check').addEventListener('click', () => command('update-check'));
 $('update-install').addEventListener('click', () => command('update-install'));
+$('audio-start').addEventListener('click', () => audioCommand('audio-start'));
+$('audio-stop').addEventListener('click', () => audioCommand('audio-stop'));
+$('audio-refresh').addEventListener('click', () => audioCommand('audio-outputs'));
+$('audio-output').addEventListener('change', () => audioCommand('audio-output', { id: $('audio-output').value }));
 if (/Mac/.test(navigator.platform)) for (const id of ['shortcut', 'unlink-shortcut', 'ownership-shortcut']) $(id).textContent = '⌘';
 api.onDetails(render);
 api.bootstrap().then(render);

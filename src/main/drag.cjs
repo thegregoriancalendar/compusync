@@ -1,6 +1,8 @@
 'use strict';
 
 const { EventEmitter } = require('node:events');
+const { nativeWindowId } = require('./adapters/chrome/capture.cjs');
+const { destinationGeometry, seamAnchors } = require('./window-geometry.cjs');
 
 const ARM_DISTANCE_VU = 200;
 const MIN_WINDOW = Object.freeze({ w: 200, h: 150 });
@@ -23,12 +25,41 @@ function crossedFraction(rect, targetPlacement) {
   return area > 0 ? intersectionArea(rect, targetPlacement) / area : 0;
 }
 
+function renderedGeometry(rect, source, target, referenceRect = rect) {
+  const physical = destinationGeometry(rect, source, target, referenceRect);
+  const anchors = seamAnchors(source, target, referenceRect);
+  const screen = anchors.targetDisplay || { w: target.size.w, h: target.size.h };
+  // Preserve measured physical size whenever it fits. A window larger than
+  // the receiving monitor has to shrink; leave a margin instead of filling it.
+  const fit = Math.min(1, screen.w * 0.9 / physical.w, screen.h * 0.9 / physical.h);
+  return { x: anchors.target.x + (physical.x - anchors.target.x) * fit,
+    y: anchors.target.y + (physical.y - anchors.target.y) * fit,
+    w: physical.w * fit, h: physical.h * fit };
+}
+
+function cursorDeltaInSource(previous, current, target, scale) {
+  const delta = { x: current.x - previous.x, y: current.y - previous.y };
+  let enter = 0, leave = 1;
+  for (const axis of ['x', 'y']) {
+    const minimum = target.origin[axis], maximum = minimum + target.size[axis === 'x' ? 'w' : 'h'];
+    if (delta[axis] === 0) {
+      if (previous[axis] < minimum || previous[axis] > maximum) { leave = 0; break; }
+    } else {
+      const first = (minimum - previous[axis]) / delta[axis], second = (maximum - previous[axis]) / delta[axis];
+      enter = Math.max(enter, Math.min(first, second));
+      leave = Math.min(leave, Math.max(first, second));
+    }
+  }
+  const inTarget = Math.max(0, leave - enter);
+  const gain = 1 + inTarget * (1 / scale - 1);
+  return { x: delta.x * gain, y: delta.y * gain };
+}
+
 function dropWinner(rect, source, target) {
   const sourceArea = intersectionArea(rect, source);
-  const targetArea = intersectionArea(rect, target);
-  // Count the portions the user can actually see. Offscreen pixels of a
-  // large-monitor window must not make a smaller laptop impossible to win.
-  return targetArea > 0 && targetArea >= sourceArea ? 'destination' : 'source';
+  const targetArea = intersectionArea(renderedGeometry(rect, source, target), target);
+  if (sourceArea > 0 && targetArea > 0) return null;
+  return targetArea > 0 ? 'destination' : 'source';
 }
 
 function fitToPlacement(rect, placement) {
@@ -111,6 +142,7 @@ class DragController extends EventEmitter {
     this.waitMs = Number.isFinite(options.waitMs) ? options.waitMs : PREPARE_WAIT_MS;
     this.reverseKeepaliveMs = Number.isFinite(options.reverseKeepaliveMs) ? options.reverseKeepaliveMs : REVERSE_KEEPALIVE_MS;
     this.active = null;
+    this.parked = new Map();
     this.nonCrossingHintShown = false;
     this.lateReadyIds = new Set();
   }
@@ -121,14 +153,17 @@ class DragController extends EventEmitter {
     const source = placements.find((placement) => placement.machineId === this.machineId);
     const target = targetForSource(source, placements);
     if (!source || !target) return false;
+    const parked = this.parkedForWindow(window);
+    if (parked) this.parked.delete(parked.descriptor.id);
     this.active = {
       role: 'source', phase: 'tracking', window, adapter: this.adapterForWindow(window), source, target,
       startedAt: this.now(), startGeometry: { ...geometryVU }, geometry: { ...geometryVU }, previous: { ...geometryVU },
       cursorVU: { ...cursorVU }, grabOffsetVU: { x: cursorVU.x - geometryVU.x, y: cursorVU.y - geometryVU.y },
       descriptor: null, ready: false, aborted: false, winner: null, committed: false,
       straddleStarted: false, instant: excludedState(window), positionSequence: 0,
+      resumeDescriptor: parked?.descriptor || null, dropped: false,
     };
-    this.setDragging(true);
+    this.setDragging(true, { role: 'source' });
     this.#lifecycle(this.active, 'started');
     this.emit('start', this.snapshot());
     return true;
@@ -138,6 +173,7 @@ class DragController extends EventEmitter {
     const state = this.active;
     if (!state || state.role !== 'source' || !point(cursorVU)) return false;
     const previous = state.geometry;
+    const previousCursor = state.cursorVU;
     state.previous = { ...previous };
     state.cursorVU = { ...cursorVU };
     state.geometry = {
@@ -145,6 +181,15 @@ class DragController extends EventEmitter {
       w: this.#validGeometry(geometryVU) ? geometryVU.w : state.geometry.w,
       h: this.#validGeometry(geometryVU) ? geometryVU.h : state.geometry.h,
     };
+    if (state.descriptor && !state.instant) {
+      // Cursor ownership uses each desktop's native logical coordinates.
+      // Convert deltas on the peer back to the original window's units so
+      // the smaller physical rendering stays attached to the local pointer.
+      const rendered = renderedGeometry(state.descriptor.geometryVU, state.source, state.target, state.descriptor.geometryVU);
+      const delta = cursorDeltaInSource(previousCursor, cursorVU, state.target, rendered.w / state.descriptor.geometryVU.w);
+      state.geometry.x = previous.x + delta.x;
+      state.geometry.y = previous.y + delta.y;
+    }
 
     if (state.phase === 'tracking') {
       if (!state.adapter || state.geometry.w < MIN_WINDOW.w || state.geometry.h < MIN_WINDOW.h) {
@@ -154,8 +199,8 @@ class DragController extends EventEmitter {
         }
         return true;
       }
-      if (originDistanceToEdge(state.geometry, state.source, state.target) > ARM_DISTANCE_VU
-        || !motionTowardEdge(previous, state.geometry, state.source, state.target)) return true;
+      if (!state.resumeDescriptor && (originDistanceToEdge(state.geometry, state.source, state.target) > ARM_DISTANCE_VU
+        || !motionTowardEdge(previous, state.geometry, state.source, state.target))) return true;
       await this.#arm(state);
     }
 
@@ -165,10 +210,20 @@ class DragController extends EventEmitter {
 
   async end() {
     const state = this.active;
-    if (!state || state.role !== 'source' || state.winner) return false;
+    if (!state || state.role !== 'source' || state.dropped || state.winner) return false;
     if (!state.descriptor) { this.#clear(); return true; }
-    state.winner = state.instant ? 'destination' : dropWinner(state.geometry, state.source, state.target);
+    state.dropped = true;
+    const targetRect = renderedGeometry(state.geometry, state.source, state.target, state.descriptor.geometryVU);
+    const sourceVisible = intersectionArea(state.geometry, state.source) > 0;
+    const targetVisible = intersectionArea(targetRect, state.target) > 0;
+    state.winner = state.instant ? 'destination' : sourceVisible && targetVisible ? null : targetVisible ? 'destination' : 'source';
     this.#setPhase(state, 'dropping', 'mouse-up', { winner: state.winner });
+    if (!state.winner) {
+      if (!this.send({ type: 'window.pause', id: state.descriptor.id,
+        originVU: { x: state.geometry.x, y: state.geometry.y } })) return this.abort('pause-send-failed');
+      this.#park(state);
+      return true;
+    }
     if (state.winner === 'source') {
       try {
         await state.adapter.position(state.window, clampOriginToPlacement(state.geometry, state.source));
@@ -206,6 +261,12 @@ class DragController extends EventEmitter {
   async receive(message) {
     if (!message || typeof message.type !== 'string') return false;
     if (message.type === 'window.offer') return this.#receiveOffer(message.descriptor);
+    if (message.type === 'window.ready' && this.parked.has(message.id)) return true;
+    if (message.type === 'window.abort' && this.parked.has(message.id)) {
+      await this.#restoreParked(this.parked.get(message.id));
+      this.parked.delete(message.id);
+      return true;
+    }
     const state = this.active;
     if ((!state || state.descriptor?.id !== message.id) && message.type === 'window.ready' && this.lateReadyIds.delete(message.id)) {
       this.send({ type: 'window.abort', id: message.id, reason: 'late-ready' });
@@ -233,8 +294,21 @@ class DragController extends EventEmitter {
     if (message.type === 'window.position' && state.role === 'destination') {
       return this.#receivePosition(message.originVU, message.sequence);
     }
+    if (message.type === 'window.pause' && state.role === 'destination' && point(message.originVU)) {
+      if (!state.ready) {
+        this.setDragging(false);
+        state.pendingPause = { ...message.originVU };
+        state.originVU = { ...message.originVU };
+        state.positionReceived = true;
+        if (state.reverseTimer) { this.clearTimer(state.reverseTimer); state.reverseTimer = null; }
+        if (state.handle) await this.#queueDestinationPosition(state);
+        return true;
+      }
+      return this.#receivePause(message.originVU);
+    }
     if (message.type === 'window.commit' && state.role === 'destination') {
       if (!['source', 'destination'].includes(message.winner)) return false;
+      if (point(message.originVU)) state.originVU = { ...message.originVU };
       if (!state.ready) {
         state.pendingWinner = message.winner;
         this.#lifecycle(state, 'commit-queued', { winner: message.winner });
@@ -266,11 +340,14 @@ class DragController extends EventEmitter {
     state.resolveReady = null;
     if (state.reverseTimer) this.clearTimer(state.reverseTimer);
     if (state.role === 'source' && state.descriptor && !state.ready) this.#rememberLateReady(state.descriptor.id);
-    if (notify && state.descriptor) this.send({ type: 'window.abort', id: state.descriptor.id, reason });
+    const offered = state.descriptor || state.resumeDescriptor;
+    if (notify && offered) this.send({ type: 'window.abort', id: offered.id, reason });
     try {
       if (state.role === 'source') {
         try {
-          await state.adapter?.position?.(state.window, { x: state.startGeometry.x, y: state.startGeometry.y });
+          await state.adapter?.position?.(state.window, state.resumeDescriptor
+            ? clampOriginToPlacement(state.startGeometry, state.source)
+            : { x: state.startGeometry.x, y: state.startGeometry.y });
           await state.adapter?.focus?.(state.window);
         } catch {}
       } else if (state.handle) {
@@ -284,7 +361,16 @@ class DragController extends EventEmitter {
     return true;
   }
 
-  restoreOnScreen(reason = 'recovery') { return this.abort(reason); }
+  async restoreOnScreen(reason = 'recovery') {
+    await this.abort(reason);
+    for (const parked of this.parked.values()) await this.#restoreParked(parked);
+    this.parked.clear();
+  }
+
+  parkedForWindow(window) {
+    const id = nativeWindowId(window);
+    return id == null ? null : [...this.parked.values()].find((parked) => String(nativeWindowId(parked.handle)) === String(id));
+  }
 
   snapshot() {
     if (!this.active) return null;
@@ -317,6 +403,7 @@ class DragController extends EventEmitter {
         }
       }
       const descriptor = await state.adapter.capture(state.window, state.geometry);
+      if (state.resumeDescriptor) descriptor.id = state.resumeDescriptor.id;
       this.#timing(state, 'capture', captureStartedAt, { status: 'ok' });
       if (this.active !== state || state.aborted) return;
       state.descriptor = descriptor;
@@ -361,6 +448,21 @@ class DragController extends EventEmitter {
   }
 
   async #receiveOffer(descriptor) {
+    if (this.active?.role === 'destination' && this.active.descriptor.id === descriptor?.id && this.active.pendingPause) {
+      // Re-grabbing a split can race its original tab restoration. Finish
+      // preparing the same native handle under the new drag's geometry.
+      const state = this.active;
+      state.descriptor = descriptor;
+      state.pendingPause = null;
+      state.pendingWinner = null;
+      state.originVU = { x: descriptor.geometryVU.x, y: descriptor.geometryVU.y };
+      state.lastPositionSequence = -1;
+      state.positionReceived = true;
+      this.setDragging(true, { role: 'destination' });
+      this.#lifecycle(state, 'split-resumed');
+      if (state.handle) await this.#queueDestinationPosition(state);
+      return true;
+    }
     if (this.active) {
       this.send({ type: 'window.abort', id: descriptor?.id || 'busy-offer', reason: 'busy' });
       this.emit('lifecycle', { type: 'drag.lifecycle', event: 'offer-rejected', reason: 'busy',
@@ -383,12 +485,16 @@ class DragController extends EventEmitter {
       instant: excludedState(descriptor), hasCrossed: false, pendingWinner: null,
       positionReceived: false, lastPositionSequence: -1, pendingPosition: null, positionDrain: null,
     };
-    this.setDragging(true);
+    this.setDragging(true, { role: 'destination' });
     this.#lifecycle(state, 'offer-received', { instant: state.instant });
     const prepareStartedAt = this.now();
     try {
-      const preparedHandle = await adapter.prepare(descriptor, {
-        originVU: offscreenOrigin(descriptor.geometryVU, source, target), targetPlacement: target,
+      const parked = this.parked.get(descriptor.id);
+      this.parked.delete(descriptor.id);
+      const geometryVU = renderedGeometry(descriptor.geometryVU, source, target);
+      const preparedHandle = parked ? { ...parked.handle, geometryVU, placement: target }
+        : await adapter.prepare({ ...descriptor, geometryVU }, {
+        originVU: offscreenOrigin(geometryVU, source, target), targetPlacement: target,
         // Adapters may expose the real native window as soon as it exists,
         // while slower tab/history restoration continues. This keeps the
         // straddled copy attached to the pointer without claiming readiness
@@ -416,7 +522,8 @@ class DragController extends EventEmitter {
       this.#setPhase(state, 'ready', 'ready');
       if (!this.send({ type: 'window.ready', id: descriptor.id })) throw new Error('ready-send-failed');
       const pendingWinner = state.pendingWinner;
-      if (pendingWinner) return this.#receiveCommit(pendingWinner);
+      if (pendingWinner) return await this.#receiveCommit(pendingWinner);
+      if (state.pendingPause) return await this.#receivePause(state.pendingPause);
       return true;
     } catch (error) {
       if (state.handle) { try { await adapter.close(state.handle); } catch {} }
@@ -435,12 +542,13 @@ class DragController extends EventEmitter {
     const state = this.active;
     if (!state || state.role !== 'destination' || !point(originVU) || state.instant
       || !Number.isSafeInteger(sequence) || sequence < 0) return false;
-    if (['committing', 'committed'].includes(state.phase)) return true;
+    if (state.pendingPause || ['pausing', 'committing', 'committed'].includes(state.phase)) return true;
     if (sequence <= state.lastPositionSequence) return true;
     state.lastPositionSequence = sequence;
     state.originVU = { ...originVU };
     state.positionReceived = true;
-    const fraction = crossedFraction({ ...state.descriptor.geometryVU, ...state.originVU }, state.target);
+    const fraction = crossedFraction(renderedGeometry({ ...state.descriptor.geometryVU, ...state.originVU },
+      state.source, state.target, state.descriptor.geometryVU), state.target);
     if (fraction > 0) {
       state.hasCrossed = true;
       if (state.reverseTimer) {
@@ -465,7 +573,9 @@ class DragController extends EventEmitter {
       while (this.active === state && state.handle && state.pendingPosition) {
         const originVU = state.pendingPosition;
         state.pendingPosition = null;
-        await state.adapter.position(state.handle, originVU);
+        const rect = renderedGeometry({ ...state.descriptor.geometryVU, ...originVU }, state.source, state.target, state.descriptor.geometryVU);
+        state.handle = { ...state.handle, geometryVU: rect, placement: state.target };
+        await state.adapter.position(state.handle, { x: rect.x, y: rect.y });
         if (this.active === state) this.emit('position', this.snapshot());
       }
       return true;
@@ -502,7 +612,8 @@ class DragController extends EventEmitter {
       if (this.active !== state || state.aborted) return false;
       state.pendingPosition = null;
       if (winner === 'destination') {
-        const rect = fitToPlacement({ ...state.descriptor.geometryVU, ...state.originVU }, state.target);
+        const rect = fitToPlacement(renderedGeometry({ ...state.descriptor.geometryVU, ...state.originVU },
+          state.source, state.target, state.descriptor.geometryVU), state.target);
         state.handle = { ...state.handle, geometryVU: rect };
         await state.adapter.position(state.handle, clampOriginToPlacement(rect, state.target));
         await state.adapter.focus(state.handle);
@@ -518,10 +629,51 @@ class DragController extends EventEmitter {
     } catch (error) { return this.abort(this.#reason(error, 'destination-commit-failed')); }
   }
 
+  async #receivePause(originVU) {
+    const state = this.active;
+    if (!state?.ready || state.role !== 'destination') return false;
+    if (state.reverseTimer) { this.clearTimer(state.reverseTimer); state.reverseTimer = null; }
+    // The reliable pause carries the exact final origin; the last realtime
+    // position is allowed to be lost or to arrive after mouse release.
+    this.#setPhase(state, 'pausing', 'pause-received');
+    if (state.positionDrain) await state.positionDrain;
+    if (this.active !== state || state.aborted) return false;
+    state.pendingPosition = null;
+    state.originVU = { ...originVU };
+    const rect = renderedGeometry({ ...state.descriptor.geometryVU, ...originVU }, state.source, state.target, state.descriptor.geometryVU);
+    state.handle = { ...state.handle, geometryVU: rect, placement: state.target };
+    try { await state.adapter.position(state.handle, { x: rect.x, y: rect.y }); }
+    catch (error) { return this.abort(this.#reason(error, 'destination-pause-failed')); }
+    if (this.active !== state || state.aborted) return false;
+    this.#park(state);
+    return true;
+  }
+
+  #park(state) {
+    if (state.reverseTimer) { this.clearTimer(state.reverseTimer); state.reverseTimer = null; }
+    const geometryVU = state.role === 'source' ? state.geometry : state.handle.geometryVU;
+    const handle = state.role === 'source' ? state.window : state.handle;
+    this.parked.set(state.descriptor.id, { descriptor: state.descriptor, adapter: state.adapter,
+      handle: { ...handle, geometryVU: { ...geometryVU } }, geometryVU: { ...geometryVU },
+      placement: state.role === 'source' ? state.source : state.target });
+    this.#setPhase(state, 'split', 'split-retained');
+    this.emit('paused', this.snapshot());
+    this.#clear();
+  }
+
+  async #restoreParked(parked) {
+    try {
+      const placement = this.getPlacements().find((candidate) => candidate.machineId === this.machineId) || parked.placement;
+      const rect = fitToPlacement(parked.geometryVU, placement);
+      await parked.adapter.position({ ...parked.handle, geometryVU: rect }, clampOriginToPlacement(rect, placement));
+    } catch { /* The user may have already closed a parked Chrome copy. */ }
+  }
+
   #sendCommit(state) {
     if (this.active !== state || state.aborted || state.phase === 'committing') return false;
     if (!state.winner) state.winner = 'destination';
-    if (!this.send({ type: 'window.commit', id: state.descriptor.id, winner: state.winner })) {
+    if (!this.send({ type: 'window.commit', id: state.descriptor.id, winner: state.winner,
+      originVU: { x: state.geometry.x, y: state.geometry.y } })) {
       void this.abort('commit-send-failed');
       return false;
     }
@@ -596,6 +748,6 @@ class DragController extends EventEmitter {
 
 module.exports = {
   ARM_DISTANCE_VU, MIN_WINDOW, PREPARE_WAIT_MS, REVERSE_KEEPALIVE_MS,
-  intersectionArea, crossedFraction, dropWinner, fitToPlacement, clampOriginToPlacement, offscreenOrigin,
+  intersectionArea, crossedFraction, dropWinner, renderedGeometry, cursorDeltaInSource, fitToPlacement, clampOriginToPlacement, offscreenOrigin,
   targetForSource, motionTowardEdge, originDistanceToEdge, DragController,
 };

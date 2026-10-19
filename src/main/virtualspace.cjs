@@ -11,6 +11,23 @@ const MIN_SHARED_EDGE_RATIO = .2;
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);
 const clamp = (value, minimum, maximum) => Math.min(maximum, Math.max(minimum, value));
 
+function normalizePhysicalDisplays(value) {
+  if (!Array.isArray(value) || !value.length || value.length > 8) return null;
+  const displays = [];
+  for (const display of value) {
+    if (typeof display?.id !== 'string' || !display.id.length || display.id.length > 100
+      || ![display.origin?.x, display.origin?.y, display.size?.w, display.size?.h].every(finite)
+      || Math.abs(display.origin.x) > MAX_DIMENSION_VU || Math.abs(display.origin.y) > MAX_DIMENSION_VU
+      || display.size.w <= 0 || display.size.h <= 0 || display.size.w > MAX_DIMENSION_VU || display.size.h > MAX_DIMENSION_VU) return null;
+    const mm = display.physicalSizeMm;
+    if (mm !== undefined && (![mm?.w, mm?.h].every(finite)
+      || mm.w < 10 || mm.h < 10 || mm.w > 20000 || mm.h > 20000)) return null;
+    displays.push({ id: display.id, origin: { x: display.origin.x, y: display.origin.y }, size: { w: display.size.w, h: display.size.h },
+      ...(mm ? { physicalSizeMm: { w: mm.w, h: mm.h } } : {}) });
+  }
+  return displays;
+}
+
 function normalizePlacement(value) {
   if (!value || typeof value !== 'object' || typeof value.machineId !== 'string'
     || !value.machineId.length || value.machineId.length > 80
@@ -20,12 +37,14 @@ function normalizePlacement(value) {
     || value.size.w <= 0 || value.size.h <= 0
     || value.size.w > MAX_DIMENSION_VU || value.size.h > MAX_DIMENSION_VU
     || !finite(value.scale) || value.scale < MIN_SCALE || value.scale > MAX_SCALE) return null;
+  const physicalDisplays = normalizePhysicalDisplays(value.physicalDisplays);
   return {
     machineId: value.machineId,
     ...(value.platform === 'darwin' || value.platform === 'win32' ? { platform: value.platform } : {}),
     origin: { x: value.origin.x, y: value.origin.y },
     size: { w: value.size.w, h: value.size.h },
     scale: value.scale,
+    ...(physicalDisplays ? { physicalDisplays } : {}),
   };
 }
 
@@ -211,6 +230,7 @@ module.exports = {
   POSITION_EPSILON,
   CROSSING_EDGES,
   normalizePlacement,
+  normalizePhysicalDisplays,
   rectFor,
   toLocal,
   toVirtual,

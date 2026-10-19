@@ -1,5 +1,7 @@
 'use strict';
 
+const { normalizePhysicalDisplays } = require('../main/virtualspace.cjs');
+
 const EDGES = ['left', 'right', 'top', 'bottom'];
 const TOP_BAR_HEIGHT = 36;
 const MIN_LOGICAL_WIDTH = 360;
@@ -35,7 +37,9 @@ function normalizeDesktop(desktop) {
     || desktop.widthVU < 1 || desktop.heightVU < 1
     || desktop.widthVU > MAX_VIRTUAL_COORDINATE || desktop.heightVU > MAX_VIRTUAL_COORDINATE
     || !finite(desktop.scale) || desktop.scale < .25 || desktop.scale > 8) return false;
-  return { widthVU: desktop.widthVU, heightVU: desktop.heightVU, scale: desktop.scale };
+  const physicalDisplays = normalizePhysicalDisplays(desktop.physicalDisplays);
+  return { widthVU: desktop.widthVU, heightVU: desktop.heightVU, scale: desktop.scale,
+    ...(physicalDisplays ? { physicalDisplays } : {}) };
 }
 
 // Layout reports use Electron DIP coordinates. More than one display may be

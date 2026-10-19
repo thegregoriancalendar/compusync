@@ -83,6 +83,7 @@ class CursorController extends EventEmitter {
       : { x: 0, y: 0 };
     this.linked = options.linked !== false;
     this.dragging = false;
+    this.dragRole = null;
     this.started = false;
     this.frameTimer = null;
     this.pendingLocal = { dx: 0, dy: 0 };
@@ -205,14 +206,17 @@ class CursorController extends EventEmitter {
     return this.linked;
   }
 
-  setDragging(dragging) {
+  setDragging(dragging, options = {}) {
     const next = Boolean(dragging);
-    if (next && !this.dragging && (this.syntheticButtons & BUTTON_BITS.left)) {
-      // If the cursor crossed before the reliable window offer arrived, tear
-      // down the briefly synthesized hold as soon as managed drag begins.
+    const role = next ? (options.role === 'source' ? 'source' : 'destination') : null;
+    if (next && role === 'destination' && (this.syntheticButtons & BUTTON_BITS.left)) {
+      // A late destination offer must end a briefly injected second drag.
+      // On the source, that same hold is what drives the user's native window:
+      // detecting its movement must never turn into a premature mouse-up.
       this.#synthesizeButton('left', BUTTON_BITS.left, false);
     }
     this.dragging = next;
+    this.dragRole = role;
     if (this.dragging) this.edgePressure = null;
   }
 
@@ -282,7 +286,7 @@ class CursorController extends EventEmitter {
         // Injecting the transported left hold into the destination OS starts
         // a second AppKit/Win32 drag that fights positioning and can trigger
         // Snap. Preserve logical state but leave that button native-free.
-        if (this.dragging && message.button === 'left') {
+        if (this.dragging && this.dragRole !== 'source' && message.button === 'left') {
           this.syntheticButtons &= ~bit;
           return true;
         }

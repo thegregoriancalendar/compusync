@@ -12,6 +12,8 @@ const { EDGES } = require('./core/state.cjs');
 const { cursorSettingsFromSaved, validateCursorSettings } = require('./core/cursor-preferences.cjs');
 const { SharedInputRuntime } = require('./main/runtime.cjs');
 const { ClipboardSync } = require('./main/clipboard-sync.cjs');
+const { AudioRouter } = require('./main/audio-router.cjs');
+const { RustAudioEngine } = require('./main/audio-engine.cjs');
 const { WindowHandoffRuntime } = require('./main/window-runtime.cjs');
 const { SeamOverlay } = require('./main/seam-overlay.cjs');
 const { ChromeAdapterRuntime } = require('./main/adapters/chrome/runtime.cjs');
@@ -20,7 +22,8 @@ const { runMacPermissionPreflight } = require('./main/macos-permissions.cjs');
 const { createUpdateService } = require('./main/updates.cjs');
 const { MessagesService } = require('./messages/service.cjs');
 const { MessagesMacBridge } = require('./messages/mac-bridge.cjs');
-const { createNativeAdapter } = require('../native/index.cjs');
+const { createNativeAdapter, loadBinding } = require('../native/index.cjs');
+const { physicalDisplaysFromMetrics } = require('./main/window-geometry.cjs');
 const { autoUpdater } = require('electron-updater');
 
 if (process.env.COMPUSYNC_PROFILE) {
@@ -33,6 +36,7 @@ const hasLock = app.requestSingleInstanceLock();
 if (!hasLock) app.quit();
 
 let settings, messagesWindow, tray, sync, inputRuntime, windowRuntime, clipboardSync, messagesService, seamOverlay, nativeInput, updateService, config;
+let audioRouter;
 let quitting = false;
 let changingSession = false;
 let backgroundLaunch = false;
@@ -85,6 +89,7 @@ function readConfig() {
     chromeExtensionSetupPrompted: Boolean(saved.chromeExtensionSetupPrompted),
     macPermissionsPromptedV3: Boolean(saved.macPermissionsPromptedV3),
     clipboardSync: saved.clipboardSync !== false,
+    audioOutputId: typeof saved.audioOutputId === 'string' && saved.audioOutputId.length <= 256 ? saved.audioOutputId : '',
     cursorSettings: cursorSettingsFromSaved(saved.cursorSettings),
     dismissedNotices: Array.isArray(saved.dismissedNotices)
       ? saved.dismissedNotices.filter((id) => typeof id === 'string' && id.length <= 100).slice(0, 100) : [],
@@ -138,6 +143,10 @@ function localLayout() {
       heightVU: nativeSpace.height * nativeSpace.scale / scale,
       scale,
     };
+    if (desktop) {
+      try { desktop.physicalDisplays = physicalDisplaysFromMetrics(nativeInput.displayMetrics(), nativeSpace, scale); }
+      catch { /* Missing physical measurements preserve the existing logical geometry. */ }
+    }
   } catch { /* Native-unavailable development builds keep the Electron layout. */ }
   return {
     revision: ++layoutRevision, edge: config.edge, platform: process.platform,
@@ -165,6 +174,7 @@ function details() {
   return {
     id: config.id, name: config.name, platform: process.platform, edge: config.edge, autoLaunch: config.autoLaunch,
     clipboardSync: config.clipboardSync,
+    audio: audioRouter?.state() || null,
     cursorSettings: {
       ...config.cursorSettings,
       linked: inputRuntime ? inputRuntime.cursor.linked : false,
@@ -442,6 +452,8 @@ function stopInputRuntime(reason = 'session-stop') {
 
 async function startSession() {
   stopInputRuntime('session-restart');
+  audioRouter?.stop();
+  audioRouter = null;
   clipboardSync?.stop();
   clipboardSync = null;
   messagesService?.stop();
@@ -449,6 +461,13 @@ async function startSession() {
   if (sync) await sync.stop();
   const layout = localLayout();
   sync = new Session({ ...config, layout, startClosed: backgroundLaunch });
+  audioRouter = new AudioRouter({
+    session: sync,
+    engine: new RustAudioEngine({ binding: loadBinding().binding, packaged: app.isPackaged }),
+    outputId: config.audioOutputId,
+  });
+  audioRouter.on('state', refreshStatus);
+  audioRouter.start();
   clipboardSync = new ClipboardSync({
     session: sync, clipboard, role: config.role, enabled: config.clipboardSync,
     logger: applicationLogger,
@@ -539,6 +558,16 @@ function setupIpc() {
         saveConfig();
         sync.action({ type: 'layout', layout: localLayout() });
         refreshStatus();
+      } else if (command === 'audio-start') {
+        audioRouter.startRoute();
+      } else if (command === 'audio-stop') {
+        audioRouter.stopRoute();
+      } else if (command === 'audio-outputs') {
+        await audioRouter.refreshOutputs();
+      } else if (command === 'audio-output') {
+        await audioRouter.setOutput(data?.id);
+        config.audioOutputId = audioRouter.outputId;
+        saveConfig();
       } else if (command === 'cursor-link') {
         if (sync?.phase !== 'connected') throw new Error('The saved pairing is not connected yet. Keep Compusync open on both laptops.');
         const runtime = ensureInputRuntime();
@@ -597,6 +626,8 @@ app.on('before-quit', (event) => {
   clearTimeout(layoutTimer);
   cancelOwnedDrag();
   stopInputRuntime('process-exit');
+  audioRouter?.stop();
+  audioRouter = null;
   clipboardSync?.stop();
   clipboardSync = null;
   messagesService?.stop();
@@ -640,6 +671,7 @@ if (hasLock) app.whenReady().then(async () => {
   electronSession.defaultSession.setPermissionRequestHandler((contents, permission, callback) => callback(permissions(contents, permission)));
   if (process.platform !== 'darwin') Menu.setApplicationMenu(null);
   setupIpc();
+  powerMonitor.on('suspend', () => audioRouter?.stopRoute('Audio sharing stopped while this laptop was sleeping. Start sharing again when both laptops are awake.'));
   // The v1 shared surface is retired. Do not create its BrowserWindow, even
   // hidden, because state updates could otherwise make it visible later.
   seamOverlay = new SeamOverlay({

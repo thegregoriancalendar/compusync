@@ -25,7 +25,7 @@ function runtimeFixture(options = {}) {
     placements: [placement, peer], initialPosition: { x: 800, y: 150 }, send: () => true })
     : { linked: true, placements: [placement, peer], virtualCursor: { x: 800, y: 150 }, placementFor: () => placement };
   input.send = (message) => { sent.push(message); return true; };
-  input.setDragging = (dragging) => input.cursor.setDragging?.(dragging);
+  input.setDragging = (dragging, options) => input.cursor.setDragging?.(dragging, options);
   input.setWindowController = (value) => { input.windowController = value; };
   input.watchdog = { trigger() {} };
   const positions = [];
@@ -145,10 +145,12 @@ test('physical mouse-up waits for an in-flight capture instead of discarding the
     geometryVU: { x: 750, y: 100, w: 400, h: 300 }, state: 'normal',
     payload: { activeIdx: 0, tabs: [{ url: 'https://example.com', title: '', pinned: false, index: 0 }] },
   });
+  await polling;
+  await fixture.runtime.drag.receive({ type: 'window.ready', id: 'window-stable' });
   await Promise.all([polling, ending]);
 
   assert.equal(fixture.sent.filter(({ type }) => type === 'window.offer').length, 1);
-  assert.deepEqual(fixture.sent.at(-1), { type: 'window.commit', id: 'window-stable', winner: 'source' });
+  assert.deepEqual(fixture.sent.at(-1), { type: 'window.pause', id: 'window-stable', originVU: { x: 750, y: 100 } });
   await fixture.runtime.stop();
 });
 
@@ -162,7 +164,7 @@ test('a vanished source window commits the destination survivor instead of abort
   fixture.setWindow(null);
   assert.equal(await fixture.runtime.poll(), false);
   assert.deepEqual(fixture.sent.at(-1), {
-    type: 'window.commit', id: 'window-stable', winner: 'destination',
+    type: 'window.commit', id: 'window-stable', winner: 'destination', originVU: { x: 910, y: 100 },
   });
   assert.equal(fixture.sent.some(({ type }) => type === 'window.abort'), false);
   assert.equal(fixture.runtime.drag.active.phase, 'committing');
@@ -253,6 +255,54 @@ test('a drag restored from maximized captures the restored size and grab offset'
   await runtime.stop();
 });
 
+test('a split release ends input capture and the recovery guard while leaving both copies available to resume', async () => {
+  const fixture = runtimeFixture({ realCursor: true });
+  const { runtime, input, nativeCalls } = fixture;
+  input.cursor.localButton('left', true);
+  await runtime.handleMoveStart('hwnd');
+  input.cursor.virtualCursor = { x: 900, y: 150 };
+  await runtime.poll();
+  await runtime.drag.receive({ type: 'window.ready', id: 'window-stable' });
+  await runtime.handleMoveEnd('hwnd', { physical: true });
+  assert.equal(runtime.drag.active, null);
+  assert.equal(runtime.drag.parked.size, 1);
+  assert.equal(input.cursor.dragging, false);
+  assert.equal(runtime.pollTimer, null);
+  assert.equal(runtime.sourceWindowId, null);
+  assert.equal(nativeCalls.filter(([action]) => action === 'release').length, 1);
+  fixture.setWindow({ id: 'hwnd', processName: 'chrome.exe', bounds: { x: 800, y: 100, width: 400, height: 300 } });
+  assert.equal(await runtime.handleMoveStart('hwnd'), true);
+  assert.equal(runtime.drag.active.resumeDescriptor.id, 'window-stable');
+  await runtime.stop();
+});
+
+test('detecting a Mac window drag driven by Windows keeps the native button held', async () => {
+  const fixture = runtimeFixture({ platformName: 'darwin', realCursor: true,
+    window: { id: 'hwnd', processName: 'Google Chrome', bounds: { x: 200, y: 100, width: 400, height: 300 } } });
+  const { runtime, input, native } = fixture;
+  const injected = [];
+  native.synthesizeButton = (...args) => injected.push(args);
+  input.cursor.virtualCursor = { x: 300, y: 150 };
+  try {
+    input.cursor.receive({ type: 'cursor.button', button: 'left', down: true }, 'b');
+    assert.equal(await runtime.handleMoveStart('hwnd'), true);
+    assert.equal(input.cursor.dragRole, 'source');
+    // Continue moving and pause inside the Mac desktop, before any handoff.
+    input.cursor.receive({ type: 'cursor.delta', dx: 20, dy: 10 }, 'b');
+    input.cursor.flush();
+    await runtime.poll();
+    assert.equal(input.cursor.syntheticButtons, 1);
+    assert.deepEqual(injected, [['left', true]]);
+    input.cursor.receive({ type: 'cursor.button', button: 'left', down: false }, 'b');
+    assert.deepEqual(injected, [['left', true], ['left', false]]);
+    assert.equal(input.cursor.syntheticButtons, 0);
+    await runtime.handleMoveEnd('hwnd', { physical: true });
+    assert.equal(runtime.drag.active, null);
+  } finally {
+    await runtime.stop();
+  }
+});
+
 for (const platformName of ['windows', 'darwin']) {
   test(`a transported button release completes a managed ${platformName} source without a native drag-end`, async () => {
     const fixture = runtimeFixture({ platformName, realCursor: true });
@@ -270,9 +320,10 @@ for (const platformName of ['windows', 'darwin']) {
     injected.length = 0;
     input.cursor.receive({ type: 'cursor.button', button: 'left', down: false }, 'b');
     assert.equal(input.cursor.state().buttons, 0);
-    assert.deepEqual(injected, []);
-    // Cursor frames continue after release even though managed dragging
-    // deliberately suppresses native injection and its drag-end event.
+    // A source may release its original native hold; a peer-owned cursor
+    // needs no local injection. Both must complete without native drag-end.
+    assert.deepEqual(injected, input.cursor.isOwner() ? [['left', false]] : []);
+    // Cursor frames must finish the handoff even if native drag-end is absent.
     const cursorFrame = () => input.cursor.isOwner() ? input.cursor.flush()
       : input.cursor.receive({ type: 'cursor.position', x: 1100, y: 150 }, 'b');
     cursorFrame();
@@ -281,7 +332,7 @@ for (const platformName of ['windows', 'darwin']) {
     cursorFrame();
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(sent.filter(({ type }) => type === 'window.commit'), [
-      { type: 'window.commit', id: 'window-stable', winner: 'destination' },
+      { type: 'window.commit', id: 'window-stable', winner: 'destination', originVU: { x: 1000, y: 100 } },
     ]);
     await runtime.stop();
     assert.equal(input.cursor.listenerCount('position'), 0);

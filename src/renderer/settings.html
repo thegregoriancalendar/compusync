@@ -96,6 +96,27 @@
       <p class="small field-help">Edge resistance requires an extra push before crossing. It is automatically disabled during a drag.</p>
     </section>
 
+    <section class="card" aria-labelledby="audio-heading">
+      <div class="card-heading">
+        <div><h2 id="audio-heading">Audio manager</h2><p class="small">Play the Mac's current audio output on Windows too.</p></div>
+        <span id="audio-mode" class="mode-badge unlinked">Separate</span>
+      </div>
+      <p id="audio-status" class="small" role="status">Audio stays on each laptop.</p>
+      <div id="audio-windows-output" hidden>
+        <label for="audio-output">Windows playback device</label>
+        <div class="row">
+          <select id="audio-output"><option value="">Windows default output</option></select>
+          <button id="audio-refresh" type="button">Refresh devices</button>
+        </div>
+      </div>
+      <div class="row cursor-actions">
+        <button id="audio-start" class="primary" type="button" disabled>Play Mac audio on Windows</button>
+        <button id="audio-stop" type="button" disabled>Stop sharing audio</button>
+      </div>
+      <p id="audio-help" class="small">Start sharing from the Mac. Its sound keeps playing locally.</p>
+      <p id="audio-error" role="alert" hidden></p>
+    </section>
+
     <section class="card">
       <h2>Clipboard</h2>
       <label class="check"><input id="clipboard-sync" type="checkbox"> Sync copied text between laptops</label>

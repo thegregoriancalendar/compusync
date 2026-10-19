@@ -94,7 +94,7 @@ test('crossing math and seam-side offscreen prewarm are deterministic', () => {
     { x: 599, y: 100 });
 });
 
-test('a large-monitor window can commit to a smaller laptop even below half its original area', async () => {
+test('a partial drop of a large-monitor window keeps both halves on the smaller laptop and source', async () => {
   const screens = [
     { machineId: 'a', origin: { x: 0, y: 0 }, size: { w: 3000, h: 1800 }, scale: 1.25 },
     { machineId: 'b', origin: { x: -1200, y: 450 }, size: { w: 1200, h: 900 }, scale: 2 },
@@ -120,25 +120,24 @@ test('a large-monitor window can commit to a smaller laptop even below half its 
   assert.ok(crossedFraction(rect, screens[1]) < 0.5);
   for (const message of outbound.filter(({ type }) => type === 'window.position')) await destination.receive(message);
   await source.end();
-  const commit = outbound.find(({ type }) => type === 'window.commit');
-  assert.equal(commit.winner, 'destination');
-  await destination.receive(commit);
+  assert.equal(outbound.some(({ type }) => type === 'window.commit'), false);
+  const pause = outbound.find(({ type }) => type === 'window.pause');
+  await destination.receive(pause);
   assert.equal(destinationLog.some(([type]) => type === 'close'), false);
-  assert.equal(destinationLog.at(-1)[0], 'focus');
-  assert.equal(positionedHandles.at(-1).geometryVU.w, 1200);
-  assert.equal(positionedHandles.at(-1).geometryVU.h, 800);
-  await source.receive(replies.find(({ type }) => type === 'window.committed'));
-  assert.equal(sourceLog.at(-1)[0], 'close');
+  assert.equal(destination.parked.size, 1);
+  assert.equal(source.parked.size, 1);
+  assert.equal(sourceLog.some(([type]) => type === 'close'), false);
 });
 
-test('a drop before the midpoint retains the source and closes only the prepared copy', async () => {
+test('a partial drop before the midpoint keeps the prepared copy too', async () => {
   const setup = sourceController();
   await armSource(setup);
   await setup.drag.receive({ type: 'window.ready', id: 'stable-window-id' });
   await setup.drag.frame({ cursorVU: { x: 890, y: 180 } });
   await setup.drag.end();
-  assert.equal(setup.sent.find(({ type }) => type === 'window.commit').winner, 'source');
-  await setup.drag.receive({ type: 'window.committed', id: 'stable-window-id' });
+  assert.equal(setup.sent.some(({ type }) => type === 'window.commit'), false);
+  assert.equal(setup.sent.at(-1).type, 'window.pause');
+  assert.equal(setup.drag.parked.size, 1);
   assert.equal(setup.log.some(([type]) => type === 'close'), false);
 });
 
@@ -169,6 +168,7 @@ test('fixed grab offset drives both copies from authoritative cursor and source 
   assert.deepEqual(setup.drag.active.geometry, { x: 850, y: 150, w: 400, h: 300 });
   assert.deepEqual(setup.sent.filter(({ type }) => type === 'window.position').at(-1).originVU, { x: 850, y: 150 });
   assert.deepEqual(setup.log.filter(([type]) => type === 'position').at(-1), ['position', 'source', { x: 850, y: 150 }]);
+  await setup.drag.frame({ cursorVU: { x: 1200, y: 230 } });
   await setup.drag.end();
   assert.equal(setup.log.some(([type]) => type === 'close'), false);
   await setup.drag.receive({ type: 'window.committed', id: 'stable-window-id' });
@@ -236,9 +236,10 @@ test('destination positions an early native handle while full prepare remains in
   assert.deepEqual(sent.at(-1), { type: 'window.ready', id: 'stable-window-id' });
 });
 
-test('mouse-up at or beyond 50 percent waits at most two seconds, shows busy, then commits', async () => {
+test('mouse-up fully across waits at most two seconds, shows busy, then commits', async () => {
   const clock = fakeClock(), setup = sourceController({ clock, waitMs: 2000 });
   await armSource(setup);
+  await setup.drag.frame({ cursorVU: { x: 1200, y: 180 } });
   const ending = setup.drag.end();
   await Promise.resolve();
   assert.equal(setup.sent.some(({ type }) => type === 'window.commit'), false);
@@ -248,13 +249,14 @@ test('mouse-up at or beyond 50 percent waits at most two seconds, shows busy, th
   await setup.drag.receive({ type: 'window.ready', id: 'stable-window-id' });
   assert.equal(await ending, true);
   assert.deepEqual(setup.sent.find(({ type }) => type === 'window.commit'),
-    { type: 'window.commit', id: 'stable-window-id', winner: 'destination' });
+    { type: 'window.commit', id: 'stable-window-id', winner: 'destination', originVU: { x: 1100, y: 100 } });
   assert.equal(setup.busy.at(-1), false);
 });
 
 test('prepare timeout restores source and a late ready is explicitly discarded', async () => {
   const clock = fakeClock(), setup = sourceController({ clock, waitMs: 2000 });
   await armSource(setup);
+  await setup.drag.frame({ cursorVU: { x: 1200, y: 180 } });
   const ending = setup.drag.end();
   await clock.tick(2000);
   assert.equal(await ending, true);
@@ -343,7 +345,7 @@ test('source Chrome exit promotes the prepared destination, including before rea
 
   assert.equal(await source.drag.sourceDisappeared('chrome-quit'), true);
   const commit = source.sent.at(-1);
-  assert.deepEqual(commit, { type: 'window.commit', id: 'stable-window-id', winner: 'destination' });
+  assert.deepEqual(commit, { type: 'window.commit', id: 'stable-window-id', winner: 'destination', originVU: { x: 810, y: 100 } });
   assert.equal(await destination.receive(commit), true);
   assert.equal(destination.active.pendingWinner, 'destination');
 
@@ -411,7 +413,7 @@ test('maximized and fullscreen windows instant-commit without entering straddle'
     assert.equal(setup.log.some(([type]) => type === 'position'), false);
     await setup.drag.receive({ type: 'window.ready', id: 'stable-window-id' });
     assert.equal(events.length, 0);
-    assert.deepEqual(setup.sent.at(-1), { type: 'window.commit', id: 'stable-window-id', winner: 'destination' });
+    assert.deepEqual(setup.sent.at(-1), { type: 'window.commit', id: 'stable-window-id', winner: 'destination', originVU: { x: 810, y: 100 } });
   }
 });
 

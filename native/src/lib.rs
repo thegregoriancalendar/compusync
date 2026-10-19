@@ -1,6 +1,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod acceleration;
+mod audio;
 mod platform;
 
 use acceleration::{apply as accelerate, AccelerationConfig, AppliedDelta};
@@ -151,6 +152,8 @@ pub struct DisplayMetric {
     pub work_area: Rect,
     pub scale: f64,
     pub primary: bool,
+    pub physical_width_mm: Option<f64>,
+    pub physical_height_mm: Option<f64>,
 }
 
 #[napi(object)]

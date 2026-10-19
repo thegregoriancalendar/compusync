@@ -280,6 +280,41 @@ test('a managed window drag disables resistance without starting a second native
   assert.equal(native.calls.some(([name]) => name === 'button'), false);
 });
 
+test('detecting a peer-driven source window drag preserves the held button until release', () => {
+  const native = mockNative();
+  const cursor = new CursorController({
+    machineId: 'mac', placements: [placement('mac', 0, 0, 1000, 800), placement('win', 1000, 0, 1000, 800)],
+    initialPosition: { x: 400, y: 200 }, ownerMachineId: 'mac', native,
+  });
+  cursor.receive({ type: 'cursor.button', button: 'left', down: true }, 'win');
+  cursor.setDragging(true, { role: 'source' });
+  cursor.receive({ type: 'cursor.delta', dx: 20, dy: 10 }, 'win');
+  cursor.flush();
+  assert.equal(cursor.syntheticButtons, 1);
+  assert.deepEqual(native.calls.filter(([kind]) => kind === 'button'), [['button', 'left', true]]);
+  cursor.receive({ type: 'cursor.button', button: 'left', down: false }, 'win');
+  cursor.setDragging(false);
+  assert.deepEqual(native.calls.filter(([kind]) => kind === 'button'), [
+    ['button', 'left', true], ['button', 'left', false],
+  ]);
+  assert.equal(cursor.syntheticButtons, 0);
+});
+
+test('a late destination offer still releases a briefly injected native drag', () => {
+  const native = mockNative();
+  const cursor = new CursorController({
+    machineId: 'mac', placements: [placement('mac', 0, 0, 1000, 800), placement('win', 1000, 0, 1000, 800)],
+    initialPosition: { x: 400, y: 200 }, ownerMachineId: 'mac', native,
+  });
+  cursor.receive({ type: 'cursor.button', button: 'left', down: true }, 'win');
+  cursor.setDragging(true, { role: 'destination' });
+  cursor.receive({ type: 'cursor.button', button: 'left', down: false }, 'win');
+  assert.deepEqual(native.calls.filter(([kind]) => kind === 'button'), [
+    ['button', 'left', true], ['button', 'left', false],
+  ]);
+  assert.equal(cursor.syntheticButtons, 0);
+});
+
 test('the source trackpad drives a round trip after ownership moves to its peer', () => {
   const spaces = [placement('mac', 0, 0, 100, 100), placement('win', 100, 0, 100, 100)];
   let now = 0;

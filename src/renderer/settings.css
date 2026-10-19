@@ -78,6 +78,10 @@ button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-
 .row { display: flex; align-items: center; gap: 12px; }
 #copy-status { color: #349473; font-size: 12px; }
 #error { color: #aa4747; font-size: 12px; margin: 12px 0 0; }
+#audio-windows-output { margin-top: 16px; }
+#audio-output { min-width: 0; flex: 1; margin-bottom: 0; }
+#audio-refresh { flex: none; }
+#audio-error, .audio-error-text { color: #aa4747; }
 .check { display: flex; align-items: center; gap: 8px; margin-top: 16px; margin-bottom: 0; }
 .check input { margin: 0; accent-color: #466393; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 20px 0; }

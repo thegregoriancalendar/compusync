@@ -8,7 +8,7 @@ use std::{
     panic::{catch_unwind, AssertUnwindSafe},
     ptr::{null, null_mut},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     thread::{self, JoinHandle},
@@ -130,6 +130,7 @@ struct CgRect {
 
 unsafe extern "C" {
     static kCFRunLoopCommonModes: CfString;
+    static kCFRunLoopDefaultMode: CfString;
     static kCFBooleanTrue: CfType;
     static kCGWindowOwnerPID: CfString;
     static kCGWindowOwnerName: CfString;
@@ -157,6 +158,7 @@ unsafe extern "C" {
     fn CFRunLoopAddSource(run_loop: CfRunLoop, source: CfType, mode: CfString);
     fn CFRunLoopRemoveSource(run_loop: CfRunLoop, source: CfType, mode: CfString);
     fn CFRunLoopRun();
+    fn CFRunLoopRunInMode(mode: CfString, seconds: f64, return_after_source_handled: bool) -> i32;
     fn CFRunLoopStop(run_loop: CfRunLoop);
 
     fn CGMainDisplayID() -> CgDisplay;
@@ -200,6 +202,7 @@ unsafe extern "C" {
     fn CGGetActiveDisplayList(max: u32, displays: *mut CgDisplay, count: *mut u32) -> i32;
     fn CGDisplayBounds(display: CgDisplay) -> CgRect;
     fn CGDisplayPixelsWide(display: CgDisplay) -> usize;
+    fn CGDisplayScreenSize(display: CgDisplay) -> CgSize;
     fn CGWindowListCopyWindowInfo(options: u32, relative: u32) -> CfArray;
     fn CGPreflightListenEventAccess() -> bool;
     fn CGRequestListenEventAccess() -> bool;
@@ -222,6 +225,7 @@ unsafe extern "C" {
     fn AXUIElementCreateSystemWide() -> AxElement;
     fn AXUIElementCreateApplication(pid: i32) -> AxElement;
     fn AXUIElementGetPid(element: AxElement, pid: *mut i32) -> i32;
+    fn AXUIElementSetMessagingTimeout(element: AxElement, timeout: f32) -> i32;
     fn AXUIElementCopyAttributeValues(
         element: AxElement,
         attribute: CfString,
@@ -476,12 +480,23 @@ struct TapContext {
     linked: AtomicBool,
     owner: AtomicBool,
     left_down: AtomicBool,
+    drag_generation: AtomicU64,
+    drag_moved: AtomicBool,
     move_loop_terminated: AtomicBool,
     tap: Mutex<CfMachPort>,
     drag_watch: Mutex<Option<AxDragWatch>>,
 }
 unsafe impl Send for TapContext {}
 unsafe impl Sync for TapContext {}
+
+fn record_left_button(context: &TapContext, down: bool) {
+    if down {
+        context.drag_moved.store(false, Ordering::Release);
+        context.drag_generation.fetch_add(1, Ordering::AcqRel);
+    }
+    context.left_down.store(down, Ordering::Release);
+    context.move_loop_terminated.store(false, Ordering::Release);
+}
 
 fn suppress_for_non_owner(linked: bool, owner: bool) -> bool {
     linked && !owner
@@ -525,6 +540,7 @@ struct AxDragWatch {
     source: CfType,
     run_loop: CfRunLoop,
     id: String,
+    generation: u64,
     active: bool,
     initial_geometry: Option<AxWindowGeometry>,
     resize_subscribed: bool,
@@ -607,8 +623,8 @@ fn emit_move_size_start(context: &TapContext, id: String) {
 }
 
 // Chrome commonly coalesces AXMoved notifications until the native drag ends.
-// The AXPosition value itself is live, so sample it from the event tap while the
-// physical button is moving. This starts JS's 60 Hz geometry polling as soon as
+// The AXPosition value itself is live, so sample it on the drag worker while the
+// button is held. This starts JS's 60 Hz geometry polling as soon as
 // the window has actually moved without mistaking tab/text drags for window
 // drags.
 fn poll_drag_watch(context: &TapContext) {
@@ -617,7 +633,7 @@ fn poll_drag_watch(context: &TapContext) {
         let Some(watch) = watch.as_mut() else {
             return;
         };
-        if watch.active || !context.left_down.load(Ordering::Acquire) {
+        if watch.active || !drag_watch_is_current(context, watch) {
             return;
         }
         let Some(initial) = watch.initial_geometry else {
@@ -626,7 +642,12 @@ fn poll_drag_watch(context: &TapContext) {
         let Some(current) = ax_window_geometry(watch.element) else {
             return;
         };
-        if !geometry_changed(initial, current) || !activate_drag_watch(true, &mut watch.active) {
+        // AX queries can outlast a release and another press. Never activate
+        // the old window's watch for the new gesture.
+        if !drag_watch_is_current(context, watch)
+            || !geometry_changed(initial, current)
+            || !activate_drag_watch(true, &mut watch.active)
+        {
             return;
         }
         watch.id.clone()
@@ -656,6 +677,9 @@ fn focused_window() -> Option<(String, i32, OwnedCf)> {
         return None;
     }
     let focused_app = OwnedCf(focused_app);
+    unsafe {
+        AXUIElementSetMessagingTimeout(focused_app.0 as AxElement, 0.05);
+    }
     let mut focused = null();
     if unsafe {
         AXUIElementCopyAttributeValue(
@@ -669,6 +693,9 @@ fn focused_window() -> Option<(String, i32, OwnedCf)> {
         return None;
     }
     let focused = OwnedCf(focused);
+    unsafe {
+        AXUIElementSetMessagingTimeout(focused.0 as AxElement, 0.05);
+    }
     let mut pid = 0;
     if unsafe { AXUIElementGetPid(focused.0 as AxElement, &mut pid) } != 0 {
         return None;
@@ -698,18 +725,22 @@ unsafe extern "C" fn ax_window_moved(_: AxObserver, _: AxElement, _: CfString, u
         return;
     }
     let context = unsafe { &*(user as *const TapContext) };
-    let left_down = context.left_down.load(Ordering::Acquire);
     let id = {
         let mut watch = context.drag_watch.lock();
         let Some(watch) = watch.as_mut() else {
             return;
         };
-        if !activate_drag_watch(left_down, &mut watch.active) {
+        if !drag_watch_is_current(context, watch) || !activate_drag_watch(true, &mut watch.active) {
             return;
         }
         watch.id.clone()
     };
     emit_move_size_start(context, id);
+}
+
+fn drag_watch_is_current(context: &TapContext, watch: &AxDragWatch) -> bool {
+    context.left_down.load(Ordering::Acquire)
+        && watch.generation == context.drag_generation.load(Ordering::Acquire)
 }
 
 fn activate_drag_watch(left_down: bool, active: &mut bool) -> bool {
@@ -742,6 +773,7 @@ fn clear_drag_watch(context: &TapContext, emit_end: bool) {
 
 fn begin_drag_watch(context: &TapContext) {
     clear_drag_watch(context, false);
+    let generation = context.drag_generation.load(Ordering::Acquire);
     let Some((id, pid, element)) = focused_window() else {
         return;
     };
@@ -787,6 +819,7 @@ fn begin_drag_watch(context: &TapContext) {
         source,
         run_loop,
         id,
+        generation,
         active: false,
         initial_geometry,
         resize_subscribed,
@@ -796,9 +829,8 @@ fn begin_drag_watch(context: &TapContext) {
 fn ensure_drag_watch(context: &TapContext) {
     let watching = context.drag_watch.lock().is_some();
     if !watching {
-        // The event tap runs before the clicked window receives focus. Waiting
-        // until the first drag event makes focused_window() select the window
-        // the user actually grabbed instead of the previously active window.
+        // Wait until input has delivered a drag event so the clicked window
+        // can gain focus before the worker resolves it.
         begin_drag_watch(context);
     }
 }
@@ -851,15 +883,11 @@ unsafe fn event_tap_inner(
         // the local drag watcher in sync so a peer-driven Chrome drag can
         // still become a live cross-screen handoff.
         if kind == CG_EVENT_LEFT_DOWN {
-            context.left_down.store(true, Ordering::Release);
-            context.move_loop_terminated.store(false, Ordering::Release);
-            clear_drag_watch(context, false);
+            record_left_button(context, true);
         } else if kind == CG_EVENT_LEFT_DRAGGED {
-            ensure_drag_watch(context);
+            context.drag_moved.store(true, Ordering::Release);
         } else if kind == CG_EVENT_LEFT_UP {
-            context.left_down.store(false, Ordering::Release);
-            context.move_loop_terminated.store(false, Ordering::Release);
-            clear_drag_watch(context, true);
+            record_left_button(context, false);
         }
         return event;
     }
@@ -874,7 +902,7 @@ unsafe fn event_tap_inner(
         | CG_EVENT_RIGHT_DRAGGED
         | CG_EVENT_OTHER_DRAGGED => {
             if kind == CG_EVENT_LEFT_DRAGGED {
-                ensure_drag_watch(context);
+                context.drag_moved.store(true, Ordering::Release);
             }
             let mut native = NativeEvent::simple("cursorDelta");
             native.timestamp = unsafe { CGEventGetTimestamp(event) } as f64 / 1_000_000.0;
@@ -965,13 +993,9 @@ unsafe fn event_tap_inner(
             ));
             native.modifiers = Some(modifiers);
             if kind == CG_EVENT_LEFT_DOWN {
-                context.left_down.store(true, Ordering::Release);
-                context.move_loop_terminated.store(false, Ordering::Release);
-                clear_drag_watch(context, false);
+                record_left_button(context, true);
             } else if kind == CG_EVENT_LEFT_UP {
-                context.left_down.store(false, Ordering::Release);
-                context.move_loop_terminated.store(false, Ordering::Release);
-                clear_drag_watch(context, true);
+                record_left_button(context, false);
             }
             (context.sink)(native);
             if suppress_for_non_owner(
@@ -1006,7 +1030,6 @@ impl CaptureRuntime {
         if let Some(thread) = self.drag_poll_thread.take() {
             let _ = thread.join();
         }
-        clear_drag_watch(&self.context, false);
         // HostPlatform stops this runtime explicitly and dropping it invokes
         // stop again. Consume the run-loop pointer before waking and joining
         // its thread so the Drop pass cannot use the now-retired CF object.
@@ -1099,13 +1122,10 @@ impl Platform for HostPlatform {
         let code = unsafe { CGWarpMouseCursorPosition(CgPoint { x: p.x, y: p.y }) };
         if code == 0 {
             // CoreGraphics cursor warps do not reliably produce a
-            // kCGEventLeftMouseDragged callback. Poll explicitly while a peer
-            // button is held so peer-driven window drags use the same live AX
-            // geometry path as physical Mac trackpad drags.
+            // kCGEventLeftMouseDragged callback. Deliver drag events while a
+            // peer button is held; the background worker handles AX queries.
             if let Some(capture) = self.capture.as_ref() {
                 if capture.context.left_down.load(Ordering::Acquire) {
-                    ensure_drag_watch(&capture.context);
-                    poll_drag_watch(&capture.context);
                     // A decoupled CoreGraphics cursor warp does not create an
                     // AppKit drag event. Deliver one at the authoritative
                     // position so Chrome visibly follows both local and peer
@@ -1168,6 +1188,7 @@ impl Platform for HostPlatform {
             .map(|id| {
                 let b = unsafe { CGDisplayBounds(id) };
                 let sx = unsafe { CGDisplayPixelsWide(id) } as f64 / b.size.width.max(1.0);
+                let physical = unsafe { CGDisplayScreenSize(id) };
                 DisplayMetric {
                     id: id.to_string(),
                     bounds: Rect {
@@ -1184,6 +1205,10 @@ impl Platform for HostPlatform {
                     },
                     scale: sx,
                     primary: id == main,
+                    physical_width_mm: (physical.width.is_finite() && physical.width > 0.0)
+                        .then_some(physical.width),
+                    physical_height_mm: (physical.height.is_finite() && physical.height > 0.0)
+                        .then_some(physical.height),
                 }
             })
             .collect())
@@ -1410,6 +1435,8 @@ impl Platform for HostPlatform {
             linked: AtomicBool::new(false),
             owner: AtomicBool::new(true),
             left_down: AtomicBool::new(false),
+            drag_generation: AtomicU64::new(0),
+            drag_moved: AtomicBool::new(false),
             move_loop_terminated: AtomicBool::new(false),
             tap: Mutex::new(null_mut()),
             drag_watch: Mutex::new(None),
@@ -1470,10 +1497,9 @@ impl Platform for HostPlatform {
             .recv_timeout(std::time::Duration::from_secs(2))
             .map_err(|_| "event tap thread did not start".to_string())??
             as CfRunLoop;
-        // Poll AX geometry after input has returned from the head-insert event
-        // tap. Chrome commonly delays AXMoved until mouse-up, while polling
-        // inside the tap delays delivery of the very drag event Chrome needs
-        // in order to update the window.
+        // Keep the entire AX observer lifecycle and geometry queries on this
+        // worker. AX can block on another app, so neither the input tap nor
+        // cursor warps may query it or take the drag-watch lock.
         let drag_poll_stop = Arc::new(AtomicBool::new(false));
         let poll_stop = drag_poll_stop.clone();
         let poll_context = context.clone();
@@ -1481,11 +1507,29 @@ impl Platform for HostPlatform {
             .name("compusync-mac-window-drag".into())
             .spawn(move || {
                 while !poll_stop.load(Ordering::Acquire) {
-                    std::thread::sleep(std::time::Duration::from_millis(8));
-                    if poll_context.left_down.load(Ordering::Acquire) {
-                        poll_drag_watch(&poll_context);
+                    let stale = poll_context
+                        .drag_watch
+                        .lock()
+                        .as_ref()
+                        .is_some_and(|watch| !drag_watch_is_current(&poll_context, watch));
+                    if stale {
+                        clear_drag_watch(&poll_context, true);
                     }
+                    if poll_context.left_down.load(Ordering::Acquire) {
+                        if poll_context.drag_moved.load(Ordering::Acquire) {
+                            ensure_drag_watch(&poll_context);
+                            poll_drag_watch(&poll_context);
+                        }
+                    } else {
+                        clear_drag_watch(&poll_context, true);
+                    }
+                    // Observer sources belong to this thread's run loop.
+                    unsafe {
+                        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.001, false);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(8));
                 }
+                clear_drag_watch(&poll_context, false);
             }) {
             Ok(thread) => thread,
             Err(error) => {
@@ -1560,6 +1604,62 @@ mod tests {
         take_run_loop, AxWindowGeometry, CfRunLoop, CgPoint, CgSize, CursorVisibilityAction,
         CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_X, CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_Y,
     };
+
+    #[test]
+    fn physical_and_peer_drag_input_does_not_wait_for_ax_work() {
+        use super::*;
+        use std::{sync::mpsc, time::Duration};
+
+        let context = Arc::new(TapContext {
+            sink: Arc::new(|_| {}),
+            linked: AtomicBool::new(false),
+            owner: AtomicBool::new(true),
+            left_down: AtomicBool::new(false),
+            drag_generation: AtomicU64::new(0),
+            drag_moved: AtomicBool::new(false),
+            move_loop_terminated: AtomicBool::new(false),
+            tap: Mutex::new(null_mut()),
+            drag_watch: Mutex::new(None),
+        });
+        // Simulate an Accessibility query blocked on an app. None of these
+        // input callbacks may acquire the worker's lock or make AX calls.
+        let guard = context.drag_watch.lock();
+        let input_context = context.clone();
+        let (sender, receiver) = mpsc::channel();
+        let input_thread = thread::spawn(move || {
+            for tag in [0, COMPUSYNC_SOURCE_TAG] {
+                for kind in [CG_EVENT_LEFT_DOWN, CG_EVENT_LEFT_DRAGGED, CG_EVENT_LEFT_UP] {
+                    let event = OwnedCf(unsafe {
+                        CGEventCreateMouseEvent(null(), kind, CgPoint::default(), 0)
+                    });
+                    assert!(!event.0.is_null());
+                    unsafe {
+                        CGEventSetIntegerValueField(
+                            event.0 as CgEvent,
+                            CG_FIELD_SOURCE_USER_DATA,
+                            tag,
+                        );
+                        event_tap_inner(
+                            null_mut(),
+                            kind,
+                            event.0 as CgEvent,
+                            Arc::as_ptr(&input_context) as *mut c_void,
+                        );
+                    }
+                }
+            }
+            sender.send(()).unwrap();
+        });
+        let completed = receiver.recv_timeout(Duration::from_secs(1));
+        drop(guard);
+        input_thread.join().unwrap();
+        assert!(
+            completed.is_ok(),
+            "input waited for the Accessibility worker"
+        );
+        assert!(!context.left_down.load(Ordering::Acquire));
+        assert_eq!(context.drag_generation.load(Ordering::Acquire), 2);
+    }
 
     #[test]
     fn capture_run_loop_stop_target_is_consumed_once() {

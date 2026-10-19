@@ -58,7 +58,9 @@ Unlinking removes global input hooks, releases synthetic buttons and modifiers, 
 
 ## Hand off Chrome windows
 
-Drag a supported Chrome window through the linked seam. CompuSync prepares a real native Chrome window on the destination, preserves tab order, pinning, active tab, geometry, and the history state available on that platform, and aligns the two native windows while they straddle the seam. Releasing before halfway keeps the source; releasing after halfway commits the destination. Reversing briefly reuses the prepared copy.
+Drag a supported Chrome window through the linked seam. CompuSync prepares a real native Chrome window on the destination, preserving tab order, pinning, active tab, and the history state available on that platform. Releasing while the window overlaps both desktops keeps both portions visible. Pick up either portion to continue; the other copy closes only after the window moves completely onto one laptop. Reversing during a held drag briefly reuses the prepared copy.
+
+Window sizing uses the monitors' reported physical dimensions to preserve width and height in inches across Windows scaling and Retina displays. Windows too large for the receiving monitor shrink proportionally to fit within 90% of that monitor. Missing physical measurements retain logical sizing. Native measurement changes require quitting CompuSync and running `npm run native:build` on each laptop before restarting.
 
 Normal addressable Chrome windows support live straddling. Maximized or fullscreen windows transfer without a live straddle. Unsupported applications and very small windows stay local while the cursor crosses and produce a brief notice.
 
@@ -73,6 +75,10 @@ Pairing settings are stored in CompuSync's OS user-data directory. Pairing secre
 Control messages are authenticated and encrypted. Cursor input is not queued while disconnected. A watchdog and independent recovery guard restore local input and guarded windows if the peer, network, or app disappears. Chrome handoff logs may contain a descriptor ID, phase, duration, hostname, and tab count, but not full URLs, titles, history URLs, or session tokens.
 
 CompuSync is not remote desktop, a virtual machine, file synchronization, or application streaming. The retired workspace and editor code is outside the active v3 product surface and is never instantiated by the app.
+
+## Mirror Mac audio to Windows
+
+**Connection & settings → Audio manager** can play the Mac's current output on a selected Windows audio device while keeping sound on the Mac. Capture, encrypted streaming, buffering, and playback run in Rust. The first version requires macOS 14.6 or later, a packaged Mac app, and an output-only Mac device such as its built-in speakers. See the [audio routing test guide](docs/audio-routing.md) for setup, permissions, and the two-laptop test. Reverse routing and synchronized dual-speaker playback are not implemented yet.
 
 ## Build packages
 

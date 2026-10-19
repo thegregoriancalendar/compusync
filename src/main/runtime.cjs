@@ -9,7 +9,7 @@ const { RecoveryWatchdog } = require('./watchdog.cjs');
 const { registerCursorHotkeys } = require('./hotkeys.cjs');
 const { sanitizePeerMessage, policyForMessage } = require('./messages.cjs');
 const { routePeerInput } = require('./input-runtime.cjs');
-const { placementFromDisplays, layoutPair, layoutMacAndWindows } = require('./virtualspace.cjs');
+const { placementFromDisplays, layoutPair, layoutMacAndWindows, normalizePlacement } = require('./virtualspace.cjs');
 
 const DEFAULT_ACCELERATION = Object.freeze({ base: 1, threshold: .5, slope: .015 });
 
@@ -18,10 +18,11 @@ function placementForLayout(machineId, layout) {
     const { widthVU, heightVU, scale } = layout.desktop;
     if ([widthVU, heightVU, scale].every((value) => typeof value === 'number' && Number.isFinite(value))
       && widthVU > 0 && heightVU > 0 && scale > 0) {
-      return {
+      return normalizePlacement({
         machineId, ...(layout.platform ? { platform: layout.platform } : {}),
         origin: { x: 0, y: 0 }, size: { w: widthVU, h: heightVU }, scale,
-      };
+        physicalDisplays: layout.desktop.physicalDisplays,
+      });
     }
   }
   if (!layout?.displays?.length) return null;
@@ -306,7 +307,7 @@ class SharedInputRuntime extends EventEmitter {
     return true;
   }
 
-  setDragging(dragging) { this.cursor.setDragging(dragging); }
+  setDragging(dragging, options) { this.cursor.setDragging(dragging, options); }
 
   setWindowController(controller) {
     this.windowController = controller || null;

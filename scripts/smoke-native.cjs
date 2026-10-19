@@ -32,6 +32,12 @@ const loaded = loadBinding();
 assert.ok(loaded.binding, loaded.failures.map((failure) => failure.message).join('\n'));
 assert.equal(path.resolve(loaded.path), artifactPath);
 assert.equal(typeof loaded.binding.NativeSubstrate, 'function');
+assert.equal(typeof loaded.binding.NativeAudio, 'function', 'rebuild the native addon for audio routing');
+const audio = new loaded.binding.NativeAudio();
+assert.equal(audio.status().running, false);
+assert.equal(typeof audio.startReceiver, 'function');
+assert.equal(typeof audio.startSender, 'function');
+audio.stop();
 const adapter = createNativeAdapter({ required: true });
 assert.equal(path.resolve(adapter.guardPath), guardPath);
 

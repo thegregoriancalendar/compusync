@@ -72,6 +72,8 @@ A temporary transparent seam overlay during a Chrome straddle is expected. It mu
 
 With cursor linking active and Windows owning the cursor, use the Windows mouse and trackpad to drag-select text in Notepad and a Chrome text field. Test a short selection, several lines, reversing direction while held, and dragging beyond the text area to scroll. Confirm release ends the selection and a subsequent drag starts a fresh selection. Repeat after a Mac-to-Windows handoff, on secondary monitors with different scale factors, and using the Mac input device to select Windows text. Verify unlink restores ordinary local selection.
 
+With macOS owning the cursor, use the Windows mouse and trackpad to drag Chrome and Finder windows within the Mac desktop. Try slow and fast movement, pauses while held, and reversals; the window must follow until the actual button release. Repeat immediately after switching focus between apps, then drag Chrome across the shared edge and back. Confirm detecting the window move does not drop the held button, crossing still completes or reverses normally, and a subsequent drag starts cleanly.
+
 ## macOS permissions
 
 For the Mac-to-Windows cursor regression, close CompuSync settings and keep another Mac app in the foreground. Using the Mac trackpad, cross to Windows and keep moving, clicking, and scrolling there for at least 30 seconds. Verify the Mac pointer stays hidden and Mac apps receive none of that input. Cross back and repeat with an external Mac mouse, with either computer hosting the session, and after switching the foreground Mac app. Confirm unlinking immediately restores ordinary Mac input.
@@ -93,12 +95,14 @@ For the Mac-to-Windows cursor regression, close CompuSync settings and keep anot
 Use a normal Chrome window with seven tabs, including two pinned tabs, duplicate URLs, and one playing video. Add two tabs after the first transfer and round-trip it again.
 
 1. Transfer in both directions. Verify tab order, pinned state, active tab, geometry, and current pages. Duplicate URLs must retain distinct positions.
-2. Pause with roughly 25%, 50%, and 75% of Chrome across the seam. Verify the native window edges share the same virtual origin while platform-specific Chrome interiors may differ.
+2. Pause with roughly 25%, 50%, and 75% of Chrome across the seam. Release at each position and verify both portions remain visible with no midpoint winner or close. Leave the split longer than three seconds, then pick up either portion and continue in either direction. The existing native windows must be reused.
 3. Stop and reverse before release. Cross again within three seconds, then repeat after waiting beyond three seconds. Verify prepared copies are reused only within the retention window and no residue remains afterward.
-4. Release before halfway and verify the source survives. Release after halfway and verify the destination commits. The source must never be destroyed before reliable commit acknowledgement.
+4. Move the window completely onto one laptop and release. Verify only that laptop retains the window. The source must never be destroyed before reliable commit acknowledgement. Repeat partial release and immediate re-grab while destination tab preparation is still running.
 5. Confirm maximized/fullscreen Chrome transfers without a live straddle. Confirm unsupported applications and sub-200x150-VU windows clamp locally while the cursor crosses and show only a brief nonblocking hint.
 6. Navigate and reorder tabs after a Windows-to-Mac transfer, then return to Windows. Verify changed Mac state wins and stale retained history is not restored.
 7. Record structured logs for success, reversal, and failure. They may contain descriptor ID, phase/duration, hostname, and tab count, but no full URL, title, history URL, or session token.
+8. Rebuild native modules on both laptops, then measure an ordinary window's physical width and height before and after transfer. Repeat with the Windows internal and external displays at different scaling factors and the Mac Retina display. A window that fits should retain its size in inches; one too large for the receiving monitor should fit within 90% of it with its aspect ratio preserved. Verify sizing is correct from preparation onward, not only after release.
+9. While a split is retained, unlink, quit, or change a display. Verify each surviving local Chrome copy returns fully onto its desktop and no window or input guard remains stranded.
 
 ## Failure recovery
 
@@ -130,6 +134,10 @@ For every case, verify a surviving Chrome copy returns fully on-screen, overlays
 4. Repeat cursor crossings, Chrome round trips, reversal, and one failure-recovery case from packaged builds.
 5. Repeat the retired-surface regression from packaged builds. No obsolete window or command may return because of packaging, saved state, or an older profile.
 6. Install an older signed release, publish a newer version, and verify the update downloads in the background and installs after quitting and reopening CompuSync. Repeat on both platforms.
+
+## Mac audio on Windows
+
+Follow the [audio routing test guide](audio-routing.md) using a packaged Mac app on macOS 14.6 or later. Confirm playback through the chosen Windows device, stopping from either laptop, switching outputs while stopped, permission-denial recovery, settings closed during playback, unplugged-device handling, disconnect, sleep/wake, and process exit. Reconnection must leave audio stopped until the Mac user starts it again. Mac playback should continue locally throughout.
 
 ## Completion record
 
