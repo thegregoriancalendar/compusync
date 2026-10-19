@@ -22,22 +22,10 @@ pub fn now_ns() -> i64 {
     }
     #[cfg(target_os = "macos")]
     {
-        #[repr(C)]
-        struct Timebase {
-            numer: u32,
-            denom: u32,
-        }
         extern "C" {
             fn mach_absolute_time() -> u64;
-            fn mach_timebase_info(info: *mut Timebase) -> i32;
         }
-        static SCALE: std::sync::OnceLock<(u32, u32)> = std::sync::OnceLock::new();
-        let (numer, denom) = *SCALE.get_or_init(|| {
-            let mut info = Timebase { numer: 0, denom: 0 };
-            assert_eq!(unsafe { mach_timebase_info(&mut info) }, 0);
-            (info.numer, info.denom)
-        });
-        (unsafe { mach_absolute_time() } as u128 * numer as u128 / denom as u128) as i64
+        mac_host_ns(unsafe { mach_absolute_time() })
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
@@ -47,6 +35,24 @@ pub fn now_ns() -> i64 {
             .elapsed()
             .as_nanos() as i64
     }
+}
+#[cfg(target_os = "macos")]
+pub fn mac_host_ns(ticks: u64) -> i64 {
+    #[repr(C)]
+    struct Timebase {
+        numer: u32,
+        denom: u32,
+    }
+    extern "C" {
+        fn mach_timebase_info(info: *mut Timebase) -> i32;
+    }
+    static SCALE: std::sync::OnceLock<(u32, u32)> = std::sync::OnceLock::new();
+    let (numer, denom) = *SCALE.get_or_init(|| {
+        let mut info = Timebase { numer: 0, denom: 0 };
+        assert_eq!(unsafe { mach_timebase_info(&mut info) }, 0);
+        (info.numer, info.denom)
+    });
+    (ticks as u128 * numer as u128 / denom as u128) as i64
 }
 #[derive(Clone, Copy, Debug)]
 #[cfg(any(target_os = "macos", test))]

@@ -1,8 +1,14 @@
 //! A private, device-scoped tap. Muting belongs to the tap, not the user's
 //! volume/default-device settings. Excluding this process prevents feedback.
-use cpal::traits::{DeviceTrait, HostTrait};
+use super::{buffer::CapturedFrame, clock, Stats};
+use cpal::traits::DeviceTrait;
 use objc2::AnyThread;
 use objc2_core_audio::*;
+use objc2_core_audio_types::{
+    kAudioFormatFlagIsBigEndian, kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonInterleaved,
+    kAudioFormatLinearPCM, AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp,
+    AudioTimeStampFlags,
+};
 use objc2_core_foundation::{
     kCFAllocatorDefault, kCFTypeArrayCallBacks, kCFTypeDictionaryKeyCallBacks,
     kCFTypeDictionaryValueCallBacks, CFArray, CFDictionary, CFMutableDictionary, CFRetained,
@@ -10,18 +16,117 @@ use objc2_core_foundation::{
 };
 use objc2_foundation::{NSArray, NSNumber, NSString};
 use std::{
+    cell::UnsafeCell,
     ffi::{c_void, CStr},
     ptr::NonNull,
-    sync::atomic::{AtomicU32, Ordering},
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc,
+    },
 };
 static INSTANCE: AtomicU32 = AtomicU32::new(0);
+
+struct CaptureContext {
+    producer: rtrb::Producer<CapturedFrame>,
+    stats: Arc<Stats>,
+    rate: u32,
+}
+
+unsafe extern "C-unwind" fn capture_callback(
+    _device: u32,
+    _now: NonNull<AudioTimeStamp>,
+    input: NonNull<AudioBufferList>,
+    input_time: NonNull<AudioTimeStamp>,
+    _output: NonNull<AudioBufferList>,
+    _output_time: NonNull<AudioTimeStamp>,
+    context: *mut c_void,
+) -> i32 {
+    // Core Audio owns the buffers and calls this IOProc serially. The boxed
+    // context remains stable until AudioDeviceStop/DestroyIOProcID completes.
+    let context = unsafe { &mut *context.cast::<CaptureContext>() };
+    if context.stats.stopped.load(Ordering::Relaxed) {
+        return 0;
+    }
+    let timestamp = unsafe { input_time.as_ref() };
+    if !timestamp
+        .mFlags
+        .contains(AudioTimeStampFlags::HostTimeValid)
+    {
+        context
+            .stats
+            .device_clock_invalid
+            .store(true, Ordering::Relaxed);
+        return 0;
+    }
+    let list = unsafe { input.as_ref() };
+    if list.mNumberBuffers == 0 || list.mNumberBuffers > 64 {
+        return 0;
+    }
+    let buffers =
+        unsafe { std::slice::from_raw_parts(list.mBuffers.as_ptr(), list.mNumberBuffers as usize) };
+    let Some(first) = buffers
+        .first()
+        .filter(|b| !b.mData.is_null() && b.mNumberChannels > 0)
+    else {
+        return 0;
+    };
+    let samples = unsafe {
+        std::slice::from_raw_parts(first.mData.cast::<f32>(), first.mDataByteSize as usize / 4)
+    };
+    let stride = first.mNumberChannels as usize;
+    let right = if stride >= 2 {
+        Some((samples.get(1..).unwrap_or(&[]), stride))
+    } else {
+        buffers
+            .get(1)
+            .filter(|b| !b.mData.is_null() && b.mNumberChannels > 0)
+            .map(|b| {
+                (
+                    unsafe {
+                        std::slice::from_raw_parts(
+                            b.mData.cast::<f32>(),
+                            b.mDataByteSize as usize / 4,
+                        )
+                    },
+                    b.mNumberChannels as usize,
+                )
+            })
+    };
+    let (count, overflow) = super::buffer::push_capture_block(
+        (samples, stride),
+        right,
+        clock::mac_host_ns(timestamp.mHostTime),
+        context.rate,
+        &mut context.producer,
+    );
+    context
+        .stats
+        .captured
+        .fetch_add(count as u64, Ordering::Relaxed);
+    if overflow {
+        context
+            .stats
+            .resync_requested
+            .store(true, Ordering::Release);
+    }
+    0
+}
 
 pub struct MutedTap {
     tap: u32,
     aggregate: u32,
+    io: AudioDeviceIOProcID,
+    context: Option<Box<UnsafeCell<CaptureContext>>>,
 }
+// Only Core Audio's serial IO callback accesses context while running. Drop
+// stops and destroys that callback before releasing context or the device.
+unsafe impl Send for MutedTap {}
 impl MutedTap {
-    pub fn new(output: &cpal::Device) -> Result<(Self, cpal::Device), String> {
+    pub fn new(
+        output: &cpal::Device,
+        producer: rtrb::Producer<CapturedFrame>,
+        stats: Arc<Stats>,
+    ) -> Result<(Self, u32), String> {
         let device_id = output.id().map_err(|e| e.to_string())?;
         let property = AudioObjectPropertyAddress {
             mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
@@ -70,7 +175,51 @@ impl MutedTap {
             unsafe { AudioHardwareCreateProcessTap(Some(&description), &mut tap) },
             "create muted system audio tap (check System Audio Recording permission)",
         )?;
-        let mut guard = Self { tap, aggregate: 0 };
+        let mut guard = Self {
+            tap,
+            aggregate: 0,
+            io: None,
+            context: None,
+        };
+        let format_property = AudioObjectPropertyAddress {
+            mSelector: kAudioTapPropertyFormat,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain,
+        };
+        // ASBD contains only scalar numeric fields; all-zero is a valid initial value.
+        let mut format: AudioStreamBasicDescription = unsafe { std::mem::zeroed() };
+        let mut size = std::mem::size_of_val(&format) as u32;
+        check(
+            unsafe {
+                AudioObjectGetPropertyData(
+                    tap,
+                    NonNull::from(&format_property),
+                    0,
+                    std::ptr::null(),
+                    NonNull::from(&mut size),
+                    NonNull::from(&mut format).cast(),
+                )
+            },
+            "read system audio tap format",
+        )?;
+        if format.mFormatID != kAudioFormatLinearPCM
+            || format.mBitsPerChannel != 32
+            || format.mFormatFlags & kAudioFormatFlagIsFloat == 0
+            || format.mFormatFlags & kAudioFormatFlagIsBigEndian != 0
+            || !format.mSampleRate.is_finite()
+            || !(8_000.0..=192_000.0).contains(&format.mSampleRate)
+            || format.mSampleRate.fract() != 0.0
+            || format.mChannelsPerFrame == 0
+            || format.mBytesPerFrame
+                != if format.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0 {
+                    4
+                } else {
+                    format.mChannelsPerFrame.saturating_mul(4)
+                }
+        {
+            return Err("The Mac tap requires native 32-bit float PCM. Choose built-in or wired speakers and retry.".into());
+        }
+        let rate = format.mSampleRate as u32;
         let uid = format!(
             "app.compusync.audio.{}.{}",
             pid,
@@ -84,18 +233,39 @@ impl MutedTap {
             },
             "create audio tap device",
         )?;
-        let id = cpal::DeviceId::new(cpal::HostId::CoreAudio, &uid);
-        let device = cpal::default_host()
-            .device_by_id(&id)
-            .ok_or("Core Audio tap device is unavailable.")?;
-        Ok((guard, device))
+        // A private aggregate is absent from CPAL's public enumeration. Use
+        // the AudioDeviceID returned by Core Audio directly; never publish it.
+        guard.context = Some(Box::new(UnsafeCell::new(CaptureContext {
+            producer,
+            stats,
+            rate,
+        })));
+        let context = guard.context.as_ref().unwrap().get().cast();
+        check(
+            unsafe {
+                AudioDeviceCreateIOProcID(
+                    guard.aggregate,
+                    Some(capture_callback),
+                    context,
+                    NonNull::from(&mut guard.io),
+                )
+            },
+            "register system audio capture callback",
+        )?;
+        check(unsafe { AudioDeviceStart(guard.aggregate, guard.io) },
+            "start system audio capture (allow System Audio Recording for CompuSync or Electron, then restart after a denial)")?;
+        Ok((guard, rate))
     }
 }
 impl Drop for MutedTap {
     fn drop(&mut self) {
-        // Input stream must be dropped first. Destroy even partially-created
-        // resources, restoring normal local sound after any start failure.
+        // Stop IO before freeing its context or tap. Destroy even partially-
+        // created resources, restoring normal sound after any start failure.
         unsafe {
+            if self.io.is_some() {
+                AudioDeviceStop(self.aggregate, self.io);
+                AudioDeviceDestroyIOProcID(self.aggregate, self.io);
+            }
             if self.aggregate != 0 {
                 AudioHardwareDestroyAggregateDevice(self.aggregate);
             }
@@ -164,6 +334,6 @@ fn aggregate_properties(tap_uid: &NSString, uid: &str) -> CFRetained<CFDictionar
     );
     put(&properties, kAudioAggregateDeviceTapListKey, &*taps);
     put(&properties, kAudioAggregateDeviceTapAutoStartKey, &*yes);
-    put(&properties, kAudioEndPointDeviceIsPrivateKey, &*yes);
+    put(&properties, kAudioAggregateDeviceIsPrivateKey, &*yes);
     unsafe { CFRetained::cast_unchecked(properties) }
 }

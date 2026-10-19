@@ -11,6 +11,7 @@ const { conversation, message, command, messagesState } = require('../src/messag
 const { MessagesAutomation, SCRIPT } = require('../src/messages/mac-automation.cjs');
 const { MessagesHistoryStore, APPLE_EPOCH_MS } = require('../src/messages/history-store.cjs');
 const { MessagesService } = require('../src/messages/service.cjs');
+const { MessagesMacBridge } = require('../src/messages/mac-bridge.cjs');
 
 const sampleConversation = {
   id: 'iMessage;-;chat123', name: 'Ada', service: 'iMessage',
@@ -83,6 +84,69 @@ test('read-only history store returns bounded text messages in chronological ord
   fs.rmSync(root, { recursive: true, force: true });
 });
 
+test('Mac conversation loading reads chat.db without requiring Messages Automation', async () => {
+  const database = new DatabaseSync(':memory:');
+  database.exec(`
+    CREATE TABLE chat (guid TEXT, chat_identifier TEXT, display_name TEXT, service_name TEXT);
+    CREATE TABLE handle (id TEXT);
+    CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
+    CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+    INSERT INTO chat VALUES ('iMessage;-;older', '+15550000001', '', 'iMessage'),
+                            ('iMessage;+;chat123', 'chat123', 'Project group', 'iMessage');
+    INSERT INTO handle VALUES ('+15550000001'), ('ada@example.test');
+    INSERT INTO chat_handle_join VALUES (1, 1), (2, 1), (2, 2);
+    INSERT INTO chat_message_join VALUES (1, 1), (2, 2);
+  `);
+  const store = new MessagesHistoryStore({ database });
+  const bridge = new MessagesMacBridge({
+    platform: 'darwin', historyStore: store,
+    automation: { listConversations() { throw new Error('Automation must not gate reading.'); } },
+  });
+  try {
+    assert.equal(bridge.state().available, true);
+    const conversations = await bridge.listConversations();
+    assert.equal(conversations.length, 2);
+    assert.equal(conversations[0].name, 'Project group');
+    assert.equal(conversations[0].participants.length, 2);
+    assert.equal(conversations[1].name, '+15550000001');
+    assert.equal(conversations[1].service, 'iMessage');
+    database.exec('INSERT INTO chat_message_join VALUES (1, 3)');
+    assert.equal((await bridge.listConversations())[0].id, 'iMessage;-;older');
+  } finally { database.close(); }
+});
+
+test('conversation loading supports older database schemas and reports unreadable databases', () => {
+  const database = new DatabaseSync(':memory:');
+  database.exec(`
+    CREATE TABLE chat (guid TEXT, chat_identifier TEXT);
+    CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+    INSERT INTO chat VALUES ('SMS;-;+15550000001', '+15550000001');
+  `);
+  try {
+    const store = new MessagesHistoryStore({ database });
+    assert.equal(store.listConversations()[0].participants[0].handle, '+15550000001');
+    assert.equal(store.listConversations()[0].service, 'SMS');
+  } finally { database.close(); }
+  const missing = new MessagesHistoryStore({ databasePath: path.join(os.tmpdir(), `absent-${process.pid}`, 'chat.db') });
+  assert.equal(missing.availability().available, false);
+  assert.match(missing.availability().reason, /Terminal for npm start/);
+});
+
+test('denied Automation produces actionable guidance without exposing subprocess output', async () => {
+  const automation = new MessagesAutomation({
+    platform: 'darwin',
+    execute: async () => { throw Object.assign(new Error('command failed'), {
+      stderr: 'Not authorized to send Apple events to Messages. (-1743) private-data',
+    }); },
+  });
+  await assert.rejects(automation.sendText({}), (error) => {
+    assert.equal(error.code, 'MESSAGES_AUTOMATION_DENIED');
+    assert.match(error.message, /Privacy & Security > Automation/);
+    assert.equal(error.message.includes('private-data'), false);
+    return true;
+  });
+});
+
 class FakeSession extends EventEmitter {
   constructor(id) {
     super();
@@ -126,6 +190,15 @@ test('Windows client invokes only supported operations on the Mac authority', as
     conversationId: sampleConversation.id, text: 'Hi', clientId: 'client-12345678',
   });
   assert.equal(sent[0].text, 'Hi');
+  bridge.sendText = async () => { throw Object.assign(new Error('Allow Automation for Messages.'), {
+    code: 'MESSAGES_AUTOMATION_DENIED',
+  }); };
+  await assert.rejects(windows.request('message.send', {
+    conversationId: sampleConversation.id, text: 'Hi', clientId: 'client-12345678',
+  }), /Allow Automation for Messages/);
+  windowsSession.emit('data-status', { phase: 'disconnected' });
+  assert.equal(windows.state().available, false);
+  assert.match(windows.state().reason, /disconnected/);
   await assert.rejects(windows.request('message.react', {}), /invalid/i);
   windows.stop();
   mac.stop();

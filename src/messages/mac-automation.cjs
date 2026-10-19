@@ -77,9 +77,20 @@ class MessagesAutomation {
       error.code = 'MESSAGES_UNAVAILABLE';
       throw error;
     }
-    const { stdout } = await this.execute('/usr/bin/osascript', [
-      '-l', 'JavaScript', '-e', SCRIPT, '--', operation, JSON.stringify(payload),
-    ], { timeout: this.timeoutMs, maxBuffer: MAX_OUTPUT_BYTES, windowsHide: true });
+    let stdout;
+    try {
+      ({ stdout } = await this.execute('/usr/bin/osascript', [
+        '-l', 'JavaScript', '-e', SCRIPT, '--', operation, JSON.stringify(payload),
+      ], { timeout: this.timeoutMs, maxBuffer: MAX_OUTPUT_BYTES, windowsHide: true }));
+    } catch (cause) {
+      const details = `${cause.message || ''}\n${cause.stderr || ''}`;
+      const denied = /-1743|not authorized|not permitted to send apple events/i.test(details);
+      const error = new Error(denied
+        ? 'On the Mac, open System Settings > Privacy & Security > Automation and allow the app running CompuSync to control Messages, then retry.'
+        : 'Messages automation failed on the Mac. Open Messages, confirm you are signed in, and retry.');
+      error.code = denied ? 'MESSAGES_AUTOMATION_DENIED' : 'MESSAGES_AUTOMATION_FAILED';
+      throw error;
+    }
     try { return JSON.parse(String(stdout).trim()); }
     catch {
       const error = new Error('Messages returned an invalid automation response.');

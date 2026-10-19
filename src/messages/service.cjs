@@ -32,6 +32,7 @@ function safeError(error) {
   const allowed = new Set([
     'MESSAGES_UNAVAILABLE', 'MESSAGES_FULL_DISK_ACCESS', 'MESSAGES_SCHEMA_UNSUPPORTED',
     'MESSAGES_INVALID_RESPONSE', 'REQUEST_TIMEOUT', 'DATA_UNAVAILABLE', 'INVALID_REQUEST',
+    'MESSAGES_AUTOMATION_DENIED', 'MESSAGES_AUTOMATION_FAILED',
   ]);
   const message = allowed.has(code) && typeof error?.message === 'string'
     ? error.message.slice(0, 500) : 'The Messages request could not be completed.';
@@ -204,11 +205,17 @@ class MessagesService extends EventEmitter {
       this._setAvailability();
       this._broadcastState();
     }
-    if (!this.isMac && status.phase === 'disconnected') this._rejectPending('DATA_UNAVAILABLE', 'The Mac disconnected.');
+    if (!this.isMac && status.phase === 'disconnected') this._disconnected();
   }
 
   _handleSessionStatus(status) {
-    if (!this.isMac && status?.phase !== 'connected') this._rejectPending('DATA_UNAVAILABLE', 'The Mac disconnected.');
+    if (!this.isMac && status?.phase !== 'connected') this._disconnected();
+  }
+
+  _disconnected() {
+    this._rejectPending('DATA_UNAVAILABLE', 'The Mac disconnected.');
+    this.currentState = { ...this.currentState, available: false, reason: 'The Mac disconnected. Waiting to reconnect.' };
+    this.emit('state', this.state());
   }
 
   _rejectPending(code, message) {

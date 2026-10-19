@@ -39,6 +39,14 @@ CompuSync uses:
 
 Use the action in the settings notice to open the relevant System Settings pane. If macOS still shows the old permission state after granting access, fully quit and reopen CompuSync. Do not enable Chrome's **JavaScript from Apple Events** setting; CompuSync does not require it.
 
+## Messages Companion
+
+On Windows, right-click CompuSync's system tray icon and choose **Messages Companion…** after the Mac connects. Conversations and history are read from the Mac's Messages database in read-only mode; sending uses Messages Automation.
+
+On the Mac, grant **System Settings > Privacy & Security > Full Disk Access** to the app running CompuSync. For `npm start` in Terminal, grant it to Terminal; for an installed build, grant it to CompuSync. Fully quit the running CompuSync process and restart it after changing permissions. Launching another copy while the old process is still in the menu bar keeps the old process running.
+
+When sending, approve control of **Messages** under **Privacy & Security > Automation** for the app running CompuSync. Full Disk Access and Automation are separate permissions. The companion displays read and send errors and retries loading conversations while it is visible.
+
 ## Connect and link
 
 1. Run the same current CompuSync revision on both laptops and keep them on the same local network.

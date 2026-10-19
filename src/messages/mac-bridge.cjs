@@ -13,10 +13,7 @@ class MessagesMacBridge {
 
   state() {
     if (this.platform !== 'darwin') return { available: false, reason: 'Messages is hosted by the Mac.' };
-    if (!this.historyStore.canAccess()) {
-      return { available: false, reason: 'Allow Full Disk Access for CompuSync on the Mac, then reopen Messages Companion.' };
-    }
-    return { available: true, reason: '' };
+    return this.historyStore.availability();
   }
 
   async listConversations() {
@@ -26,7 +23,7 @@ class MessagesMacBridge {
       error.code = 'MESSAGES_UNAVAILABLE';
       throw error;
     }
-    const raw = await this.automation.listConversations();
+    const raw = this.historyStore.listConversations();
     if (!Array.isArray(raw)) throw new Error('Messages returned an invalid conversation list.');
     return raw.map(conversation).filter(Boolean);
   }

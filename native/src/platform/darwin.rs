@@ -170,7 +170,10 @@ unsafe extern "C" {
     fn CGEventGetLocation(event: CgEvent) -> CgPoint;
     fn CGEventGetTimestamp(event: CgEvent) -> u64;
     fn CGEventGetIntegerValueField(event: CgEvent, field: u32) -> i64;
+    fn CGEventGetDoubleValueField(event: CgEvent, field: u32) -> f64;
     fn CGEventSetIntegerValueField(event: CgEvent, field: u32, value: i64);
+    #[cfg(test)]
+    fn CGEventSetDoubleValueField(event: CgEvent, field: u32, value: f64);
     fn CGEventGetFlags(event: CgEvent) -> u64;
     fn CGEventCreateMouseEvent(
         source: CfType,
@@ -906,21 +909,30 @@ unsafe fn event_tap_inner(
             }
             let mut native = NativeEvent::simple("cursorDelta");
             native.timestamp = unsafe { CGEventGetTimestamp(event) } as f64 / 1_000_000.0;
+            // Trackpad movement can be fractional. Reading it as an integer
+            // loses slow motion before the shared acceleration curve sees it.
             native.dx = Some(unsafe {
-                CGEventGetIntegerValueField(event, CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_X)
-            } as f64);
+                CGEventGetDoubleValueField(event, CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_X)
+            });
             native.dy = Some(unsafe {
-                CGEventGetIntegerValueField(event, CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_Y)
-            } as f64);
+                CGEventGetDoubleValueField(event, CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_Y)
+            });
             (context.sink)(native);
-            if kind == CG_EVENT_LEFT_DRAGGED && context.move_loop_terminated.load(Ordering::Acquire)
-            {
+            // Keep physical devices from moving the non-owner Mac cursor,
+            // including trackpad drags that are suppressed below.
+            if unsafe { reinforce_non_owner_motion_barrier(context) } {
                 return null_mut();
             }
-            // Forward the raw delta to the shared owner, but do not also move
-            // the non-owner Mac cursor. Owner motion continues to applications
-            // normally so native hover and drag behavior remain intact.
-            if unsafe { reinforce_non_owner_motion_barrier(context) } {
+            if kind == CG_EVENT_LEFT_DRAGGED
+                && (context.linked.load(Ordering::Acquire)
+                    || context.move_loop_terminated.load(Ordering::Acquire))
+            {
+                // Linked cursor movement is decoupled from the physical
+                // device. warp_cursor delivers a tagged drag at the shared
+                // position; also passing this physical event would feed
+                // AppKit a competing drag at the device's stale position.
+                // Keep capturing its delta, but deliver only the generated
+                // stream. Button down/up still pass through to the owner.
                 return null_mut();
             }
         }
@@ -1123,7 +1135,9 @@ impl Platform for HostPlatform {
         if code == 0 {
             // CoreGraphics cursor warps do not reliably produce a
             // kCGEventLeftMouseDragged callback. Deliver drag events while a
-            // peer button is held; the background worker handles AX queries.
+            // local or peer button is held; the background worker handles AX
+            // queries. The tap consumes linked physical drags so AppKit sees
+            // only this stream at the shared cursor position.
             if let Some(capture) = self.capture.as_ref() {
                 if capture.context.left_down.load(Ordering::Acquire) {
                     // A decoupled CoreGraphics cursor warp does not create an
@@ -1604,6 +1618,77 @@ mod tests {
         take_run_loop, AxWindowGeometry, CfRunLoop, CgPoint, CgSize, CursorVisibilityAction,
         CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_X, CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_Y,
     };
+
+    #[test]
+    fn linked_trackpad_drag_captures_fractional_motion_without_duplicate_appkit_input() {
+        use super::*;
+
+        let captured = Arc::new(Mutex::new(Vec::<NativeEvent>::new()));
+        let sink_events = captured.clone();
+        let context = TapContext {
+            sink: Arc::new(move |event| sink_events.lock().push(event)),
+            linked: AtomicBool::new(true),
+            owner: AtomicBool::new(true),
+            left_down: AtomicBool::new(false),
+            drag_generation: AtomicU64::new(0),
+            drag_moved: AtomicBool::new(false),
+            move_loop_terminated: AtomicBool::new(false),
+            tap: Mutex::new(null_mut()),
+            drag_watch: Mutex::new(None),
+        };
+        // Exercise real Quartz event fields without installing a global hook,
+        // posting input, querying AX, or changing cursor ownership.
+        let deliver = |kind, tag| {
+            let event =
+                OwnedCf(unsafe { CGEventCreateMouseEvent(null(), kind, CgPoint::default(), 0) });
+            assert!(!event.0.is_null());
+            let input = event.0 as CgEvent;
+            let returned = unsafe {
+                CGEventSetIntegerValueField(input, CG_FIELD_SOURCE_USER_DATA, tag);
+                CGEventSetDoubleValueField(input, CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_X, 0.25);
+                CGEventSetDoubleValueField(
+                    input,
+                    CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_Y,
+                    -0.125,
+                );
+                event_tap_inner(
+                    null_mut(),
+                    kind,
+                    input,
+                    &context as *const TapContext as *mut c_void,
+                )
+            };
+            assert!(returned.is_null() || returned == input);
+            !returned.is_null()
+        };
+
+        assert!(deliver(CG_EVENT_LEFT_DOWN, 0));
+        assert!(context.left_down.load(Ordering::Acquire));
+        assert!(!deliver(CG_EVENT_LEFT_DRAGGED, 0));
+        {
+            let events = captured.lock();
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[1].dx, Some(0.25));
+            assert_eq!(events[1].dy, Some(-0.125));
+        }
+        assert!(context.drag_moved.load(Ordering::Acquire));
+
+        // The replacement drag reaches AppKit exactly once and is not echoed
+        // into the shared cursor as a second movement sample.
+        assert!(deliver(CG_EVENT_LEFT_DRAGGED, COMPUSYNC_SOURCE_TAG));
+        assert_eq!(captured.lock().len(), 2);
+        assert!(deliver(CG_EVENT_LEFT_UP, 0));
+        assert!(!context.left_down.load(Ordering::Acquire));
+        assert_eq!(captured.lock().len(), 3);
+
+        // Unlink restores the device's native drag stream immediately.
+        context.linked.store(false, Ordering::Release);
+        assert!(deliver(CG_EVENT_LEFT_DOWN, 0));
+        assert!(deliver(CG_EVENT_LEFT_DRAGGED, 0));
+        assert!(deliver(CG_EVENT_LEFT_UP, 0));
+        assert!(!context.left_down.load(Ordering::Acquire));
+        assert_eq!(captured.lock().len(), 6);
+    }
 
     #[test]
     fn physical_and_peer_drag_input_does_not_wait_for_ax_work() {

@@ -99,6 +99,7 @@ function historyResult(value) {
 module.exports = {
   SERVICE_VERSION,
   MAX_CONVERSATIONS,
+  MAX_PARTICIPANTS,
   MAX_MESSAGES,
   MAX_TEXT_BYTES,
   REQUEST_ID,

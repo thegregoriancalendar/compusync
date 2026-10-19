@@ -17,7 +17,7 @@ npm start
 
 Use **built-in or wired speakers** for the first test. Outputs with a predicted device lead above 100 ms are refused; Bluetooth and other devices with variable downstream latency are outside the initial verification target. The Mac tap follows its selected output device. It never opens a microphone or captures the screen.
 
-No extra npm flag or administrator access is needed. The pinned Electron runtime includes `NSAudioCaptureUsageDescription`. macOS requests System Audio Recording permission when sharing starts. During development the prompt may name Electron or the terminal/IDE that launched it; packaged builds use CompuSync. After a denial, enable the relevant entry in **System Settings → Privacy & Security → Screen & System Audio Recording**, then fully quit and restart the app.
+No extra npm flag or administrator access is needed. The pinned Electron runtime includes `NSAudioCaptureUsageDescription`. [macOS requests System Audio Recording permission the first time recording starts](https://developer.apple.com/documentation/CoreAudio/capturing-system-audio-with-core-audio-taps), after creating the tap and aggregate device. Creating the tap alone does not trigger the prompt. During development the prompt may name Electron or the terminal/IDE that launched it; packaged builds use CompuSync. After a denial, enable the relevant entry in **System Settings → Privacy & Security → Screen & System Audio Recording**, then fully quit and restart the app.
 
 If `npm start` never produces a prompt, the launching terminal or IDE may lack its own audio usage description. [Electron documents the parent-application requirement](https://www.electronjs.org/docs/latest/api/desktop-capturer#macos-versions-142-or-higher). Quit the development app and launch its bundle through macOS Launch Services from the project root:
 
@@ -42,7 +42,7 @@ Audio buffering also delays sound relative to video playing independently on the
 
 ## Timing and recovery
 
-- Both hosts use native monotonic clocks: mach_absolute_time on Mac and QueryPerformanceCounter on Windows. CPAL 0.18.2 device timestamps use those same host clock domains.
+- Both hosts use native monotonic clocks: mach_absolute_time on Mac and QueryPerformanceCounter on Windows. CPAL 0.18.2 output timestamps use those same host clock domains. Mac capture uses the native IOProc input timestamp, converted from mach host time.
 - The Mac sends authenticated four-timestamp ping/pong exchanges. Startup requires eight valid observations and a best round-trip delay no higher than 10 ms, corresponding to at most 5 ms estimated network offset uncertainty. Models continue every 250 ms, using a recent bounded low-delay window. Small offset updates are slewed; large changes request a resynchronization.
 - Every 5 ms audio block carries an epoch, first frame index, capture timestamp, and absolute playback timestamp in Mac host time. Capture timestamps survive sample-rate conversion. Both local and remote outputs receive the same samples and deadlines.
 - Initial shared delay is `clamp(120 ms + 4 × best RTT, 150 ms, 500 ms)`. The receiver translates deadlines into its own clock domain. Each output uses CPAL's predicted DAC playback time, rather than callback invocation or packet arrival time, to select samples.
@@ -51,6 +51,7 @@ Audio buffering also delays sound relative to video playing independently on the
 - Recovery is owned by the Mac: a resync request starts a new epoch, clears stale capture data, and increases the shared delay by 25 ms up to 500 ms. Both outputs use the new packets' future deadlines. Previously queued audio may play until that scheduled transition; late packets from retired epochs are rejected.
 - Losing clock replies for three seconds, losing established audio for five seconds, invalid device timestamps, or a device error stops the route. The Mac clock worker continues while the OS permission request is pending.
 - The private, device-scoped Core Audio tap uses MutedWhenTapped and excludes CompuSync's audio process. That prevents capturing or suppressing our own delayed copy. Stopping/destroying the tap restores original playback without changing system volume or the default device.
+- Capture opens the private aggregate directly using the AudioDeviceID returned by Core Audio. It does not search the public device list, where private devices are absent. Native input accepts 32-bit float PCM in interleaved, planar, or mono buffers; unsupported tap formats return an explicit error.
 
 ## Transport and security
 

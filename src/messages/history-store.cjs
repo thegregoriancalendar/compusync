@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { MAX_CONVERSATIONS, MAX_PARTICIPANTS } = require('./contracts.cjs');
 
 const APPLE_EPOCH_MS = Date.UTC(2001, 0, 1);
 
@@ -26,14 +27,29 @@ class MessagesHistoryStore {
   }
 
   canAccess() {
-    try { fs.accessSync(this.databasePath, fs.constants.R_OK); return true; }
+    // access(2) can succeed even when macOS privacy controls deny opening a file.
+    try {
+      const descriptor = fs.openSync(this.databasePath, 'r');
+      fs.closeSync(descriptor);
+      return true;
+    }
     catch { return false; }
+  }
+
+  availability() {
+    try {
+      this.open().prepare('SELECT name FROM sqlite_master LIMIT 1').get();
+      return { available: true, reason: '' };
+    } catch (error) {
+      return { available: false, reason: error.code === 'MESSAGES_FULL_DISK_ACCESS'
+        ? error.message : 'Could not open the Mac Messages database. Fully quit and restart CompuSync on the Mac, then try again.' };
+    }
   }
 
   open() {
     if (this.database) return this.database;
     if (!this.canAccess()) {
-      const error = new Error('Allow Full Disk Access on the Mac to make Messages history available.');
+      const error = new Error('On the Mac, allow Full Disk Access for the app running CompuSync (Terminal for npm start, or the installed CompuSync app), then fully quit and restart it.');
       error.code = 'MESSAGES_FULL_DISK_ACCESS';
       throw error;
     }
@@ -41,6 +57,48 @@ class MessagesHistoryStore {
     this.database = new DatabaseSync(this.databasePath, { readOnly: true, timeout: 2500 });
     this.ownsDatabase = true;
     return this.database;
+  }
+
+  listConversations() {
+    const database = this.open();
+    const chatColumns = columns(database, 'chat');
+    if (!chatColumns.has('guid') || !chatColumns.has('chat_identifier')) {
+      const error = new Error('This macOS Messages database format is not supported yet.');
+      error.code = 'MESSAGES_SCHEMA_UNSUPPORTED';
+      throw error;
+    }
+    const displayName = chatColumns.has('display_name') ? 'c.display_name' : "''";
+    const serviceName = chatColumns.has('service_name') ? 'c.service_name' : "''";
+    const chats = database.prepare(`
+      SELECT c.ROWID AS rowid, c.guid AS id, c.chat_identifier AS identifier,
+             ${displayName} AS name, ${serviceName} AS service
+        FROM chat AS c
+        LEFT JOIN chat_message_join AS cmj ON cmj.chat_id = c.ROWID
+       WHERE c.guid IS NOT NULL AND c.guid != ''
+       GROUP BY c.ROWID
+       ORDER BY MAX(cmj.message_id) DESC, c.ROWID DESC
+       LIMIT ?
+    `).all(MAX_CONVERSATIONS);
+    const hasParticipants = database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chat_handle_join'").get();
+    const participants = hasParticipants ? database.prepare(`
+      SELECT DISTINCT h.id AS handle
+        FROM chat_handle_join AS chj JOIN handle AS h ON h.ROWID = chj.handle_id
+       WHERE chj.chat_id = ? AND h.id IS NOT NULL AND h.id != ''
+       ORDER BY h.ROWID LIMIT ?
+    `) : null;
+    return chats.map((chat) => {
+      const people = participants ? participants.all(chat.rowid, MAX_PARTICIPANTS)
+        .map(({ handle }) => ({ id: String(handle), name: '', handle: String(handle) })) : [];
+      if (!people.length && chat.identifier && !String(chat.identifier).startsWith('chat')) {
+        people.push({ id: String(chat.identifier), name: '', handle: String(chat.identifier) });
+      }
+      const rawService = String(chat.service || String(chat.id).split(';')[0]).toLowerCase();
+      const service = ({ imessage: 'iMessage', sms: 'SMS', rcs: 'RCS' })[rawService] || 'unknown';
+      return {
+        id: String(chat.id), name: String(chat.name || people.map((person) => person.handle).join(', ')).slice(0, 512),
+        service, participants: people,
+      };
+    });
   }
 
   history({ conversationId, before = null, limit = 100 }) {

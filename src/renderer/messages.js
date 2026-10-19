@@ -19,6 +19,13 @@ let history = [];
 let before = null;
 let hasMore = false;
 let loading = false;
+let refreshing = false;
+let historyRequest = 0;
+let stateRevision = 0;
+let lastConversationRefresh = 0;
+let conversationError = '';
+let historyError = '';
+let sendError = '';
 
 function displayName(conversation) {
   return conversation.name || conversation.participants.map((person) => person.name || person.handle).filter(Boolean).join(', ') || 'Conversation';
@@ -90,57 +97,75 @@ function renderMessages({ preserveScroll = false } = {}) {
 function renderState() {
   renderList();
   const conversation = selectedConversation();
+  const error = sendError || historyError || conversationError;
   elements.composer.hidden = !conversation || !state.available;
   if (!state.available) {
-    elements.status.textContent = state.reason || 'Messages is not available from the Mac.';
+    elements.status.textContent = error || state.reason || 'Messages is not available from the Mac.';
     elements.title.textContent = 'Messages Companion';
     elements.subtitle.textContent = 'Mac connection required';
   } else if (!conversation) {
-    elements.status.textContent = state.conversations.length ? 'Select a conversation.' : 'No conversations available.';
+    elements.status.textContent = error || (state.conversations.length ? 'Select a conversation.' : 'No conversations available.');
+    elements.title.textContent = 'Messages Companion';
+    elements.subtitle.textContent = '';
   } else {
-    elements.status.textContent = loading ? 'Updating…' : '';
+    elements.status.textContent = error || (loading ? 'Updating…' : '');
     elements.title.textContent = displayName(conversation);
     elements.subtitle.textContent = conversation.participants.map((person) => person.handle).filter(Boolean).join(', ') || conversation.service;
   }
 }
 
 async function refreshConversations() {
+  if (refreshing) return;
+  refreshing = true;
+  lastConversationRefresh = Date.now();
   try {
     const conversations = await window.compusyncMessages.command('conversations.list', {});
     state = { ...state, available: true, reason: '', conversations };
-    if (selectedId && !selectedConversation()) selectedId = null;
+    conversationError = '';
+    if (selectedId && !selectedConversation()) selectConversation(null);
   } catch (error) {
-    elements.status.textContent = error.message || 'Could not load conversations.';
+    conversationError = error.message || 'Could not load conversations.';
+  } finally {
+    refreshing = false;
+    renderState();
   }
-  renderState();
 }
 
 async function loadHistory({ earlier = false, quiet = false } = {}) {
   if (!selectedId || loading) return;
+  const request = ++historyRequest;
+  const conversationId = selectedId;
   loading = true;
   if (!quiet) renderState();
   try {
     const result = await window.compusyncMessages.command('history.list', {
-      conversationId: selectedId,
+      conversationId,
       before: earlier ? before : null,
       limit: 120,
     });
-    if (selectedId !== result.conversationId) return;
+    if (request !== historyRequest || selectedId !== result.conversationId) return;
+    historyError = '';
     history = earlier ? [...result.messages, ...history] : result.messages;
     before = result.before;
     hasMore = result.hasMore;
     renderMessages({ preserveScroll: earlier });
   } catch (error) {
-    elements.status.textContent = error.message || 'Could not load messages.';
+    if (request === historyRequest) historyError = error.message || 'Could not load messages.';
   } finally {
-    loading = false;
-    renderState();
+    if (request === historyRequest) {
+      loading = false;
+      renderState();
+    }
   }
 }
 
 function selectConversation(id) {
   if (selectedId === id) return;
   selectedId = id;
+  historyRequest++;
+  loading = false;
+  historyError = '';
+  sendError = '';
   history = [];
   before = null;
   hasMore = false;
@@ -172,26 +197,35 @@ elements.composer.addEventListener('submit', async (event) => {
       text,
       clientId: `client-${crypto.randomUUID()}`,
     });
+    sendError = '';
     elements.draft.value = '';
     elements.draft.dispatchEvent(new Event('input'));
     setTimeout(() => loadHistory({ quiet: true }), 400);
   } catch (error) {
-    elements.status.textContent = error.message || 'Message was not sent.';
-  } finally { elements.send.disabled = false; }
+    sendError = error.message || 'Message was not sent.';
+  } finally { elements.send.disabled = false; renderState(); }
 });
 
 window.compusyncMessages.onState((next) => {
+  const becameAvailable = next.available && !state.available;
+  stateRevision++;
   state = next;
+  renderState();
+  if (becameAvailable) void refreshConversations();
+});
+
+const bootstrapRevision = stateRevision;
+window.compusyncMessages.bootstrap().then((initial) => {
+  if (stateRevision === bootstrapRevision) state = initial;
+  renderState();
+  return refreshConversations();
+}).catch((error) => {
+  conversationError = error.message || 'Messages Companion could not start.';
   renderState();
 });
 
-window.compusyncMessages.bootstrap().then((initial) => {
-  state = initial;
-  renderState();
-  if (state.available) return refreshConversations();
-}).catch((error) => { elements.status.textContent = error.message || 'Messages Companion could not start.'; });
-
 setInterval(() => {
-  if (selectedId && document.visibilityState === 'visible') void loadHistory({ quiet: true });
-  else if (!state.available && document.visibilityState === 'visible') void refreshConversations();
+  if (document.visibilityState !== 'visible') return;
+  if (selectedId && state.available) void loadHistory({ quiet: true });
+  if (!state.available || conversationError || Date.now() - lastConversationRefresh >= 10_000) void refreshConversations();
 }, 2000);

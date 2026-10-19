@@ -1,5 +1,3 @@
-#[cfg(target_os = "macos")]
-use super::buffer::CapturedFrame;
 use super::{
     buffer::{PlaybackCursor, TimedBuffer},
     clock::{self, MS},
@@ -161,64 +159,12 @@ fn output<T: SizedSample + FromSample<f32>>(
 }
 
 #[cfg(target_os = "macos")]
-pub struct Capture {
-    // Declaration order: stop IO before destroying the tap.
-    _stream: cpal::Stream,
-    _tap: super::mac_tap::MutedTap,
-}
+pub type Capture = super::mac_tap::MutedTap;
 #[cfg(target_os = "macos")]
 pub fn capture(
     output: &cpal::Device,
-    producer: rtrb::Producer<CapturedFrame>,
+    producer: rtrb::Producer<super::buffer::CapturedFrame>,
     stats: Arc<Stats>,
 ) -> Result<(Capture, u32), String> {
-    let (tap, device) = super::mac_tap::MutedTap::new(output)?;
-    let supported = device.default_input_config().map_err(|e| e.to_string())?;
-    let rate = supported.sample_rate();
-    let config = supported.config();
-    let stream = match supported.sample_format() {
-        SampleFormat::F32 => input::<f32>(&device, config, producer, stats),
-        SampleFormat::F64 => input::<f64>(&device, config, producer, stats),
-        SampleFormat::I16 => input::<i16>(&device, config, producer, stats),
-        SampleFormat::I32 => input::<i32>(&device, config, producer, stats),
-        format => Err(format!("Mac capture format {format} is not supported yet.")),
-    }?;
-    Ok((
-        Capture {
-            _stream: stream,
-            _tap: tap,
-        },
-        rate,
-    ))
-}
-#[cfg(target_os = "macos")]
-fn input<T: SizedSample>(
-    device: &cpal::Device,
-    config: cpal::StreamConfig,
-    mut producer: rtrb::Producer<CapturedFrame>,
-    stats: Arc<Stats>,
-) -> Result<cpal::Stream, String>
-where
-    f32: FromSample<T>,
-{
-    let channels = config.channels as usize;
-    let rate = config.sample_rate as i64;
-    if channels == 0 || rate == 0 {
-        return Err("Invalid Mac audio capture format.".into());
-    }
-    let error_stats = stats.clone();
-    let stream = device.build_input_stream(config, move |data: &[T], info| {
-        if stats.stopped.load(Ordering::Relaxed) { return; }
-        let first_ns = stream_ns(info.timestamp().capture);
-        stats.captured.fetch_add((data.len() / channels) as u64, Ordering::Relaxed);
-        for (index, frame) in data.chunks_exact(channels).enumerate() {
-            let left = frame[0].to_sample::<f32>(); let right = frame.get(1).map_or(left, |value| value.to_sample::<f32>());
-            if producer.push(CapturedFrame { samples: [left, right], time_ns: first_ns + index as i64 * 1_000_000_000 / rate }).is_err() {
-                stats.resync_requested.store(true, Ordering::Release); break;
-            }
-        }
-    }, move |error| error_stats.fail(format!("Mac audio capture stopped: {error}. Check System Audio Recording permission and try again.")),
-    Some(std::time::Duration::from_secs(10))).map_err(|e| format!("Mac capture could not start: {e}. Check System Audio Recording permission for CompuSync or Electron, then restart."))?;
-    stream.play().map_err(|e| e.to_string())?;
-    Ok(stream)
+    super::mac_tap::MutedTap::new(output, producer, stats)
 }

@@ -12,6 +12,37 @@ pub struct CapturedFrame {
     pub time_ns: i64,
 }
 
+/// Copy a native interleaved or planar float block into the capture ring. The
+/// callback supplies channel views without allocating or changing host time.
+#[cfg(any(target_os = "macos", test))]
+pub fn push_capture_block(
+    left: (&[f32], usize),
+    right: Option<(&[f32], usize)>,
+    first_ns: i64,
+    rate: u32,
+    producer: &mut rtrb::Producer<CapturedFrame>,
+) -> (usize, bool) {
+    let right = right.unwrap_or(left);
+    if left.1 == 0 || right.1 == 0 || rate == 0 {
+        return (0, false);
+    }
+    let count = left
+        .0
+        .len()
+        .div_ceil(left.1)
+        .min(right.0.len().div_ceil(right.1));
+    for index in 0..count {
+        let frame = CapturedFrame {
+            samples: [left.0[index * left.1], right.0[index * right.1]],
+            time_ns: first_ns + index as i64 * 1_000_000_000 / rate as i64,
+        };
+        if producer.push(frame).is_err() {
+            return (index, true);
+        }
+    }
+    (count, false)
+}
+
 /// Carries capture time through sample-rate conversion. Never invents capture
 /// times from socket send time, including after dropped capture callbacks.
 #[cfg(any(target_os = "macos", test))]
@@ -158,6 +189,40 @@ impl PlaybackCursor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_capture_handles_interleaved_planar_mono_timestamps_and_overflow() {
+        let interleaved = [0.1, -0.1, 0.2, -0.2, 0.3, -0.3];
+        let planar_left = [0.1, 0.2, 0.3];
+        let planar_right = [-0.1, -0.2, -0.3];
+        for (left, right) in [
+            ((&interleaved[..], 2), Some((&interleaved[1..], 2))),
+            ((&planar_left[..], 1), Some((&planar_right[..], 1))),
+        ] {
+            let (mut producer, mut consumer) = rtrb::RingBuffer::new(3);
+            assert_eq!(
+                push_capture_block(left, right, 9_000 * MS, 48_000, &mut producer),
+                (3, false)
+            );
+            for index in 0..3 {
+                let frame = consumer.pop().unwrap();
+                assert_eq!(frame.samples, [planar_left[index], planar_right[index]]);
+                assert_eq!(
+                    frame.time_ns,
+                    9_000 * MS + index as i64 * 1_000_000_000 / 48_000
+                );
+            }
+        }
+        let (mut producer, mut consumer) = rtrb::RingBuffer::new(2);
+        assert_eq!(
+            push_capture_block((&planar_left, 1), None, 0, 44_100, &mut producer),
+            (2, true)
+        );
+        assert_eq!(consumer.pop().unwrap().samples, [0.1; 2]);
+        let second = consumer.pop().unwrap();
+        assert_eq!(second.samples, [0.2; 2]);
+        assert_eq!(second.time_ns, 1_000_000_000 / 44_100);
+        assert!(consumer.pop().is_err());
+    }
     fn packet(frame: u64, epoch: u32, play_ns: i64, value: f32) -> AudioPacket {
         AudioPacket {
             epoch,
