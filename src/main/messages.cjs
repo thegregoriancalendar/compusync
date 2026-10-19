@@ -1,6 +1,7 @@
 'use strict';
 
 const { normalizePlacement, ensureNonOverlapping } = require('./virtualspace.cjs');
+const { sanitizePageState } = require('./adapters/chrome/extension/page-state.js');
 
 const MAX_URL_LENGTH = 8192;
 const MAX_TABS = 200;
@@ -15,13 +16,19 @@ const ID = /^[A-Za-z0-9_-]{1,100}$/;
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);
 const integer = (value, minimum, maximum) => Number.isSafeInteger(value) && value >= minimum && value <= maximum;
 const text = (value, maximum) => typeof value === 'string' && value.length <= maximum;
+const timing = (value) => finite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER;
+const latencyMs = (value) => finite(value) && value >= 0 && value <= 5000;
 
 const MESSAGE_POLICIES = Object.freeze({
+  'latency.probe': { reliable: false, ordered: false, priority: 'realtime' },
+  'latency.reply': { reliable: false, ordered: false, priority: 'realtime' },
+  'latency.report': { reliable: false, ordered: false, priority: 'realtime' },
   'cursor.delta': { reliable: false, ordered: false, priority: 'realtime' },
   'cursor.position': { reliable: false, ordered: false, priority: 'realtime' },
   'scroll.delta': { reliable: false, ordered: false, priority: 'realtime' },
   'window.position': { reliable: false, ordered: false, priority: 'realtime' },
   'window.pause': { reliable: true, ordered: true, priority: 'control' },
+  'window.state': { reliable: true, ordered: true, priority: 'control' },
   'cursor.handoff': { reliable: true, ordered: true, priority: 'control' },
   'cursor.mode': { reliable: true, ordered: true, priority: 'control' },
   'cursor.layout': { reliable: true, ordered: true, priority: 'control' },
@@ -89,6 +96,11 @@ function sanitizeWindowDescriptor(value) {
       index: candidate.index,
     };
     if (history) tab.history = history;
+    if (candidate.pageState !== undefined && tabs.length === payload.activeIdx) {
+      const pageState = sanitizePageState(candidate.pageState, candidate.url);
+      if (!pageState) return null;
+      tab.pageState = pageState;
+    }
     tabs.push(tab);
   }
   if (indices.size !== payload.tabs.length) return null;
@@ -109,10 +121,37 @@ function sanitizePeerMessage(value, options = {}) {
     || !Object.hasOwn(MESSAGE_POLICIES, value.type)) return null;
   let result = null;
   switch (value.type) {
+    case 'latency.probe':
+      if (integer(value.id, 1, Number.MAX_SAFE_INTEGER)) result = { type: value.type, id: value.id };
+      break;
+    case 'latency.reply':
+      if (integer(value.id, 1, Number.MAX_SAFE_INTEGER) && timing(value.receivedAt)
+        && timing(value.sentAt) && value.sentAt >= value.receivedAt) {
+        result = { type: value.type, id: value.id, receivedAt: value.receivedAt, sentAt: value.sentAt };
+      }
+      break;
+    case 'latency.report':
+      if (integer(value.samples, 0, 200)
+        && (value.samples === 0
+          ? value.medianMs === null && value.p95Ms === null && value.uncertaintyMs === null
+          : latencyMs(value.medianMs) && latencyMs(value.p95Ms) && value.p95Ms >= value.medianMs
+            && latencyMs(value.uncertaintyMs))) {
+        result = { type: value.type, samples: value.samples, medianMs: value.medianMs,
+          p95Ms: value.p95Ms, uncertaintyMs: value.uncertaintyMs };
+      }
+      break;
+    case 'window.state': {
+      const descriptor = sanitizeWindowDescriptor({ schemaVersion: 1, id: value.id,
+        adapterId: 'chrome', origin: 'state', capturedAt: 0, state: 'normal',
+        geometryVU: { x: 0, y: 0, w: 1, h: 1 }, payload: value.payload });
+      if (descriptor) result = { type: value.type, id: value.id, payload: descriptor.payload };
+      break;
+    }
     case 'cursor.delta':
       if (finite(value.dx) && finite(value.dy) && finite(value.t)
         && Math.abs(value.dx) <= MAX_COORDINATE && Math.abs(value.dy) <= MAX_COORDINATE) {
         result = { type: value.type, dx: value.dx, dy: value.dy, t: value.t };
+        if (timing(value.sampledAt)) result.sampledAt = value.sampledAt;
       }
       break;
     case 'cursor.position':

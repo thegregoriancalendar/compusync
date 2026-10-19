@@ -169,6 +169,7 @@ function render(next) {
   $('auto-launch').checked = next.autoLaunch;
   $('clipboard-sync').checked = next.clipboardSync !== false;
   renderAudio(next);
+  renderMouseLatency(next);
   $('auto-launch').disabled = !next.packaged;
   $('launch-note').hidden = next.packaged;
   const update = next.update || {
@@ -202,14 +203,46 @@ function render(next) {
   if (!selectedTab) tab(status.role === 'join');
 }
 
+function renderMouseLatency(next) {
+  const latency = next.mouseLatency;
+  const linked = next.status.phase === 'connected' && next.cursorSettings?.linked === true;
+  const windows = next.platform === 'win32';
+  const directions = {
+    'mac-windows': windows ? latency?.incoming : latency?.outgoing,
+    'windows-mac': windows ? latency?.outgoing : latency?.incoming,
+  };
+  const format = (value) => Number.isFinite(value) ? `~${value.toFixed(1)} ms` : '\u2014';
+  for (const [direction, stats] of Object.entries(directions)) {
+    const median = $(`latency-${direction}`);
+    const p95 = $(`latency-${direction}-p95`);
+    median.textContent = format(linked ? stats?.medianMs : null);
+    p95.textContent = format(linked ? stats?.p95Ms : null);
+    const title = linked && stats ? `${stats.samples} samples; clock uncertainty about \u00b1${stats.uncertaintyMs.toFixed(1)} ms.` : '';
+    median.title = title;
+    p95.title = title;
+  }
+  $('mouse-latency-status').textContent = !linked
+    ? 'Connect both laptops and link cursors to measure.'
+    : !latency || latency.calibrating
+      ? 'Calibrating timing with the other laptop. Both laptops need the current build.'
+      : 'Live while moving the other laptop\'s cursor. Readings clear after 10 seconds without samples.';
+  $('mouse-latency-network').textContent = linked && Number.isFinite(latency?.networkRttMs)
+    ? `Network round trip (best recent): ${latency.networkRttMs.toFixed(1)} ms.` : '';
+}
+
 function renderAudio(next) {
   const audio = next.audio;
   const windows = next.platform === 'win32';
   const active = audio?.active === true;
-  $('audio-mode').textContent = active ? 'Mac → Windows' : 'Separate';
+  $('audio-mode').textContent = active ? 'Shared playback' : 'Separate';
   $('audio-mode').className = `mode-badge${active ? '' : ' unlinked'}`;
   $('audio-status').textContent = audio?.message || 'Audio stays on each laptop.';
   $('audio-status').classList.toggle('audio-error-text', audio?.phase === 'error');
+  const timing = audio?.timing;
+  $('audio-timing').hidden = !active || !timing?.clockReady;
+  $('audio-timing').textContent = timing?.clockReady
+    ? `Buffered delay: ${Math.round(timing.delayMs)} ms · Clock uncertainty estimate: ±${Number(timing.uncertaintyMs).toFixed(2)} ms · Recoveries: ${timing.resyncs}`
+    : '';
   $('audio-start').hidden = windows;
   $('audio-start').disabled = !audio?.canStart;
   $('audio-stop').disabled = !active;
@@ -234,11 +267,9 @@ function renderAudio(next) {
       ? 'Choose an output, then start sharing from the Mac. Stop sharing before changing devices.'
       : !audio.canCapture
         ? 'Mac audio capture requires macOS 14.6 or later.'
-        : !next.packaged
-          ? 'For capture permissions, run the packaged Mac app built with npm run build. Select the Mac’s built-in speakers for the first test.'
-          : !audio.peerReady && next.status.phase === 'connected'
-            ? 'The other laptop has not announced audio support. Run the same current build on both laptops.'
-            : 'The Mac keeps playing locally. Allow System Audio Recording when prompted. Playback on Windows has a small delay.';
+        : !audio.peerReady && next.status.phase === 'connected'
+          ? 'The other laptop has not announced audio support. Run the same current build on both laptops.'
+          : `Use built-in or wired speakers for the first test. Allow System Audio Recording for ${next.packaged ? 'CompuSync' : 'Electron or the terminal used to launch it'} when prompted. The Mac’s local sound is delayed so both laptops can follow the same schedule.`;
 }
 
 async function audioCommand(name, data) {

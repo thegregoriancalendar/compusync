@@ -171,7 +171,7 @@ class DragController extends EventEmitter {
 
   async frame({ geometryVU, cursorVU } = {}) {
     const state = this.active;
-    if (!state || state.role !== 'source' || !point(cursorVU)) return false;
+    if (!state || state.role !== 'source' || !point(cursorVU) || state.dropped) return false;
     const previous = state.geometry;
     const previousCursor = state.cursorVU;
     state.previous = { ...previous };
@@ -218,6 +218,8 @@ class DragController extends EventEmitter {
     const targetVisible = intersectionArea(targetRect, state.target) > 0;
     state.winner = state.instant ? 'destination' : sourceVisible && targetVisible ? null : targetVisible ? 'destination' : 'source';
     this.#setPhase(state, 'dropping', 'mouse-up', { winner: state.winner });
+    if (state.winner !== 'source' && typeof state.adapter.captureState === 'function') await this.#refreshPageState(state);
+    if (this.active !== state || state.aborted) return false;
     if (!state.winner) {
       if (!this.send({ type: 'window.pause', id: state.descriptor.id,
         originVU: { x: state.geometry.x, y: state.geometry.y } })) return this.abort('pause-send-failed');
@@ -275,6 +277,12 @@ class DragController extends EventEmitter {
       return true;
     }
     if (!state || state.descriptor?.id !== message.id) return false;
+
+    if (message.type === 'window.state' && state.role === 'destination') {
+      state.pendingPayload = message.payload;
+      if (state.ready) await this.#applyPageState(state);
+      return true;
+    }
 
     if (message.type === 'window.ready' && state.role === 'source') {
       if (state.aborted) { this.send({ type: 'window.abort', id: message.id, reason: 'late-ready' }); return false; }
@@ -374,7 +382,7 @@ class DragController extends EventEmitter {
 
   snapshot() {
     if (!this.active) return null;
-    const { adapter, window, handle, resolveReady, readyTimer, reverseTimer, positionDrain, pendingPosition, ...safe } = this.active;
+    const { adapter, window, handle, resolveReady, readyTimer, reverseTimer, positionDrain, pendingPosition, stateDrain, pendingPayload, ...safe } = this.active;
     const geometry = safe.geometry || (safe.descriptor?.geometryVU && safe.originVU
       ? { ...safe.descriptor.geometryVU, ...safe.originVU } : null);
     return { ...safe, grabOffsetVU: safe.grabOffsetVU && { ...safe.grabOffsetVU },
@@ -454,6 +462,7 @@ class DragController extends EventEmitter {
       const state = this.active;
       state.descriptor = descriptor;
       state.pendingPause = null;
+      state.pendingPayload = descriptor.payload;
       state.pendingWinner = null;
       state.originVU = { x: descriptor.geometryVU.x, y: descriptor.geometryVU.y };
       state.lastPositionSequence = -1;
@@ -515,6 +524,11 @@ class DragController extends EventEmitter {
       }
       state.handle = preparedHandle || state.handle;
       if (!state.handle) throw new Error('prepare-handle-missing');
+      // A parked native copy must receive the newly grabbed half's current
+      // tabs and page state before it is eligible to win a later transfer.
+      if (parked || state.descriptor !== descriptor) state.pendingPayload ||= state.descriptor.payload;
+      if (state.pendingPayload) await this.#applyPageState(state);
+      if (this.active !== state || state.aborted) return false;
       if (!state.instant && state.positionReceived) {
         await this.#queueDestinationPosition(state);
       }
@@ -612,6 +626,8 @@ class DragController extends EventEmitter {
       if (this.active !== state || state.aborted) return false;
       state.pendingPosition = null;
       if (winner === 'destination') {
+        await this.#applyPageState(state);
+        if (this.active !== state || state.aborted) return false;
         const rect = fitToPlacement(renderedGeometry({ ...state.descriptor.geometryVU, ...state.originVU },
           state.source, state.target, state.descriptor.geometryVU), state.target);
         state.handle = { ...state.handle, geometryVU: rect };
@@ -636,6 +652,7 @@ class DragController extends EventEmitter {
     // The reliable pause carries the exact final origin; the last realtime
     // position is allowed to be lost or to arrive after mouse release.
     this.#setPhase(state, 'pausing', 'pause-received');
+    await this.#applyPageState(state);
     if (state.positionDrain) await state.positionDrain;
     if (this.active !== state || state.aborted) return false;
     state.pendingPosition = null;
@@ -659,6 +676,40 @@ class DragController extends EventEmitter {
     this.#setPhase(state, 'split', 'split-retained');
     this.emit('paused', this.snapshot());
     this.#clear();
+  }
+
+  async #refreshPageState(state) {
+    if (typeof state.adapter.captureState !== 'function' || state.sourceMissing) return;
+    let timer;
+    try {
+      const payload = await Promise.race([
+        state.adapter.captureState(state.window, state.geometry),
+        new Promise((_, reject) => { timer = this.setTimer(() => reject(new Error('page-state-timeout')), 1000); }),
+      ]);
+      if (this.active !== state || state.aborted || !payload) return;
+      state.descriptor = { ...state.descriptor, payload };
+      if (!this.send({ type: 'window.state', id: state.descriptor.id, payload })) {
+        this.#lifecycle(state, 'page-state-unavailable', { reason: 'state-send-failed' });
+      }
+    } catch (error) {
+      this.#lifecycle(state, 'page-state-unavailable', { reason: this.#reason(error, 'capture-state-failed') });
+    } finally { if (timer) this.clearTimer(timer); }
+  }
+
+  async #applyPageState(state) {
+    // Lifecycle messages can arrive while a previous snapshot is applying.
+    // Serialize application so an older restore cannot overwrite the drop.
+    if (state.stateDrain) await state.stateDrain.catch(() => {});
+    if (this.active !== state || state.aborted) return;
+    if (!state.pendingPayload || !state.handle || typeof state.adapter.syncState !== 'function') return;
+    const payload = state.pendingPayload;
+    state.pendingPayload = null;
+    state.descriptor = { ...state.descriptor, payload };
+    const drain = Promise.resolve().then(() => state.adapter.syncState(state.handle, payload));
+    state.stateDrain = drain;
+    try { await drain; }
+    catch (error) { this.#lifecycle(state, 'page-state-unavailable', { reason: this.#reason(error, 'restore-state-failed') }); }
+    finally { if (state.stateDrain === drain) state.stateDrain = null; }
   }
 
   async #restoreParked(parked) {

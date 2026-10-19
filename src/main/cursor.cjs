@@ -62,6 +62,7 @@ class CursorController extends EventEmitter {
     if (typeof options.machineId !== 'string' || !options.machineId.length) throw new TypeError('machineId is required.');
     this.machineId = options.machineId;
     this.native = options.native || {};
+    this.latency = options.latency || null;
     this.send = typeof options.send === 'function' ? options.send : () => false;
     this.mapRemoteModifiers = typeof options.mapRemoteModifiers === 'function'
       ? options.mapRemoteModifiers : (modifiers) => modifiers;
@@ -89,6 +90,7 @@ class CursorController extends EventEmitter {
     this.pendingLocal = { dx: 0, dy: 0 };
     this.pendingRemote = { dx: 0, dy: 0 };
     this.outboundDelta = { dx: 0, dy: 0, t: 0 };
+    this.outboundSampledAt = null;
     this.lastDeltaSentAt = -Infinity;
     this.edgePressure = null;
     this.entryGuard = null;
@@ -194,6 +196,8 @@ class CursorController extends EventEmitter {
     this.pendingLocal = { dx: 0, dy: 0 };
     this.pendingRemote = { dx: 0, dy: 0 };
     this.outboundDelta = { dx: 0, dy: 0, t: 0 };
+    this.outboundSampledAt = null;
+    this.latency?.discardPending();
     if (next) this.#enableCapture();
     else this.#disableCapture();
     this.#applyPhysicalOwnership();
@@ -228,6 +232,9 @@ class CursorController extends EventEmitter {
 
   localDelta(dx, dy, dt = this.frameMs, timestamp = this.now(), options = {}) {
     if (!this.linked || !finite(dx) || !finite(dy) || !finite(dt)) return false;
+    if (!this.isOwner() && !this.outboundDelta.dx && !this.outboundDelta.dy && (dx || dy)) {
+      this.outboundSampledAt = this.latency?.captureInput() ?? null;
+    }
     const accelerated = options.accelerated
       ? { dx, dy }
       : accelerateDelta(dx, dy, dt, this.config.acceleration);
@@ -263,6 +270,7 @@ class CursorController extends EventEmitter {
       if (!this.isOwner() || !finite(message.dx) || !finite(message.dy)) return false;
       this.pendingRemote.dx += message.dx;
       this.pendingRemote.dy += message.dy;
+      this.latency?.queueInput(message.sampledAt);
       return true;
     }
     if (message.type === 'cursor.position') {
@@ -307,6 +315,8 @@ class CursorController extends EventEmitter {
     this.pendingLocal = { dx: 0, dy: 0 };
     this.pendingRemote = { dx: 0, dy: 0 };
     if (dx || dy) this.#moveAuthoritative(dx, dy);
+    if ((dx || dy) && this.linked && this.isOwner()) this.latency?.inputApplied();
+    else this.latency?.discardPending();
     if (this.linked && this.isOwner()) {
       this.#sendPeer({ type: 'cursor.position', x: this.virtualCursor.x, y: this.virtualCursor.y, t: timestamp }, false);
       this.emit('position', this.state());
@@ -449,6 +459,8 @@ class CursorController extends EventEmitter {
     this.entryGuard = null;
     this.pendingLocal = { dx: 0, dy: 0 };
     this.pendingRemote = { dx: 0, dy: 0 };
+    this.outboundSampledAt = null;
+    this.latency?.discardPending();
     // This machine is no longer authoritative. Release every injected hold;
     // its physical device remains tracked and continues forwarding events.
     if (!this.#nativeCall('releaseInputState')) return false;
@@ -484,6 +496,8 @@ class CursorController extends EventEmitter {
     this.edgePressure = null;
     this.pendingLocal = { dx: 0, dy: 0 };
     this.pendingRemote = { dx: 0, dy: 0 };
+    this.outboundSampledAt = null;
+    this.latency?.discardPending();
     const entryEdge = previousOwner && previousOwner.machineId !== targetId
       ? this.#entryEdge(target, previousOwner) : null;
     this.entryGuard = entryEdge
@@ -552,6 +566,8 @@ class CursorController extends EventEmitter {
     this.outboundDelta.dx -= dx;
     this.outboundDelta.dy -= dy;
     const message = { type: 'cursor.delta', dx, dy, t: this.outboundDelta.t };
+    if (this.outboundSampledAt !== null) message.sampledAt = this.outboundSampledAt;
+    this.outboundSampledAt = null;
     this.lastDeltaSentAt = now;
     this.#sendPeer(message, false);
     return true;

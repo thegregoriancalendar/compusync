@@ -174,6 +174,7 @@ function details() {
   return {
     id: config.id, name: config.name, platform: process.platform, edge: config.edge, autoLaunch: config.autoLaunch,
     clipboardSync: config.clipboardSync,
+    mouseLatency: inputRuntime?.latency.state() || null,
     audio: audioRouter?.state() || null,
     cursorSettings: {
       ...config.cursorSettings,
@@ -387,6 +388,7 @@ function ensureInputRuntime() {
       },
     });
     inputRuntime = startingInputRuntime;
+    inputRuntime.on('latency', () => send(settings, 'sync:details', details()));
     inputRuntime.start();
     const chrome = new ChromeAdapterRuntime({
       native: nativeInput,
@@ -463,7 +465,7 @@ async function startSession() {
   sync = new Session({ ...config, layout, startClosed: backgroundLaunch });
   audioRouter = new AudioRouter({
     session: sync,
-    engine: new RustAudioEngine({ binding: loadBinding().binding, packaged: app.isPackaged }),
+    engine: new RustAudioEngine({ binding: loadBinding().binding }),
     outputId: config.audioOutputId,
   });
   audioRouter.on('state', refreshStatus);

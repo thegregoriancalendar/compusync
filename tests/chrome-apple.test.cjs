@@ -32,6 +32,32 @@ const capturedWindow = {
   ],
 };
 
+test('Apple capture carries page state and shows a useful notice when Chrome disallows page access', async () => {
+  const state = { version: 1, url: 'https://active.example/', viewport: { w: 800, h: 500 },
+    scroll: { x: 0, y: 900 }, fields: [], scrollers: [], details: [] };
+  let permitted = true;
+  const notices = [];
+  const adapter = createAppleChromeAdapter({
+    onNotice: (notice) => notices.push(notice),
+    execFile(file, args, options, callback) {
+      const script = args[3];
+      if (script.includes('compusync:chrome:page-state')) {
+        assert.equal(options.timeout, 1500);
+        callback(null, JSON.stringify(permitted ? state : { unavailable: true, needsJavaScript: true }), '');
+      } else callback(null, JSON.stringify([capturedWindow]), '');
+    },
+  });
+  const window = { nativeWindowId: 'ax:1', chromeWindowId: '41' };
+  const geometry = { x: 10, y: 20, w: 800, h: 600 };
+  const descriptor = await adapter.capture(window, geometry);
+  assert.deepEqual(descriptor.payload.tabs[1].pageState, state);
+  permitted = false;
+  assert.equal((await adapter.capture(window, geometry)).payload.tabs[1].pageState, undefined);
+  await adapter.capture(window, geometry);
+  assert.equal(notices.length, 1);
+  assert.match(notices[0].message, /Allow JavaScript from Apple Events/);
+});
+
 function handoffDescriptor(id = 'cold-handoff') {
   return {
     schemaVersion: 1, id, adapterId: 'chrome', origin: 'win-a', capturedAt: 1,
@@ -358,8 +384,8 @@ test('close uses Chrome Automation identity and requests Automation only once', 
   await adapter.capture({ chromeWindowIndex: 1 }, { x: 0, y: 0, w: 800, h: 600 });
   await adapter.close({ nativeWindowId: 'ax:1:0', chromeWindowId: '41', chromeWindowIndex: 1 });
   assert.equal(permissionRequests, 1);
-  assert.equal(calls.length, 2);
-  assert.ok(calls[1].args[3].includes('compusync:chrome:close'));
+  assert.equal(calls.length, 3);
+  assert.ok(calls[2].args[3].includes('compusync:chrome:close'));
 });
 
 test('Automation denial is actionable, typed, and cached without repeated prompts', async () => {

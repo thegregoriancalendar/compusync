@@ -34,6 +34,7 @@ assert.equal(path.resolve(loaded.path), artifactPath);
 assert.equal(typeof loaded.binding.NativeSubstrate, 'function');
 assert.equal(typeof loaded.binding.NativeAudio, 'function', 'rebuild the native addon for audio routing');
 const audio = new loaded.binding.NativeAudio();
+assert.equal(audio.protocolVersion(), 2, 'rebuild the native addon for synchronized audio');
 assert.equal(audio.status().running, false);
 assert.equal(typeof audio.startReceiver, 'function');
 assert.equal(typeof audio.startSender, 'function');

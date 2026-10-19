@@ -6,6 +6,7 @@ const {
   nativeWindowId, safeLog, selectAddressableWindow, hostOnly,
 } = require('./capture.cjs');
 const { ChromePrepareError, chromeBounds, prepareBounds } = require('./prepare.cjs');
+const { sanitizePageState } = require('./extension/page-state.js');
 
 const MAX_WINDOWS = 100;
 const MAX_TABS = 500;
@@ -29,6 +30,7 @@ function normalizeWindow(value) {
     url: tab?.url,
     title: typeof tab?.title === 'string' ? tab.title.slice(0, 1024) : '',
     pinned: Boolean(tab?.pinned), active: Boolean(tab?.active), history: tab?.history,
+    pageState: tab?.pageState,
   }));
   if (tabs.some((tab) => !tab.id || !Number.isSafeInteger(tab.index))) return null;
   return {
@@ -110,14 +112,16 @@ class ChromeExtensionAdapter {
       if (Array.isArray(enumerated)) nativeWindows = enumerated;
     } catch {}
     const groups = await this.windows(nativeWindows);
-    let selected;
+    const existingRecord = this.records.get(String(nativeWindowId(window)));
+    let selected = existingRecord && groups.find((group) => group.windowId === existingRecord.windowId);
+    if (selected) selected = { ...selected, nativeWindow: window };
     if (isNativeChromeWindow(window)) {
       // chrome.windows uses logical coordinates while GetWindowRect is
       // physical-DPI and may also lag during Windows' modal move loop. The
       // dragged HWND and Chrome's sole focused normal window are the same
       // user-selected window, providing an identity-safe fallback.
       const focused = groups.filter((group) => group.focused);
-      if (focused.length === 1) selected = { ...focused[0], nativeWindow: window };
+      if (!selected && focused.length === 1) selected = { ...focused[0], nativeWindow: window };
     }
     if (!selected) selected = selectAddressableWindow(groups, window);
     if (!selected?.nativeWindow) {
@@ -149,6 +153,8 @@ class ChromeExtensionAdapter {
         tabs: ordered.map((tab, index) => ({
           url: tab.url, title: tab.title, pinned: tab.pinned, index,
           ...(validHistory(tab.history) ? { history: validHistory(tab.history) } : {}),
+          ...(index === activeIdx && sanitizePageState(tab.pageState, tab.url)
+            ? { pageState: sanitizePageState(tab.pageState, tab.url) } : {}),
         })),
       },
     };
@@ -245,6 +251,24 @@ class ChromeExtensionAdapter {
       tabCount: descriptor.payload.tabs.length,
     });
     return handle;
+  }
+
+  async captureState(handle, geometry) {
+    return (await this.capture(handle, geometry)).payload;
+  }
+
+  async syncState(handle, payload) {
+    const record = this.records.get(String(nativeWindowId(handle)));
+    const windowId = handle?.windowId ?? record?.windowId;
+    if (!Number.isInteger(windowId)) return false;
+    const result = await this.bridge.request('window.sync', { windowId, ...payload });
+    const group = normalizeWindow(result);
+    if (!group) return false;
+    const active = group.tabs.find((tab) => tab.active);
+    if (active) handle.activeTabId = active.tabId;
+    handle.tabIds = group.tabs.map((tab) => tab.tabId);
+    if (record) Object.assign(record, { activeTabId: handle.activeTabId, tabIds: handle.tabIds });
+    return true;
   }
 
   boundsFor(handle, position) {

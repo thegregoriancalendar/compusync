@@ -2,6 +2,7 @@
 
 const { EventEmitter } = require('node:events');
 const { CursorController } = require('./cursor.cjs');
+const { MouseLatency } = require('./mouse-latency.cjs');
 const { KeyboardRouter } = require('./keyboard.cjs');
 const { ScrollRouter } = require('./scroll.cjs');
 const { mapModifiers, mapKeyEvent } = require('./key-mapping.cjs');
@@ -94,6 +95,11 @@ class SharedInputRuntime extends EventEmitter {
     this.localLinkRequested = false;
     this.peerLinkRequested = false;
     this.windowController = null;
+    this.latency = new MouseLatency({
+      now: options.latencyNow,
+      send: (message) => this.send(message),
+      onUpdate: () => this.emit('latency', this.latency.state()),
+    });
     const inputPlatforms = () => ({
       source: this.layouts?.[this.peerId]?.platform,
       destination: this.layouts?.[this.machineId]?.platform || this.native.platformName || process.platform,
@@ -104,6 +110,7 @@ class SharedInputRuntime extends EventEmitter {
     this.cursor = new CursorController({
       machineId: this.machineId,
       native: this.native,
+      latency: this.latency,
       placements,
       ownerMachineId: this.hostId,
       initialPosition: ownerPlacement ? centerOf(ownerPlacement) : { x: 0, y: 0 },
@@ -135,6 +142,8 @@ class SharedInputRuntime extends EventEmitter {
       modifiers: state.modifiers,
     }));
     this.cursor.on('ownership', () => this.#applyActiveAcceleration());
+    this.cursor.on('mode', ({ linked }) => this.latency.setLinked(linked));
+    this.cursor.on('failure', () => this.latency.setLinked(false));
     this.cursor.on('layout', () => this.#applyActiveAcceleration());
     this.cursor.on('handoff-rejected', (state) => this.#logMode('cursor.handoff.rejected', state));
     this.keyboard = new KeyboardRouter({
@@ -194,6 +203,7 @@ class SharedInputRuntime extends EventEmitter {
     this.watchdog.bindProcess(this.processLike);
     this.watchdog.bindPowerMonitor(this.powerMonitor);
     this.cursor.start();
+    this.latency.start();
     this.session.on('peer-message', this._peerMessage);
     this.session.on('status', this._status);
     this.session.on('state', this._state);
@@ -232,6 +242,7 @@ class SharedInputRuntime extends EventEmitter {
   receive(message, peerMachineId) {
     const clean = sanitizePeerMessage(message, { logger: this.logger });
     if (!clean || peerMachineId !== this.peerId) return false;
+    if (clean.type.startsWith('latency.')) return this.latency.receive(clean);
     if (clean.type === 'cursor.mode') return this.#receiveCursorMode(clean.linked);
     if (clean.type === 'cursor.layout') return this.#receiveCursorLayout(clean);
     if (clean.type === 'cursor.feel') return this.#receiveCursorFeel(clean);
@@ -243,6 +254,7 @@ class SharedInputRuntime extends EventEmitter {
 
   setPeerConnected(connected) {
     this.peerConnected = Boolean(connected);
+    this.latency.setConnected(this.peerConnected);
     if (!this.peerConnected) this.peerLinkRequested = false;
     this.watchdog.setPeerConnected(this.peerConnected);
     if (!this.peerConnected) return;
@@ -318,6 +330,7 @@ class SharedInputRuntime extends EventEmitter {
     if (!this.started) return;
     this.stopping = true;
     this.started = false;
+    this.latency.stop();
     this.hotkeys?.dispose?.();
     this.session.off?.('peer-message', this._peerMessage);
     this.session.off?.('status', this._status);

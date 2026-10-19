@@ -3,6 +3,7 @@
 const childProcess = require('node:child_process');
 const crypto = require('node:crypto');
 const { sanitizeWindowDescriptor, validUrl } = require('../../messages.cjs');
+const { pageState, sanitizePageState } = require('./extension/page-state.js');
 
 const APP_NAME = 'Google Chrome';
 const AUTOMATION_HELP = 'Allow Compusync to control Google Chrome in System Settings > Privacy & Security > Automation, then try the handoff again.';
@@ -160,6 +161,45 @@ else {
 }`;
 }
 
+function stateScript(handle, operation, state) {
+  const expression = `JSON.stringify((${pageState.toString()})(${scriptLiteral(operation)}${state ? `,${scriptLiteral(state)}` : ''}))`;
+  return `/* compusync:chrome:page-state */
+${runningChromeScript()}
+var input = ${scriptLiteral({ chromeWindowId: String(handle.chromeWindowId || ''), activeIdx: handle.activeIdx || 0 })};
+var win = chrome.windows().find(function (candidate) { return String(candidate.id()) === input.chromeWindowId; });
+if (!win) throw new Error('COMPUSYNC_CHROME_WINDOW_GONE');
+var tab = win.tabs()[input.activeIdx];
+var result = null;
+try {
+  for (var attempt = 0; attempt < ${operation === 'restore' ? 8 : 1}; attempt += 1) {
+    result = JSON.parse(String(tab.execute({ javascript: ${scriptLiteral(expression)} })));
+    if (${operation === 'capture' ? 'true' : `result.applied && Math.abs(result.scroll.y - ${Number(state?.scroll.y) || 0}) < 2 && Math.abs(result.scroll.x - ${Number(state?.scroll.x) || 0}) < 2`}) break;
+    delay(0.1);
+  }
+} catch (error) {
+  result = { unavailable: true, needsJavaScript: /javascript.*(?:apple|disabled|turned off)|allow javascript|-1744/i.test(String(error)) };
+}
+JSON.stringify(result);`;
+}
+
+function syncTabsScript(handle, payload) {
+  return `/* compusync:chrome:sync-tabs */
+${runningChromeScript()}
+var input = ${scriptLiteral({ chromeWindowId: String(handle.chromeWindowId || ''), payload })};
+var win = chrome.windows().find(function (candidate) { return String(candidate.id()) === input.chromeWindowId; });
+if (!win) throw new Error('COMPUSYNC_CHROME_WINDOW_GONE');
+var tabs = win.tabs();
+for (var index = 0; index < input.payload.tabs.length; index += 1) {
+  var source = input.payload.tabs[index];
+  if (!tabs[index]) { win.tabs.push(chrome.Tab({ url: source.url })); tabs = win.tabs(); }
+  else if (String(tabs[index].url()) !== source.url) tabs[index].url = source.url;
+  try { tabs[index].pinned = Boolean(source.pinned); } catch (_) {}
+}
+for (var index = tabs.length - 1; index >= input.payload.tabs.length; index -= 1) tabs[index].close();
+win.activeTabIndex = input.payload.activeIdx + 1;
+'synced';`;
+}
+
 function chromeNativeWindow(candidate) {
   const processName = String(candidate?.processName ?? candidate?.process_name ?? candidate?.bundleId ?? candidate?.bundle_id ?? '');
   return candidate?.visible !== false
@@ -307,6 +347,20 @@ function createAppleChromeAdapter(options = {}) {
   let automationRequest;
   const descriptorIds = new Map();
   const preparedDescriptors = new Map();
+  let pageStateNoticeShown = false;
+
+  async function runPageState(handle, operation, state) {
+    try {
+      const result = parseScriptJson(await runJxa(stateScript(handle, operation, state), 'CHROME_PAGE_STATE_UNAVAILABLE', 1500), 'CHROME_PAGE_STATE_UNAVAILABLE');
+      if (result?.needsJavaScript && !pageStateNoticeShown) {
+        pageStateNoticeShown = true;
+        options.onNotice?.({ id: 'chrome-page-state-permission', kind: 'warning',
+          title: 'Enable Chrome page-state handoff', dismissible: true,
+          message: 'In Chrome on this Mac, choose View > Developer > Allow JavaScript from Apple Events to transfer scroll positions and ordinary form drafts.' });
+      }
+      return result;
+    } catch { return null; }
+  }
 
   async function ensureAutomation() {
     if (automationState === 'denied') throw new AppleChromeError('CHROME_AUTOMATION_DENIED', AUTOMATION_HELP);
@@ -328,11 +382,11 @@ function createAppleChromeAdapter(options = {}) {
     return automationRequest;
   }
 
-  async function runJxa(script, failureCode) {
+  async function runJxa(script, failureCode, timeoutMs = 10000) {
     await ensureAutomation();
     try {
       const result = await invokeExecFile(execFile, '/usr/bin/osascript', ['-l', 'JavaScript', '-e', script], {
-        encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, timeout: 10000,
+        encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, timeout: timeoutMs,
       });
       return result.stdout;
     } catch (error) {
@@ -411,6 +465,13 @@ function createAppleChromeAdapter(options = {}) {
     const id = stableDescriptorId(nativeWindow, stableInput)
       || descriptorIds.get(String(nativeId(nativeWindow)))
       || makeUuid();
+    try {
+      nativeWindow.chromeWindowId = selected.chromeWindowId;
+      nativeWindow.chromeWindowIndex = selected.chromeWindowIndex;
+    } catch {}
+    const state = await runPageState({ chromeWindowId: selected.chromeWindowId, activeIdx: activeOriginalIndex }, 'capture');
+    const cleanState = sanitizePageState(state, tabs[activeIdx].url);
+    if (cleanState) tabs[activeIdx].pageState = cleanState;
     const descriptor = {
       schemaVersion: 1,
       id,
@@ -522,6 +583,8 @@ function createAppleChromeAdapter(options = {}) {
         }
       }
       await runJxa(populateWindowScript(descriptor, handle), 'CHROME_PREPARE_FAILED');
+      const activePage = descriptor.payload.tabs[descriptor.payload.activeIdx];
+      if (activePage.pageState) await runPageState({ ...handle, activeIdx: descriptor.payload.activeIdx }, 'restore', activePage.pageState);
     } catch (error) {
       await discardPreparedWindow(handle);
       throw error;
@@ -533,6 +596,17 @@ function createAppleChromeAdapter(options = {}) {
 
   async function position(handle, boundsPx) {
     await setNativeBounds(nativeId(handle), boundsPx);
+  }
+
+  async function syncState(handle, payload) {
+    if (!handle.chromeWindowId) return false;
+    await runJxa(syncTabsScript(handle, payload), 'CHROME_STATE_SYNC_FAILED');
+    const active = payload.tabs[payload.activeIdx];
+    if (active.pageState) await runPageState({ ...handle, activeIdx: payload.activeIdx }, 'restore', active.pageState);
+    const id = stableDescriptorId(handle);
+    const prior = preparedDescriptors.get(id);
+    if (prior) rememberPreparedDescriptor(preparedDescriptors, id, { ...prior, payload });
+    return true;
   }
 
   async function focus(handle) {
@@ -576,6 +650,7 @@ function createAppleChromeAdapter(options = {}) {
     position,
     focus,
     close,
+    syncState,
   });
 }
 

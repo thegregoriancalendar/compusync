@@ -1,5 +1,8 @@
 'use strict';
 
+importScripts('page-state.js');
+const { pageState, sanitizePageState } = globalThis.CompuSyncPageState;
+
 const NATIVE_HOST = 'app.compusync.chrome';
 const PROTOCOL_VERSION = 1;
 const DEBUGGER_VERSION = '1.3';
@@ -91,7 +94,9 @@ function normalizedPrepare(params) {
     }
     seenIndices.add(tab.index);
     const history = normalizedHistory(tab.history);
-    return { url: tab.url, pinned: tab.pinned, index: tab.index, ...(history ? { history } : {}) };
+    const state = tab.pageState === undefined ? null : sanitizePageState(tab.pageState, tab.url);
+    if (tab.pageState !== undefined && !state) throw new BridgeError('INVALID_PAGE_STATE', 'The page state is invalid.');
+    return { url: tab.url, pinned: tab.pinned, index: tab.index, ...(history ? { history } : {}), ...(state ? { pageState: state } : {}) };
   });
   if (seenIndices.size !== tabs.length) throw new BridgeError('INVALID_TAB', 'Chrome tab indices must be unique.');
   const state = params.state === undefined ? 'normal' : params.state;
@@ -206,12 +211,44 @@ async function captureWindow(params) {
   // tabs to their current URLs also bounds the native-messaging response.
   const activeIndex = Math.max(0, tabs.findIndex((tab) => tab.active));
   const activeHistory = await captureHistory(tabs[activeIndex]);
+  const activePageState = await captureTabPageState(tabs[activeIndex]);
   const result = publicWindow(window);
   result.tabs = result.tabs.map((tab, index) => ({
     ...tab,
     ...(index === activeIndex && activeHistory ? { history: activeHistory } : {}),
+    ...(index === activeIndex && activePageState ? { pageState: activePageState } : {}),
   }));
   return result;
+}
+
+async function captureTabPageState(tab) {
+  try {
+    return await withDebugger(tab.id, async (command) => {
+      const response = await command('Runtime.evaluate', {
+        expression: `(${pageState.toString()})('capture')`, returnByValue: true,
+      });
+      return response?.exceptionDetails ? null : sanitizePageState(response?.result?.value, tab.url);
+    });
+  } catch { return null; }
+}
+
+async function restoreTabPageState(tabId, state) {
+  if (!state) return;
+  try {
+    await withDebugger(tabId, async (command) => {
+      // A newly created tab may still be loading. Retry for late layout and
+      // scroll restoration; never block live window-position requests.
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        const response = await command('Runtime.evaluate', {
+          expression: `(${pageState.toString()})('restore',${JSON.stringify(state)})`, returnByValue: true,
+        });
+        const restored = response?.result?.value;
+        if (restored?.applied && Math.abs((restored.scroll?.y ?? 0) - state.scroll.y) < 2
+          && Math.abs((restored.scroll?.x ?? 0) - state.scroll.x) < 2) return;
+        if (attempt < 7) await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    });
+  } catch { /* DevTools may own this page; URL handoff must still work. */ }
 }
 
 async function applyWindowBounds(windowId, bounds, state) {
@@ -284,6 +321,7 @@ async function finishPrepareWindow(params) {
     await mapConcurrent(ordered.filter((source) => source.history), HISTORY_CONCURRENCY,
       (source) => restoreHistory(created.get(source), source.history));
     await chrome.tabs.update(created.get(activeSource), { active: true });
+    await restoreTabPageState(created.get(activeSource), activeSource.pageState);
     // The live handoff may already have repositioned the window while its tabs
     // were restored. Do not overwrite that newer position with the initial
     // offscreen bounds at the end of preparation.
@@ -301,6 +339,26 @@ async function finishPrepareWindow(params) {
 async function prepareWindow(params) {
   const begun = await beginPrepareWindow(params);
   return finishPrepareWindow({ windowId: begun.windowId });
+}
+
+async function syncWindow(params) {
+  const windowId = windowIdFrom(params);
+  const input = normalizedPrepare({ ...params, bounds: { left: 0, top: 0, width: 800, height: 600 }, state: 'normal' });
+  const current = await chrome.windows.get(windowId, { populate: true });
+  const tabs = [...(current.tabs || [])].sort((a, b) => a.index - b.index);
+  const ordered = [...input.tabs].sort((a, b) => a.index - b.index);
+  for (let index = 0; index < ordered.length; index += 1) {
+    const source = ordered[index];
+    if (!tabs[index]) tabs[index] = await chrome.tabs.create({ windowId, url: source.url, active: false });
+    else if (tabs[index].url !== source.url) await chrome.tabs.update(tabs[index].id, { url: source.url });
+    await chrome.tabs.update(tabs[index].id, { pinned: source.pinned });
+  }
+  for (const tab of tabs.slice(ordered.length)) await chrome.tabs.remove(tab.id);
+  for (let index = 0; index < ordered.length; index += 1) await chrome.tabs.move(tabs[index].id, { windowId, index });
+  const active = input.tabs[input.activeIdx];
+  await chrome.tabs.update(tabs[active.index].id, { active: true });
+  await restoreTabPageState(tabs[active.index].id, active.pageState);
+  return publicWindow(await chrome.windows.get(windowId, { populate: true }));
 }
 
 async function positionWindow(params) {
@@ -343,6 +401,7 @@ const RPC_METHODS = Object.freeze({
   'window.position': positionWindow,
   'window.focus': focusWindow,
   'window.close': closeWindow,
+  'window.sync': syncWindow,
 });
 
 function rpcError(error) {

@@ -1,6 +1,6 @@
 'use strict';
 
-const AUDIO_VERSION = 1;
+const AUDIO_VERSION = 2;
 const ROUTE_ID = /^[a-zA-Z0-9_-]{1,80}$/;
 const AUDIO_KEY = /^[a-f0-9]{64}$/;
 

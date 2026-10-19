@@ -32,6 +32,10 @@ function pair(options = {}) {
       async focus() { log.push({ machineId, action: 'focus' }); },
       async close(handle) { log.push({ machineId, action: 'close', handle }); },
     };
+    if (options.pageState) {
+      adapter.captureState = async () => options.pageState(machineId);
+      adapter.syncState = async (handle, payload) => { log.push({ machineId, action: 'sync', handle, payload }); };
+    }
     controllers[machineId] = new DragController({ machineId, getPlacements: () => placements,
       adapterForWindow: () => adapter, adapterForId: () => adapter,
       setDragging: (value) => { dragging[machineId] = value; },
@@ -60,6 +64,38 @@ async function start(pairing) {
   await pairing.a.frame({ cursorVU: { x: 910, y: 150 } });
   await pairing.pump();
 }
+
+test('release refreshes page state before parking and resuming updates the existing peer window', async () => {
+  const payload = (machineId) => ({ activeIdx: 0, tabs: [{ index: 0, url: `https://${machineId}.example/`, title: '', pinned: false }] });
+  const pairing = pair({ pageState: payload });
+  await start(pairing);
+  await pairing.a.end();
+  assert.deepEqual(pairing.queue.slice(-2).map(({ message }) => message.type), ['window.state', 'window.pause']);
+  await pairing.pump();
+  assert.deepEqual(pairing.log.find(({ action }) => action === 'sync').payload, payload('a'));
+  assert.equal(pairing.b.parked.get('split-window').descriptor.payload.tabs[0].url, 'https://a.example/');
+  const parked = pairing.b.parked.get('split-window');
+  pairing.b.begin({ window: { id: 'b-window' }, geometryVU: parked.geometryVU, cursorVU: { x: 1100, y: 150 } });
+  await pairing.b.frame({ cursorVU: { x: 1080, y: 150 } });
+  await pairing.pump();
+  assert.equal(pairing.log.filter(({ action }) => action === 'prepare').length, 1);
+  assert.equal(pairing.log.filter(({ machineId, action }) => machineId === 'a' && action === 'sync').length, 1);
+  await pairing.b.end();
+  await pairing.pump();
+  assert.deepEqual(pairing.log.filter(({ machineId, action }) => machineId === 'a' && action === 'sync').at(-1).payload, payload('b'));
+});
+
+test('page-state capture failure still completes the native window transfer', async () => {
+  const pairing = pair({ pageState: async () => { throw new Error('page-unavailable'); } });
+  await start(pairing);
+  await pairing.a.frame({ cursorVU: { x: 1300, y: 150 } });
+  await pairing.pump();
+  await pairing.a.end();
+  await pairing.pump();
+  assert.equal(pairing.a.active, null);
+  assert.equal(pairing.b.active, null);
+  assert.deepEqual(pairing.log.filter(({ action }) => action === 'close').map(({ machineId }) => machineId), ['a']);
+});
 
 for (const cursorX of [750, 900, 1080]) {
   test(`release at x=${cursorX} retains both visible halves without choosing a winner`, async () => {

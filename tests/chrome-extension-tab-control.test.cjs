@@ -134,6 +134,10 @@ test('bundled worker joins duplicate tabs by tabId and applies pin then exact in
     setTimeout,
   };
   context.globalThis = context;
+  context.importScripts = (filename) => {
+    assert.equal(filename, 'page-state.js');
+    vm.runInNewContext(fs.readFileSync(path.resolve(__dirname, '..', 'src', 'main', 'adapters', 'chrome', 'extension', filename), 'utf8'), context);
+  };
   vm.runInNewContext(fs.readFileSync(path.resolve(__dirname, '..', 'src', 'main', 'adapters', 'chrome', 'extension', 'service-worker.js'), 'utf8'), context);
   const captured = await context.compusyncCapture({ windowId: 22 });
   assert.deepEqual(JSON.parse(JSON.stringify(captured)), [

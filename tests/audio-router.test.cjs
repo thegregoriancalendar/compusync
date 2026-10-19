@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const { AudioRouter } = require('../src/main/audio-router.cjs');
 const { RustAudioEngine, supportsMacCapture } = require('../src/main/audio-engine.cjs');
-const { sanitizeAudioMessage } = require('../src/core/audio-contract.cjs');
+const { AUDIO_VERSION, sanitizeAudioMessage } = require('../src/core/audio-contract.cjs');
 const { Session } = require('../src/core/session.cjs');
 const { newSecret } = require('../src/core/wire.cjs');
 
@@ -58,10 +58,10 @@ test('audio messages bound inputs, strip extra fields and reject malformed keys 
   assert.equal(sanitizeAudioMessage({ type: 'audio.ready', id: 'route', key: 'x'.repeat(64), port: 43187 }), null);
   assert.equal(sanitizeAudioMessage({ type: 'audio.ready', id: 'route', key: '42'.repeat(32), port: 65536 }), null);
   assert.equal(sanitizeAudioMessage({ type: 'audio.offer', id: '../bad' }), null);
-  assert.equal(sanitizeAudioMessage({ type: 'audio.hello', version: 2, platform: 'darwin', canSend: true, canReceive: false }), null);
+  assert.equal(sanitizeAudioMessage({ type: 'audio.hello', version: 1, platform: 'darwin', canSend: true, canReceive: false }), null);
   assert.deepEqual(sanitizeAudioMessage({ type: 'audio.offer', id: 'route', injected: 'ignore' }), { type: 'audio.offer', id: 'route' });
-  assert.deepEqual(sanitizeAudioMessage({ type: 'audio.hello', version: 1, platform: 'win32', canSend: true, canReceive: true }),
-    { type: 'audio.hello', version: 1, platform: 'win32', canSend: false, canReceive: true });
+  assert.deepEqual(sanitizeAudioMessage({ type: 'audio.hello', version: AUDIO_VERSION, platform: 'win32', canSend: true, canReceive: true }),
+    { type: 'audio.hello', version: AUDIO_VERSION, platform: 'win32', canSend: false, canReceive: true });
 });
 
 test('negotiates Mac-to-Windows with a fresh key and reports streaming only after receiver acknowledgement', async (t) => {
@@ -149,7 +149,7 @@ test('native failures stop both sides and output changes require an idle route',
 
 test('unsupported or old peers cannot enable capture', async (t) => {
   const { mac, macSession } = await pair(t);
-  macSession.emit('peer-message', { type: 'audio.hello', version: 1, platform: 'win32', canSend: false, canReceive: false }, 'windows');
+  macSession.emit('peer-message', { type: 'audio.hello', version: AUDIO_VERSION, platform: 'win32', canSend: false, canReceive: false }, 'windows');
   assert.equal(mac.state().canStart, false);
   assert.throws(() => mac.startRoute(), /rebuilt native addon/);
   assert.equal(supportsMacCapture('23.5.0'), false);
@@ -158,6 +158,61 @@ test('unsupported or old peers cannot enable capture', async (t) => {
   const unavailable = new RustAudioEngine({ platform: 'darwin', release: '24.0.0' });
   assert.equal(unavailable.canSend, false);
   await assert.rejects(unavailable.send({}), /rebuilt native addon/);
+});
+
+test('Mac development launches reach native capture so macOS can request permission', async (t) => {
+  const calls = [];
+  class NativeAudio {
+    protocolVersion() { return AUDIO_VERSION; }
+    async startSender(...args) { calls.push(args); }
+    stop() {}
+  }
+  const engine = new RustAudioEngine({ binding: { NativeAudio }, platform: 'darwin', release: '23.6.0' });
+  t.after(() => engine.stop());
+  const key = '42'.repeat(32);
+  await engine.send({ id: 'development', key, peerIp: '192.168.1.5', port: 45123 });
+  assert.deepEqual(calls, [[key, '192.168.1.5', 45123]]);
+  assert.equal(engine.route.role, 'sender');
+});
+
+test('Mac native permission denial remains actionable during development', async (t) => {
+  class NativeAudio {
+    protocolVersion() { return AUDIO_VERSION; }
+    async startSender() { throw new Error('System Audio Recording permission denied.'); }
+    stop() {}
+  }
+  const engine = new RustAudioEngine({ binding: { NativeAudio }, platform: 'darwin', release: '24.0.0' });
+  t.after(() => engine.stop());
+  await assert.rejects(engine.send({ id: 'denied', key: '42'.repeat(32), peerIp: '192.168.1.5', port: 45123 }),
+    /System Audio Recording permission denied/);
+});
+
+test('stale native addons cannot advertise synchronized audio support', () => {
+  class NativeAudio { protocolVersion() { return 1; } }
+  const engine = new RustAudioEngine({ binding: { NativeAudio }, platform: 'darwin', release: '24.0.0' });
+  assert.equal(engine.available, false);
+  assert.equal(engine.canSend, false);
+});
+
+test('receiving packets alone cannot report synchronized playback; the device must have played scheduled frames', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  let state = { running: true, packets: 10, clockReady: true, playedFrames: 0 };
+  class NativeAudio {
+    protocolVersion() { return AUDIO_VERSION; }
+    async startReceiver() { return 45123; }
+    status() { return state; }
+    stop() {}
+  }
+  const engine = new RustAudioEngine({ binding: { NativeAudio }, platform: 'win32' });
+  t.after(() => engine.stop());
+  const events = []; engine.on('event', (event) => events.push(event));
+  await engine.receive({ id: 'timed', key: '42'.repeat(32), peerIp: '127.0.0.1', outputId: '' });
+  t.mock.timers.tick(500);
+  assert.equal(events.some((event) => event.type === 'connected'), false);
+  state = { ...state, playedFrames: 240, clockReady: false }; t.mock.timers.tick(500);
+  assert.equal(events.some((event) => event.type === 'connected'), false);
+  state = { ...state, clockReady: true }; t.mock.timers.tick(500);
+  assert.equal(events.filter((event) => event.type === 'connected').length, 1);
 });
 
 test('audio negotiation uses real encrypted sessions and their observed socket addresses in either host role', async (t) => {

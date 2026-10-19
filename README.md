@@ -60,6 +60,10 @@ Unlinking removes global input hooks, releases synthetic buttons and modifiers, 
 
 Drag a supported Chrome window through the linked seam. CompuSync prepares a real native Chrome window on the destination, preserving tab order, pinning, active tab, and the history state available on that platform. Releasing while the window overlaps both desktops keeps both portions visible. Pick up either portion to continue; the other copy closes only after the window moves completely onto one laptop. Reversing during a held drag briefly reuses the prepared copy.
 
+The active tab also carries a bounded snapshot of page scroll, nested scroll areas, ordinary form drafts, checkboxes, selections, and expanded sections. CompuSync captures it before crossing, refreshes it at release, and updates the existing peer window when either split portion is picked up again. Restoration retries briefly while the destination page loads. This is best-effort native page-state transfer; the two copies are not continuously synchronized while parked. Passwords, cookies, storage, file inputs, and a site's internal application session are not copied, and form actions are not replayed. Each laptop uses its own Chrome login state. Different layouts and complex web applications can still differ.
+
+On the Mac, enable **Chrome > View > Developer > Allow JavaScript from Apple Events** for scroll and page-state transfer. Without it, tab and URL handoff still works and CompuSync shows a setup notice. After updating this checkout, restart both CompuSync processes and reload the CompuSync extension in Windows Chrome's Extensions page so its new page-state helper is loaded.
+
 Window sizing uses the monitors' reported physical dimensions to preserve width and height in inches across Windows scaling and Retina displays. Windows too large for the receiving monitor shrink proportionally to fit within 90% of that monitor. Missing physical measurements retain logical sizing. Native measurement changes require quitting CompuSync and running `npm run native:build` on each laptop before restarting.
 
 Normal addressable Chrome windows support live straddling. Maximized or fullscreen windows transfer without a live straddle. Unsupported applications and very small windows stay local while the cursor crosses and produce a brief notice.
@@ -78,7 +82,7 @@ CompuSync is not remote desktop, a virtual machine, file synchronization, or app
 
 ## Mirror Mac audio to Windows
 
-**Connection & settings → Audio manager** can play the Mac's current output on a selected Windows audio device while keeping sound on the Mac. Capture, encrypted streaming, buffering, and playback run in Rust. The first version requires macOS 14.6 or later, a packaged Mac app, and an output-only Mac device such as its built-in speakers. See the [audio routing test guide](docs/audio-routing.md) for setup, permissions, and the two-laptop test. Reverse routing and synchronized dual-speaker playback are not implemented yet.
+**Connection & settings → Audio manager** plays Mac audio on both laptops using a shared playback schedule. Rust captures and suppresses the Mac's immediate output, then buffers a local copy and the selected Windows output against authenticated playback timestamps. Clock exchanges and device-timestamp feedback keep both outputs on the timeline. Stopping restores ordinary Mac playback. Rebuild the native addon on both laptops; macOS 14.6 or later and System Audio Recording approval are required. Both `npm start` and packaged builds are supported. See the [audio routing test guide](docs/audio-routing.md) for setup, timing, recovery, and physical alignment verification. Reverse routing is not implemented yet; speaker accuracy must be measured on the actual devices.
 
 ## Build packages
 

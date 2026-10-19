@@ -15,6 +15,7 @@ class AudioRouter extends EventEmitter {
     this.outputs = [];
     this.peer = null;
     this.route = null;
+    this.timing = null;
     this.phase = 'idle';
     this.message = 'Audio stays on each laptop.';
     this.connected = false;
@@ -28,7 +29,7 @@ class AudioRouter extends EventEmitter {
     return { phase: this.phase, message: this.message, active: Boolean(this.route),
       canStart: this.connected && this.canCapture && this.peer?.canReceive === true && !this.route,
       peerReady: Boolean(this.peer), canCapture: this.canCapture, available: this.engine.available,
-      outputId: this.outputId, outputs: this.outputs };
+      outputId: this.outputId, outputs: this.outputs, timing: this.timing };
   }
 
   update(phase, message) {
@@ -101,7 +102,7 @@ class AudioRouter extends EventEmitter {
         }).catch((error) => this.fail(route, error));
     } else if (message.type === 'audio.started' && this.route?.id === message.id && this.route.role === 'sender' && this.route.ready) {
       clearTimeout(this.timer);
-      this.update('streaming', 'Mac audio is also playing on Windows.');
+      this.update('streaming', 'Playing Mac audio on both laptops on a shared schedule.');
     }
   }
 
@@ -136,11 +137,14 @@ class AudioRouter extends EventEmitter {
       return;
     }
     if (!this.route || event?.id !== this.route.id) return;
-    if (event.type === 'connected' && this.route.role === 'receiver') {
+    if (event.type === 'timing') {
+      this.timing = event.timing;
+      this.emit('state', this.state());
+    } else if (event.type === 'connected' && this.route.role === 'receiver') {
       clearTimeout(this.timer);
       try { this.send({ type: 'audio.started', id: this.route.id }); }
       catch (error) { this.fail(this.route, error); return; }
-      this.update('receiving', 'Playing Mac audio on this laptop.');
+      this.update('receiving', 'Playing Mac audio on a shared schedule with the Mac.');
     } else if (event.type === 'error') {
       this.fail(this.route, new Error(typeof event.message === 'string' ? event.message.slice(0, 500) : 'Audio stopped unexpectedly.'));
     }
@@ -156,6 +160,7 @@ class AudioRouter extends EventEmitter {
     clearTimeout(this.timer);
     const route = this.route;
     this.route = null;
+    this.timing = null;
     if (route && notify && this.connected) this.session.sendPeer({ type: 'audio.stop', id: route.id });
     this.engine.stop();
     this.update('idle', message);

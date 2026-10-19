@@ -2,6 +2,7 @@
 
 const { EventEmitter } = require('node:events');
 const os = require('node:os');
+const { AUDIO_VERSION } = require('../core/audio-contract.cjs');
 
 function supportsMacCapture(release = os.release()) {
   const [major, minor] = release.split('.').map(Number);
@@ -9,13 +10,12 @@ function supportsMacCapture(release = os.release()) {
 }
 
 class RustAudioEngine extends EventEmitter {
-  constructor({ binding, platform = process.platform, packaged = false, release = os.release() } = {}) {
+  constructor({ binding, platform = process.platform, release = os.release() } = {}) {
     super();
     this.native = binding?.NativeAudio ? new binding.NativeAudio() : null;
-    this.available = Boolean(this.native);
+    this.available = this.native?.protocolVersion?.() === AUDIO_VERSION;
     this.canSend = this.available && platform === 'darwin' && supportsMacCapture(release);
     this.platform = platform;
-    this.packaged = packaged;
     this.route = null;
   }
 
@@ -28,10 +28,9 @@ class RustAudioEngine extends EventEmitter {
   }
 
   async send({ id, key, peerIp, port }) {
-    if (!this.canSend) throw new Error('Mac audio capture needs the rebuilt native addon and macOS 14.6 or later.');
-    // Electron's development runtime lacks our usage description and can yield
-    // a dead capture stream. Use the app bundle built with the audio plist key.
-    if (!this.packaged) throw new Error('For system audio capture, run the packaged CompuSync app on the Mac. Build it with npm run build and open the app in dist; npm start uses an Electron bundle without the required audio permission description.');
+    if (!this.canSend) throw new Error('Synchronized Mac audio needs the rebuilt native addon and macOS 14.6 or later.');
+    // The pinned Electron runtime includes NSAudioCaptureUsageDescription, so
+    // development launches can request the same native OS permission as a build.
     const route = this.route = { id, role: 'sender', startedAt: Date.now() };
     await this.native.startSender(key, peerIp || '', port);
     if (this.route === route) this.poll(route);
@@ -43,14 +42,19 @@ class RustAudioEngine extends EventEmitter {
       if (this.route !== route) return;
       try {
         const state = this.native.status();
+        this.emit('event', { type: 'timing', id: route.id, timing: {
+          clockReady: state.clockReady, delayMs: state.playoutDelayMs,
+          uncertaintyMs: state.clockUncertaintyMs, phaseErrorMs: state.phaseErrorMs,
+          latePackets: state.latePackets, resyncs: state.resyncs,
+        } });
         if (state.error || !state.running) {
           this.emit('event', { type: 'error', id: route.id, message: state.error || 'Native audio stopped unexpectedly.' });
-        } else if (route.role === 'receiver' && state.packets > 0 && !route.connected) {
+        } else if (route.role === 'receiver' && state.clockReady && state.playedFrames > 0 && !route.connected) {
           route.connected = true;
           this.emit('event', { type: 'connected', id: route.id });
         } else if (route.role === 'sender' && !state.capturedFrames && Date.now() - route.startedAt > 10_000) {
           this.emit('event', { type: 'error', id: route.id,
-            message: 'No Mac system audio samples were captured. Play sound on the Mac and check CompuSync’s System Audio Recording permission, then try again.' });
+            message: 'No Mac system audio samples were captured. Play sound on the Mac and check System Audio Recording permission for CompuSync, Electron, or the terminal used to launch it, then restart the app and try again.' });
         }
       } catch (error) { this.emit('event', { type: 'error', id: route.id, message: error.message }); }
     }, 500);
@@ -58,7 +62,7 @@ class RustAudioEngine extends EventEmitter {
   }
 
   async listOutputs() {
-    if (!this.native) throw new Error('Rebuild the native addon to list audio outputs.');
+    if (!this.available) throw new Error('Rebuild the native addon to enable synchronized audio.');
     this.emit('event', { type: 'outputs', outputs: this.native.outputs() });
   }
 

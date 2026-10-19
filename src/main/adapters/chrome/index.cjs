@@ -145,6 +145,17 @@ class ChromeHandoffAdapter {
     throw new ChromePrepareError('CHROME_INVALID_GEOMETRY', 'The Chrome handoff position is invalid.');
   }
 
+  async captureState(handle, geometry) {
+    return (await this.capture(handle, geometry)).payload;
+  }
+
+  async syncState(handle, payload) {
+    if (this.platform === 'darwin' && typeof this.apple.syncState === 'function') {
+      return this.apple.syncState(handle, payload);
+    }
+    return false;
+  }
+
   async position(handle, originVU) {
     const bounds = this.boundsFor(handle, originVU);
     if (this.platform === 'darwin') return this.apple.position(handle, bounds);

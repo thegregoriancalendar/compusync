@@ -1,6 +1,9 @@
 mod buffer;
+mod clock;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod device;
+#[cfg(target_os = "macos")]
+mod mac_tap;
 mod packet;
 mod transport;
 
@@ -11,7 +14,7 @@ use parking_lot::Mutex;
 use std::{
     net::{IpAddr, UdpSocket},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
         Arc,
     },
     thread::JoinHandle,
@@ -23,7 +26,6 @@ pub struct AudioOutput {
     pub id: String,
     pub label: String,
 }
-
 #[napi(object)]
 pub struct AudioSnapshot {
     pub running: bool,
@@ -31,33 +33,66 @@ pub struct AudioSnapshot {
     pub captured_frames: f64,
     pub underruns: f64,
     pub last_packet_age_ms: f64,
+    pub clock_ready: bool,
+    pub clock_rtt_ms: f64,
+    pub clock_uncertainty_ms: f64,
+    pub playout_delay_ms: f64,
+    pub played_frames: f64,
+    pub late_packets: f64,
+    pub resyncs: f64,
+    pub phase_error_ms: f64,
     pub error: Option<String>,
 }
-
 pub struct Stats {
     pub stopped: AtomicBool,
     pub packets: AtomicU64,
     pub captured: AtomicU64,
     pub underruns: AtomicU64,
     pub last_packet_ms: AtomicU64,
+    pub clock_ready: AtomicBool,
+    pub clock_offset_ns: AtomicI64,
+    pub clock_rtt_ns: AtomicI64,
+    pub delay_ns: AtomicI64,
+    pub played: AtomicU64,
+    pub late_packets: AtomicU64,
+    pub resyncs: AtomicU64,
+    pub phase_error_ns: AtomicI64,
+    pub resync_requested: AtomicBool,
+    pub device_clock_invalid: AtomicBool,
+    pub output_lead_ns: AtomicI64,
+    pub output_clock_ready: AtomicBool,
     pub error: Mutex<Option<String>>,
     pub started: Instant,
 }
-
 impl Stats {
     fn new() -> Self {
+        // Initialize host clock conversion before any real-time callback.
+        let _ = clock::now_ns();
         Self {
             stopped: AtomicBool::new(false),
             packets: AtomicU64::new(0),
             captured: AtomicU64::new(0),
             underruns: AtomicU64::new(0),
             last_packet_ms: AtomicU64::new(0),
+            clock_ready: AtomicBool::new(false),
+            clock_offset_ns: AtomicI64::new(0),
+            clock_rtt_ns: AtomicI64::new(0),
+            delay_ns: AtomicI64::new(150 * clock::MS),
+            played: AtomicU64::new(0),
+            late_packets: AtomicU64::new(0),
+            resyncs: AtomicU64::new(0),
+            phase_error_ns: AtomicI64::new(0),
+            resync_requested: AtomicBool::new(false),
+            device_clock_invalid: AtomicBool::new(false),
+            output_lead_ns: AtomicI64::new(0),
+            output_clock_ready: AtomicBool::new(false),
             error: Mutex::new(None),
             started: Instant::now(),
         }
     }
     pub fn fail(&self, message: impl ToString) {
         *self.error.lock() = Some(message.to_string());
+        self.clock_ready.store(false, Ordering::Release);
         self.stopped.store(true, Ordering::Release);
     }
     pub fn packet(&self) {
@@ -66,40 +101,41 @@ impl Stats {
             .store(self.started.elapsed().as_millis() as u64, Ordering::Relaxed);
     }
 }
-
 struct Running {
     stats: Arc<Stats>,
     worker: Option<JoinHandle<()>>,
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
-    _stream: cpal::Stream,
+    #[cfg(target_os = "macos")]
+    capture: Option<Arc<Mutex<Option<device::Capture>>>>,
 }
-
 impl Drop for Running {
     fn drop(&mut self) {
         self.stats.stopped.store(true, Ordering::Release);
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(capture) = self.capture.take() {
+                capture.lock().take();
+            }
+        } // Restore un-delayed Mac playback before waiting.
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
     }
 }
-
 #[derive(Default)]
 struct State {
     generation: AtomicU64,
     running: Mutex<Option<Running>>,
+    pending: Mutex<Option<Arc<Stats>>>,
 }
-
 #[napi]
 pub struct NativeAudio {
     state: Arc<State>,
 }
-
 impl Default for NativeAudio {
     fn default() -> Self {
         Self::new()
     }
 }
-
 #[napi]
 impl NativeAudio {
     #[napi(constructor)]
@@ -108,7 +144,10 @@ impl NativeAudio {
             state: Arc::new(State::default()),
         }
     }
-
+    #[napi]
+    pub fn protocol_version(&self) -> u32 {
+        packet::VERSION
+    }
     #[napi]
     pub fn outputs(&self) -> Result<Vec<AudioOutput>> {
         #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -120,7 +159,6 @@ impl NativeAudio {
             Ok(vec![])
         }
     }
-
     #[napi]
     pub fn start_receiver(
         &self,
@@ -130,27 +168,35 @@ impl NativeAudio {
     ) -> AsyncTask<StartAudio> {
         self.begin(StartKind::Receiver { peer_ip, output_id }, key)
     }
-
     #[napi]
     pub fn start_sender(&self, key: String, peer_ip: String, port: u32) -> AsyncTask<StartAudio> {
         self.begin(StartKind::Sender { peer_ip, port }, key)
     }
-
     #[napi]
     pub fn stop(&self) {
         self.state.generation.fetch_add(1, Ordering::AcqRel);
+        if let Some(stats) = self.state.pending.lock().take() {
+            stats.stopped.store(true, Ordering::Release);
+        }
         self.state.running.lock().take();
     }
-
     #[napi]
     pub fn status(&self) -> AudioSnapshot {
         let running = self.state.running.lock();
         let stats = running.as_ref().map(|r| &r.stats);
+        let count = |f: fn(&Stats) -> &AtomicU64| {
+            stats.map_or(0.0, |s| f(s).load(Ordering::Relaxed) as f64)
+        };
+        let ms = |f: fn(&Stats) -> &AtomicI64| {
+            stats.map_or(0.0, |s| {
+                f(s).load(Ordering::Relaxed) as f64 / clock::MS as f64
+            })
+        };
         AudioSnapshot {
             running: stats.is_some_and(|s| !s.stopped.load(Ordering::Acquire)),
-            packets: stats.map_or(0.0, |s| s.packets.load(Ordering::Relaxed) as f64),
-            captured_frames: stats.map_or(0.0, |s| s.captured.load(Ordering::Relaxed) as f64),
-            underruns: stats.map_or(0.0, |s| s.underruns.load(Ordering::Relaxed) as f64),
+            packets: count(|s| &s.packets),
+            captured_frames: count(|s| &s.captured),
+            underruns: count(|s| &s.underruns),
             last_packet_age_ms: stats.map_or(0.0, |s| {
                 s.started
                     .elapsed()
@@ -158,15 +204,22 @@ impl NativeAudio {
                     .saturating_sub(s.last_packet_ms.load(Ordering::Relaxed) as u128)
                     as f64
             }),
+            clock_ready: stats.is_some_and(|s| s.clock_ready.load(Ordering::Acquire)),
+            clock_rtt_ms: ms(|s| &s.clock_rtt_ns),
+            clock_uncertainty_ms: ms(|s| &s.clock_rtt_ns) * 0.5,
+            playout_delay_ms: ms(|s| &s.delay_ns),
+            played_frames: count(|s| &s.played),
+            late_packets: count(|s| &s.late_packets),
+            resyncs: count(|s| &s.resyncs),
+            phase_error_ms: ms(|s| &s.phase_error_ns),
             error: stats.and_then(|s| s.error.lock().clone()),
         }
     }
 }
-
 impl NativeAudio {
     fn begin(&self, kind: StartKind, key: String) -> AsyncTask<StartAudio> {
-        let generation = self.state.generation.fetch_add(1, Ordering::AcqRel) + 1;
-        self.state.running.lock().take();
+        self.stop();
+        let generation = self.state.generation.load(Ordering::Acquire);
         AsyncTask::new(StartAudio {
             state: self.state.clone(),
             generation,
@@ -175,36 +228,31 @@ impl NativeAudio {
         })
     }
 }
-
 impl Drop for NativeAudio {
     fn drop(&mut self) {
         self.stop();
     }
 }
-
 enum StartKind {
     Receiver { peer_ip: String, output_id: String },
     Sender { peer_ip: String, port: u32 },
 }
-
 pub struct StartAudio {
     state: Arc<State>,
     generation: u64,
     kind: StartKind,
     key: String,
 }
-
 impl Task for StartAudio {
     type Output = u32;
     type JsValue = u32;
-
     fn compute(&mut self) -> Result<u32> {
-        if self.generation != self.state.generation.load(Ordering::Acquire) {
+        let cancelled = || self.generation != self.state.generation.load(Ordering::Acquire);
+        if cancelled() {
             return Err(fail("Audio start cancelled."));
         }
-        let cipher = packet::cipher(&self.key).map_err(fail)?;
-        // Never accept hostnames or IPv6 mapped addresses here. The caller uses
-        // the authenticated control socket's IPv4 peer, not a supplied endpoint.
+        let wire = packet::Wire::new(&self.key, matches!(self.kind, StartKind::Sender { .. }))
+            .map_err(fail)?;
         let address: IpAddr = match &self.kind {
             StartKind::Receiver { peer_ip, .. } | StartKind::Sender { peer_ip, .. } => {
                 peer_ip.parse()
@@ -218,24 +266,34 @@ impl Task for StartAudio {
         socket
             .set_nonblocking(true)
             .map_err(|e| fail(e.to_string()))?;
-        let port = socket.local_addr().map_err(|e| fail(e.to_string()))?.port() as u32;
+        let local_port = socket.local_addr().map_err(|e| fail(e.to_string()))?.port() as u32;
         let stats = Arc::new(Stats::new());
+        {
+            let mut pending = self.state.pending.lock();
+            if cancelled() {
+                return Err(fail("Audio start cancelled."));
+            }
+            *pending = Some(stats.clone());
+        }
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         let running = match &self.kind {
             StartKind::Receiver { output_id, .. } => {
-                let (producer, consumer) = rtrb::RingBuffer::new(9_600);
-                let stream = device::playback(output_id, consumer, stats.clone()).map_err(fail)?;
+                let (producer, consumer) = rtrb::RingBuffer::new(128);
+                let output = device::output_device(output_id).map_err(fail)?;
+                let stream = device::playback(&output, consumer, stats.clone()).map_err(fail)?;
                 let worker_stats = stats.clone();
                 let worker = std::thread::Builder::new()
                     .name("compusync-audio-receive".into())
                     .spawn(move || {
-                        transport::receive(socket, address, cipher, producer, worker_stats)
+                        let _stream = stream;
+                        transport::receive(socket, address, wire, producer, worker_stats)
                     })
                     .map_err(|e| fail(e.to_string()))?;
                 Running {
                     stats,
                     worker: Some(worker),
-                    _stream: stream,
+                    #[cfg(target_os = "macos")]
+                    capture: None,
                 }
             }
             StartKind::Sender { port, .. } => {
@@ -250,23 +308,69 @@ impl Task for StartAudio {
                 }
                 #[cfg(target_os = "macos")]
                 {
+                    let mut wire = wire;
                     socket
                         .connect((address, *port as u16))
                         .map_err(|e| fail(e.to_string()))?;
-                    let (producer, consumer) = rtrb::RingBuffer::new(24_000);
-                    let (stream, rate) = device::capture(producer, stats.clone()).map_err(fail)?;
+                    let filter = transport::synchronize(&socket, &mut wire, &stats, cancelled)
+                        .map_err(fail)?;
+                    let output = device::output_device("").map_err(fail)?;
+                    let (local, consumer) = rtrb::RingBuffer::new(128);
+                    let stream =
+                        device::playback(&output, consumer, stats.clone()).map_err(fail)?;
+                    let (producer, input) = rtrb::RingBuffer::new(24_000);
+                    // The tap aggregate follows the selected device's nominal rate.
+                    let rate = {
+                        use cpal::traits::DeviceTrait;
+                        output
+                            .default_output_config()
+                            .map_err(|e| fail(e.to_string()))?
+                            .sample_rate()
+                    };
                     let worker_stats = stats.clone();
+                    let capture_slot = Arc::new(Mutex::new(None));
+                    let worker_capture = capture_slot.clone();
                     let worker = std::thread::Builder::new()
                         .name("compusync-audio-send".into())
                         .spawn(move || {
-                            transport::send(socket, cipher, consumer, rate, worker_stats)
+                            let _stream = stream;
+                            transport::send(socket, wire, filter, input, rate, local, worker_stats);
+                            // Native failures restore original Mac audio even
+                            // if Electron's event loop cannot process status.
+                            worker_capture.lock().take();
                         })
                         .map_err(|e| fail(e.to_string()))?;
-                    Running {
-                        stats,
+                    let running = Running {
+                        stats: stats.clone(),
                         worker: Some(worker),
-                        _stream: stream,
+                        capture: Some(capture_slot.clone()),
+                    };
+                    let deadline = Instant::now() + std::time::Duration::from_secs(1);
+                    while !stats.output_clock_ready.load(Ordering::Acquire) {
+                        if cancelled()
+                            || stats.stopped.load(Ordering::Acquire)
+                            || Instant::now() > deadline
+                        {
+                            return Err(fail("The Mac output did not provide a valid playback clock. Choose built-in or wired speakers and retry."));
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(1));
                     }
+                    if cancelled() || stats.stopped.load(Ordering::Acquire) {
+                        return Err(fail("Audio start cancelled."));
+                    }
+                    let (capture, capture_rate) =
+                        device::capture(&output, producer, stats.clone()).map_err(fail)?;
+                    if capture_rate != rate {
+                        return Err(fail("The Mac tap sample rate changed. Choose built-in speakers and restart sharing."));
+                    }
+                    {
+                        let mut slot = capture_slot.lock();
+                        if cancelled() || stats.stopped.load(Ordering::Acquire) {
+                            return Err(fail("Audio start cancelled."));
+                        }
+                        *slot = Some(capture);
+                    }
+                    running
                 }
             }
         };
@@ -275,14 +379,19 @@ impl Task for StartAudio {
             return Err(fail("Native audio requires Windows or macOS."));
         };
         let mut active = self.state.running.lock();
-        if self.generation != self.state.generation.load(Ordering::Acquire) {
+        if cancelled() || running.stats.stopped.load(Ordering::Acquire) {
+            let message = running
+                .stats
+                .error
+                .lock()
+                .clone()
+                .unwrap_or_else(|| "Audio start cancelled.".into());
             drop(running);
-            return Err(fail("Audio start cancelled."));
+            return Err(fail(message));
         }
         *active = Some(running);
-        Ok(port)
+        Ok(local_port)
     }
-
     fn resolve(&mut self, _env: Env, port: u32) -> Result<u32> {
         Ok(port)
     }

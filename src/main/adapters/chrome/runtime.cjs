@@ -54,6 +54,8 @@ class ChromeAdapterRuntime extends EventEmitter {
       position: async (...args) => (await this.#ensureAdapter()).position(...args),
       focus: async (...args) => (await this.#ensureAdapter()).focus(...args),
       close: async (...args) => (await this.#ensureAdapter()).close(...args),
+      captureState: async (...args) => (await this.#ensureAdapter()).captureState(...args),
+      syncState: async (...args) => (await this.#ensureAdapter()).syncState(...args),
     });
   }
 

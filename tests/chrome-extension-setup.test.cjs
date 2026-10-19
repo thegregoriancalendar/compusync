@@ -34,6 +34,7 @@ async function fixture() {
     permissions: ['nativeMessaging'],
   }));
   await fs.promises.writeFile(path.join(source, 'service-worker.js'), 'globalThis.compusync = true;\n');
+  await fs.promises.writeFile(path.join(source, 'page-state.js'), 'globalThis.CompuSyncPageState = {};\n');
   await fs.promises.writeFile(path.join(source, 'not-allowlisted.txt'), 'do not copy');
   await fs.promises.writeFile(host, 'native host');
   await fs.promises.writeFile(chrome, 'chrome');

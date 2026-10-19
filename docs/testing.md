@@ -74,6 +74,8 @@ With cursor linking active and Windows owning the cursor, use the Windows mouse 
 
 With macOS owning the cursor, use the Windows mouse and trackpad to drag Chrome and Finder windows within the Mac desktop. Try slow and fast movement, pauses while held, and reversals; the window must follow until the actual button release. Repeat immediately after switching focus between apps, then drag Chrome across the shared edge and back. Confirm detecting the window move does not drop the held button, crossing still completes or reverses normally, and a subsequent drag starts cleanly.
 
+In Settings, check **Mouse latency** on both computers while moving the Mac mouse with the cursor on Windows, then the Windows mouse with the cursor on Mac. Confirm the corresponding direction shows an estimated median and p95 in milliseconds on both computers, including while dragging a window. Hover a value for sample count and clock uncertainty. Confirm a slower connection or delayed destination updates increase the values, readings expire after ten idle seconds, and unlink/reconnect clears old samples. Test matching current builds on both computers; an older peer should leave timing unavailable while cursor input continues. These numbers cover the application input path through the native cursor update, excluding device/OS input delivery and display redraw.
+
 ## macOS permissions
 
 For the Mac-to-Windows cursor regression, close CompuSync settings and keep another Mac app in the foreground. Using the Mac trackpad, cross to Windows and keep moving, clicking, and scrolling there for at least 30 seconds. Verify the Mac pointer stays hidden and Mac apps receive none of that input. Cross back and repeat with an external Mac mouse, with either computer hosting the session, and after switching the foreground Mac app. Confirm unlinking immediately restores ordinary Mac input.
@@ -81,7 +83,7 @@ For the Mac-to-Windows cursor regression, close CompuSync settings and keep anot
 1. Deny Accessibility, Input Monitoring, and Chrome Automation individually on fresh permission state. Verify each denial remains visible with the correct System Settings remediation action and cursor/window capture does not silently proceed.
 2. Grant Accessibility and Input Monitoring, fully restart CompuSync if requested by macOS, reconnect, and verify cursor linking succeeds.
 3. Verify Automation is requested only on the first eligible Chrome crossing, not at application startup or simple cursor linking.
-4. Confirm CompuSync works without enabling Chrome's **JavaScript from Apple Events** option.
+4. Confirm basic tab/URL handoff works without Chrome's **JavaScript from Apple Events** option, and trying page-state transfer shows an actionable setup notice. Enable **View > Developer > Allow JavaScript from Apple Events** and repeat the scroll/draft tests below. Do not silently change Chrome's preference.
 
 ## Windows Chrome profile consent
 
@@ -103,6 +105,8 @@ Use a normal Chrome window with seven tabs, including two pinned tabs, duplicate
 7. Record structured logs for success, reversal, and failure. They may contain descriptor ID, phase/duration, hostname, and tab count, but no full URL, title, history URL, or session token.
 8. Rebuild native modules on both laptops, then measure an ordinary window's physical width and height before and after transfer. Repeat with the Windows internal and external displays at different scaling factors and the Mac Retina display. A window that fits should retain its size in inches; one too large for the receiving monitor should fit within 90% of it with its aspect ratio preserved. Verify sizing is correct from preparation onward, not only after release.
 9. While a split is retained, unlink, quit, or change a display. Verify each surviving local Chrome copy returns fully onto its desktop and no window or input guard remains stranded.
+10. Restart both updated apps and reload the Windows Chrome extension. On a plain HTTP/HTTPS page, scroll down, scroll a nested pane, enter a text/textarea draft, select a checkbox and an option, and expand a details section. Cross in both directions and verify the destination approximately matches before and after release, including when initial page loading is slow. Passwords and file inputs must remain local; restoration must not submit or replay an action.
+11. Release halfway, navigate or change ordinary fields on one copy, then pick up that same portion and finish the crossing. Verify its current tabs and supported page state refresh the existing peer window without creating a third copy. Parked copies do not continuously synchronize interaction; navigation state owned internally by a complex web application may not transfer.
 
 ## Failure recovery
 
@@ -137,7 +141,7 @@ For every case, verify a surviving Chrome copy returns fully on-screen, overlays
 
 ## Mac audio on Windows
 
-Follow the [audio routing test guide](audio-routing.md) using a packaged Mac app on macOS 14.6 or later. Confirm playback through the chosen Windows device, stopping from either laptop, switching outputs while stopped, permission-denial recovery, settings closed during playback, unplugged-device handling, disconnect, sleep/wake, and process exit. Reconnection must leave audio stopped until the Mac user starts it again. Mac playback should continue locally throughout.
+Follow the [audio routing test guide](audio-routing.md) on macOS 14.6 or later. Rebuild both native addons for protocol v2. Test both `npm start` and a packaged Mac app, including their separate permission identities. Confirm the Mac's immediate output is suppressed while its delayed copy and the selected Windows output follow the shared schedule. Verify stopping, failed starts, denied permissions, output loss, disconnect, sleep, and process exit restore ordinary Mac output without changing volume or default-device settings. Reconnection must leave sharing stopped. Record clicks from both outputs through one recording clock to measure physical skew, long-term drift, and recovery; the UI clock estimate alone does not establish speaker alignment.
 
 ## Completion record
 

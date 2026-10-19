@@ -56,6 +56,11 @@ function workerContext(overrides = {}) {
     },
   };
   context.globalThis = context;
+  context.importScripts = (filename) => {
+    assert.equal(filename, 'page-state.js');
+    vm.runInNewContext(fs.readFileSync(path.resolve(__dirname, '..', 'src', 'main', 'adapters',
+      'chrome', 'extension', filename), 'utf8'), context);
+  };
   vm.runInNewContext(WORKER, context);
   return { context, port, sent };
 }
@@ -66,6 +71,37 @@ async function request(worker, message) {
   await new Promise((resolve) => setImmediate(resolve));
   return worker.sent.findLast((candidate) => candidate.id === message.id);
 }
+
+test('worker captures page state and refreshes an existing native window without changing its bounds', async () => {
+  const state = { version: 1, url: 'https://example.com/', viewport: { w: 800, h: 500 },
+    scroll: { x: 0, y: 900 }, fields: [], scrollers: [], details: [] };
+  const tab = { id: 10, index: 0, url: state.url, title: 'Example', active: true, pinned: false };
+  const operations = [];
+  const worker = workerContext({
+    windows: { get: async () => ({ id: 7, type: 'normal', tabs: [tab] }),
+      update: async () => { throw new Error('State sync must not reposition the window.'); } },
+    tabs: {
+      update: async (id, update) => { assert.equal(id, 10); Object.assign(tab, update); },
+      move: async (id, update) => { assert.equal(id, 10); assert.equal(update.index, 0); },
+    },
+    debugger: {
+      attach: async () => {}, detach: async () => {},
+      sendCommand: async (_, method, params) => {
+        operations.push([method, params]);
+        if (method === 'Page.getNavigationHistory') return {};
+        if (params.expression.endsWith(")('capture')")) return { result: { value: state } };
+        return { result: { value: { applied: true, scroll: state.scroll } } };
+      },
+    },
+  });
+  const capture = await request(worker, { v: 1, id: 'state-capture', method: 'window.capture', params: { windowId: 7 } });
+  assert.deepEqual(JSON.parse(JSON.stringify(capture.result.tabs[0].pageState)), state);
+  const refresh = await request(worker, { v: 1, id: 'state-refresh', method: 'window.sync', params: {
+    windowId: 7, activeIdx: 0, tabs: [{ url: state.url, index: 0, pinned: false, pageState: state }],
+  } });
+  assert.equal(refresh.ok, true);
+  assert.equal(operations.filter(([method]) => method === 'Runtime.evaluate').length, 2);
+});
 
 test('native worker connects with fixed identity and only dispatches allowlisted RPC methods', async () => {
   const worker = workerContext({
@@ -136,7 +172,7 @@ test('window.capture returns ordered tab metadata and detaches the active debugg
     [7, 0, { currentIndex: 0, entries: ['https://7.example/'] }],
     [8, 1, null],
   ]);
-  assert.deepEqual(operations.filter(([operation]) => operation === 'detach'), [['detach', 7]]);
+  assert.deepEqual(operations.filter(([operation]) => operation === 'detach'), [['detach', 7], ['detach', 7]]);
 });
 
 test('window.prepare removes the entire prepared window when tab restoration fails', async () => {

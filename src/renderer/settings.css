@@ -24,6 +24,13 @@ header p { margin: 0; }
 .mode-badge.unlinked { color: #7a5b2e; background: #f7efe2; }
 .cursor-actions { margin-top: 16px; flex-wrap: wrap; }
 .hotkeys { padding-top: 4px; }
+.latency-estimate { color: #52657b; background: #edf1f7; }
+.latency-table { width: 100%; margin: 14px 0; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.latency-table th, .latency-table td { padding: 10px 0; border-bottom: 1px solid #edf0f4; text-align: right; }
+.latency-table th:first-child { text-align: left; }
+.latency-table thead th { color: #697587; font-size: 11px; font-weight: 500; }
+.latency-table tbody th { font-size: 12px; font-weight: 550; }
+.latency-table td { font-size: 18px; font-weight: 600; white-space: nowrap; }
 .control-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
 .field-help { margin-top: -4px; }
 .screen-layout-editor { position: relative; height: 238px; margin: 15px 0 10px; overflow: hidden; border: 1px solid #dde3ec; border-radius: 10px; background: radial-gradient(circle at 1px 1px, #dfe5ee 1px, transparent 1px) 0 0 / 18px 18px, #f8fafc; cursor: grab; user-select: none; touch-action: none; }

@@ -67,6 +67,23 @@
       <p class="small hotkeys"><kbd id="unlink-shortcut">Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>U</kbd> toggles linking. <kbd id="ownership-shortcut">Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>Y</kbd> moves ownership to the other laptop.</p>
     </section>
 
+    <section class="card" aria-labelledby="mouse-latency-heading">
+      <div class="card-heading">
+        <h2 id="mouse-latency-heading">Mouse latency</h2>
+        <span class="mode-badge latency-estimate">Estimated</span>
+      </div>
+      <p id="mouse-latency-status" class="small">Connect both laptops and link cursors to measure.</p>
+      <table class="latency-table" aria-describedby="mouse-latency-help">
+        <thead><tr><th scope="col">Direction</th><th scope="col">Typical</th><th scope="col">Slow (p95)</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">Mac &rarr; Windows</th><td id="latency-mac-windows">&mdash;</td><td id="latency-mac-windows-p95">&mdash;</td></tr>
+          <tr><th scope="row">Windows &rarr; Mac</th><td id="latency-windows-mac">&mdash;</td><td id="latency-windows-mac-p95">&mdash;</td></tr>
+        </tbody>
+      </table>
+      <p id="mouse-latency-network" class="small"></p>
+      <p id="mouse-latency-help" class="small">Move the Mac's mouse with the cursor on Windows, then the Windows mouse with the cursor on Mac. Typical is the median over the last 10 seconds; p95 shows slower updates. Starts when CompuSync receives mouse input and includes batching, network travel and the destination cursor update. Device/OS input delivery and screen redraw are excluded. One-way estimates assume similar network delay in both directions.</p>
+    </section>
+
     <section class="card">
       <h2>Screen layout</h2>
       <p>Each physical monitor is shown inside its computer group. Drag any monitor to move that computer; drag empty space to pan, and scroll to zoom. Positions within each group follow the operating system’s display settings.</p>
@@ -98,10 +115,11 @@
 
     <section class="card" aria-labelledby="audio-heading">
       <div class="card-heading">
-        <div><h2 id="audio-heading">Audio manager</h2><p class="small">Play the Mac's current audio output on Windows too.</p></div>
+        <div><h2 id="audio-heading">Audio manager</h2><p class="small">Play Mac audio on both laptops using a shared playback schedule.</p></div>
         <span id="audio-mode" class="mode-badge unlinked">Separate</span>
       </div>
       <p id="audio-status" class="small" role="status">Audio stays on each laptop.</p>
+      <p id="audio-timing" class="small" hidden></p>
       <div id="audio-windows-output" hidden>
         <label for="audio-output">Windows playback device</label>
         <div class="row">
@@ -113,7 +131,7 @@
         <button id="audio-start" class="primary" type="button" disabled>Play Mac audio on Windows</button>
         <button id="audio-stop" type="button" disabled>Stop sharing audio</button>
       </div>
-      <p id="audio-help" class="small">Start sharing from the Mac. Its sound keeps playing locally.</p>
+      <p id="audio-help" class="small">Start sharing from the Mac. Both outputs are buffered to play together.</p>
       <p id="audio-error" role="alert" hidden></p>
     </section>
 
