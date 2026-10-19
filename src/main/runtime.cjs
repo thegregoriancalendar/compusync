@@ -11,6 +11,8 @@ const { sanitizePeerMessage, policyForMessage } = require('./messages.cjs');
 const { routePeerInput } = require('./input-runtime.cjs');
 const { placementFromDisplays, layoutPair, layoutMacAndWindows } = require('./virtualspace.cjs');
 
+const DEFAULT_ACCELERATION = Object.freeze({ base: 1, threshold: .5, slope: .015 });
+
 function placementForLayout(machineId, layout) {
   if (layout?.desktop) {
     const { widthVU, heightVU, scale } = layout.desktop;
@@ -73,6 +75,7 @@ class SharedInputRuntime extends EventEmitter {
     // host/join layout pair.
     this.joinId = this.isHost ? this.peerId : this.machineId;
     this.settings = options.settings || {};
+    this.peerAcceleration = { ...DEFAULT_ACCELERATION };
     this.native = options.native || {};
     this.globalShortcut = options.globalShortcut;
     this.powerMonitor = options.powerMonitor;
@@ -103,7 +106,7 @@ class SharedInputRuntime extends EventEmitter {
       placements,
       ownerMachineId: this.hostId,
       initialPosition: ownerPlacement ? centerOf(ownerPlacement) : { x: 0, y: 0 },
-      acceleration: this.settings.acceleration,
+      acceleration: this.#activeAcceleration(),
       edgeResistanceVU: this.settings.edgeResistanceVU,
       linked: false,
       send: (message) => this.send(message),
@@ -130,6 +133,8 @@ class SharedInputRuntime extends EventEmitter {
       buttons: state.buttons,
       modifiers: state.modifiers,
     }));
+    this.cursor.on('ownership', () => this.#applyActiveAcceleration());
+    this.cursor.on('layout', () => this.#applyActiveAcceleration());
     this.cursor.on('handoff-rejected', (state) => this.#logMode('cursor.handoff.rejected', state));
     this.keyboard = new KeyboardRouter({
       cursor: this.cursor,
@@ -228,6 +233,7 @@ class SharedInputRuntime extends EventEmitter {
     if (!clean || peerMachineId !== this.peerId) return false;
     if (clean.type === 'cursor.mode') return this.#receiveCursorMode(clean.linked);
     if (clean.type === 'cursor.layout') return this.#receiveCursorLayout(clean);
+    if (clean.type === 'cursor.feel') return this.#receiveCursorFeel(clean);
     if (clean.type.startsWith('window.')) return this.windowController?.receive(clean) || false;
     const handled = routePeerInput({ cursor: this.cursor, keyboard: this.keyboard, scroll: this.scroll, watchdog: this.watchdog }, clean, peerMachineId);
     if (clean.type === 'layout.update' && handled) this.#applyDesiredLink();
@@ -239,6 +245,7 @@ class SharedInputRuntime extends EventEmitter {
     if (!this.peerConnected) this.peerLinkRequested = false;
     this.watchdog.setPeerConnected(this.peerConnected);
     if (!this.peerConnected) return;
+    this.#broadcastCursorFeel();
     if (this.isHost) this.broadcastCursorLayout();
     if (this.isHost) this.broadcastLayout();
     this.#applyDesiredLink();
@@ -267,8 +274,9 @@ class SharedInputRuntime extends EventEmitter {
   updateSettings(settings) {
     this.settings = settings;
     this.desiredLinked = settings.linked !== false;
-    this.cursor.setConfig(settings);
+    this.cursor.setConfig({ ...settings, acceleration: this.#activeAcceleration() });
     if (this.peerConnected) this.broadcastCursorLayout();
+    if (this.peerConnected) this.#broadcastCursorFeel();
     if (this.isHost && this.peerConnected) this.broadcastLayout();
     this.#applyDesiredLink();
   }
@@ -378,6 +386,28 @@ class SharedInputRuntime extends EventEmitter {
       displayOffset: message.displayOffset,
     });
     return true;
+  }
+
+  #broadcastCursorFeel() {
+    return this.send({ type: 'cursor.feel', acceleration: this.settings.acceleration || DEFAULT_ACCELERATION });
+  }
+
+  #receiveCursorFeel(message) {
+    this.peerAcceleration = { ...message.acceleration };
+    this.#applyActiveAcceleration();
+    return true;
+  }
+
+  #activeAcceleration() {
+    const ownerMachineId = this.cursor?.ownerMachineId || this.hostId;
+    return ownerMachineId === this.machineId
+      ? (this.settings.acceleration || DEFAULT_ACCELERATION)
+      : this.peerAcceleration;
+  }
+
+  #applyActiveAcceleration() {
+    if (!this.cursor) return;
+    this.cursor.setConfig({ acceleration: this.#activeAcceleration() });
   }
 
   #applyLinked(linked, reason) {

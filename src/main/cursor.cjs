@@ -344,8 +344,8 @@ class CursorController extends EventEmitter {
   #enableCapture() {
     if (!this.started) return;
     this.#nativeCall('startCursorCapture', {
-      // Native capture owns the shared acceleration curve on the input hot
-      // path. Mark its output so JS never applies the curve a second time.
+      // Native capture owns the active computer's acceleration curve on the
+      // input hot path. Mark its output so JS never applies it a second time.
       onDelta: (dx, dy, dt, timestamp) => this.localDelta(dx, dy, dt, timestamp, { accelerated: true }),
       onButton: (button, down) => this.localButton(button, down),
       onModifiers: (modifiers) => this.setModifiers(modifiers),

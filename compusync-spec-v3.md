@@ -123,7 +123,7 @@ Placements must not overlap in VU space. Validate on config change; if overlappi
 
 ### 3.3 Acceleration
 
-Raw deltas are unaccelerated on both platforms. Apply a **single shared acceleration curve** in the addon so pointer feel is identical regardless of which device is driving.
+Raw deltas are unaccelerated on both platforms. Each computer stores its own acceleration curve. The current owner's curve is sent to the peer and applied to native capture on both machines, so input keeps the active computer's feel regardless of which device is driving. Switch curves when ownership moves to the other computer.
 
 Start with a standard two-segment curve:
 ```
