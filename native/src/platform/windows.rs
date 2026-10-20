@@ -1111,7 +1111,7 @@ impl Platform for HostPlatform {
             Ok(())
         }
     }
-    fn synthesize_button(&mut self, button: &str, down: bool) -> Result<(), String> {
+    fn synthesize_button(&mut self, button: &str, down: bool, _: u32) -> Result<(), String> {
         let (flags, data) = match (button, down) {
             ("left", true) => (MOUSEEVENTF_LEFTDOWN, 0),
             ("left", false) => (MOUSEEVENTF_LEFTUP, 0),
@@ -1396,7 +1396,7 @@ impl Platform for HostPlatform {
             return Err(os_error("SendMessageTimeout(WM_CANCELMODE)"));
         }
         context.suppress_move_loop_up.store(true, Ordering::Release);
-        if let Err(error) = self.synthesize_button("left", false) {
+        if let Err(error) = self.synthesize_button("left", false, 1) {
             context
                 .suppress_move_loop_up
                 .store(false, Ordering::Release);

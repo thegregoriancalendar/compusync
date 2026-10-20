@@ -48,7 +48,7 @@ impl Platform for HostPlatform {
     fn close_window(&mut self, _: &str) -> Result<(), String> {
         Err("window close is unavailable".into())
     }
-    fn synthesize_button(&mut self, _: &str, _: bool) -> Result<(), String> {
+    fn synthesize_button(&mut self, _: &str, _: bool, _: u32) -> Result<(), String> {
         Err("input synthesis is unavailable".into())
     }
     fn synthesize_key(&mut self, _: u32, _: bool, _: u32) -> Result<(), String> {

@@ -56,6 +56,73 @@ function mockNative() {
   };
 }
 
+test('remote single, double, and triple clicks preserve both edges through native capture and transport', () => {
+  const { NativeAdapter } = require('../native/index.cjs');
+  class Substrate {
+    setEventCallback(callback) { this.callback = callback; }
+    startCapture() {}
+    stopCapture() {}
+    setLinked() {}
+    configureAcceleration() {}
+    showCursor() {}
+    hideCursor() {}
+    parkCursor() {}
+    releaseCursor() {}
+    releaseInputState() {}
+    synthesizeButton(...args) { injected.push(args); }
+  }
+  const spaces = [placement('a', 0, 0, 100, 100), placement('b', 100, 0, 100, 100)];
+  const injected = [];
+  const sourceNative = new NativeAdapter({ NativeSubstrate: Substrate }, 'test.node');
+  const destinationNative = new NativeAdapter({ NativeSubstrate: Substrate }, 'test.node');
+  const destination = new CursorController({ machineId: 'b', placements: spaces, ownerMachineId: 'b', native: destinationNative });
+  const delivered = [];
+  const source = new CursorController({
+    machineId: 'a', placements: spaces, ownerMachineId: 'b', native: sourceNative,
+    send(message) {
+      assert.equal(policyForMessage(message.type).reliable, true);
+      const sanitized = sanitizePeerMessage(JSON.parse(JSON.stringify(message)));
+      delivered.push(sanitized);
+      return destination.receive(sanitized, 'a');
+    },
+  });
+  source.start();
+  try {
+    for (const button of ['left', 'right', 'middle']) {
+      for (const clickCount of [1, 2, 3, 1]) {
+        for (const down of [true, false]) {
+          sourceNative.substrate.callback(null, JSON.stringify({ kind: 'cursorButton', button, down, clickCount }));
+          assert.deepEqual(delivered.at(-1), { type: 'cursor.button', button, down, clickCount });
+          assert.deepEqual(injected.at(-1), [button, down, clickCount]);
+        }
+      }
+    }
+    assert.equal(injected.length, 24);
+    // Windows and older peers may omit the count; retain single-click input.
+    for (const down of [true, false]) {
+      sourceNative.substrate.callback(null, JSON.stringify({ kind: 'cursorButton', button: 'left', down, clickCount: null }));
+      assert.deepEqual(injected.at(-1), ['left', down, 1]);
+      assert.equal('clickCount' in delivered.at(-1), false);
+    }
+    assert.equal(destination.state().buttons, 0);
+  } finally {
+    source.stop();
+  }
+});
+
+test('invalid remote click counts cannot change held button state', () => {
+  const native = mockNative();
+  const cursor = new CursorController({ machineId: 'a', native });
+  for (const clickCount of [null, 0, -1, 1.5, '2', Infinity, 0x100000000]) {
+    const message = { type: 'cursor.button', button: 'left', down: true, clickCount };
+    assert.equal(sanitizePeerMessage(message), null);
+    assert.equal(cursor.receive(message, 'b'), false);
+    assert.equal(cursor.localButton('left', true, clickCount), false);
+    assert.equal(cursor.state().buttons, 0);
+  }
+  assert.deepEqual(native.calls, []);
+});
+
 test('virtual-space conversion preserves VU across differing DPI scales', () => {
   const mac = placement('mac', -1440, 100, 1440, 900, 2);
   const point = { x: -720.25, y: 450.5 };

@@ -23,9 +23,19 @@ pub trait Platform: Send {
     fn set_window_bounds(&mut self, id: &str, bounds: Rect) -> Result<(), String>;
     fn focus_window(&mut self, id: &str) -> Result<(), String>;
     fn close_window(&mut self, id: &str) -> Result<(), String>;
-    fn synthesize_button(&mut self, button: &str, down: bool) -> Result<(), String>;
+    fn synthesize_button(
+        &mut self,
+        button: &str,
+        down: bool,
+        click_count: u32,
+    ) -> Result<(), String>;
     fn synthesize_key(&mut self, code: u32, down: bool, modifiers: u32) -> Result<(), String>;
     fn synthesize_scroll(&mut self, dy: f64) -> Result<(), String>;
+    fn set_gesture_forwarding(&mut self, _enabled: bool) {}
+    fn synthesize_gesture(&mut self, _data: &str) -> Result<(), String> {
+        Err("trackpad gesture synthesis requires macOS".into())
+    }
+    fn cancel_gesture(&mut self) {}
     fn foreground_is_elevated(&self) -> Result<bool, String>;
     fn start_capture(&mut self, sink: EventSink) -> Result<(), String>;
     fn set_capture_mode(&mut self, linked: bool, owner: bool);

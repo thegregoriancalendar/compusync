@@ -2,6 +2,7 @@
 
 const { normalizePlacement, ensureNonOverlapping } = require('./virtualspace.cjs');
 const { sanitizePageState } = require('./adapters/chrome/extension/page-state.js');
+const { validGestureData } = require('./trackpad-gestures.cjs');
 
 const MAX_URL_LENGTH = 8192;
 const MAX_TABS = 200;
@@ -35,6 +36,7 @@ const MESSAGE_POLICIES = Object.freeze({
   'cursor.feel': { reliable: true, ordered: true, priority: 'control' },
   'cursor.button': { reliable: true, ordered: true, priority: 'control' },
   'key.event': { reliable: true, ordered: true, priority: 'control' },
+  'gesture.trackpad': { reliable: true, ordered: true, priority: 'control' },
   'window.offer': { reliable: true, ordered: true, priority: 'control' },
   'window.ready': { reliable: true, ordered: true, priority: 'control' },
   'window.commit': { reliable: true, ordered: true, priority: 'control' },
@@ -165,6 +167,9 @@ function sanitizePeerMessage(value, options = {}) {
         result = { type: value.type, dy: value.dy };
       }
       break;
+    case 'gesture.trackpad':
+      if (validGestureData(value.data)) result = { type: value.type, data: value.data };
+      break;
     case 'cursor.handoff':
       if (finite(value.x) && finite(value.y)
         && Math.abs(value.x) <= MAX_COORDINATE && Math.abs(value.y) <= MAX_COORDINATE
@@ -197,8 +202,10 @@ function sanitizePeerMessage(value, options = {}) {
       break;
     }
     case 'cursor.button':
-      if (BUTTONS.has(value.button) && typeof value.down === 'boolean') {
+      if (BUTTONS.has(value.button) && typeof value.down === 'boolean'
+        && (value.clickCount === undefined || integer(value.clickCount, 1, 0xFFFFFFFF))) {
         result = { type: value.type, button: value.button, down: value.down };
+        if (value.clickCount !== undefined) result.clickCount = value.clickCount;
       }
       break;
     case 'key.event':

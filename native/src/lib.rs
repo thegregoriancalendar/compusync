@@ -182,11 +182,13 @@ pub struct NativeEvent {
     pub dy: Option<f64>,
     pub dt: Option<f64>,
     pub button: Option<String>,
+    pub click_count: Option<u32>,
     pub down: Option<bool>,
     pub code: Option<u32>,
     pub modifiers: Option<u32>,
     pub window_id: Option<String>,
     pub message: Option<String>,
+    pub data: Option<String>,
 }
 
 impl NativeEvent {
@@ -295,7 +297,7 @@ impl Inner {
             let _ = platform.synthesize_key(code, false, 0);
         }
         for button in held_buttons(buttons) {
-            let _ = platform.synthesize_button(button, false);
+            let _ = platform.synthesize_button(button, false, 1);
         }
         for (id, bounds) in guarded {
             let _ = platform.set_window_bounds(&id, bounds);
@@ -325,7 +327,7 @@ pub fn recover_external_state(state: &RecoveryGuardState) {
         (16, "x2"),
     ] {
         if state.buttons & bit != 0 {
-            let _ = platform.synthesize_button(button, false);
+            let _ = platform.synthesize_button(button, false, 1);
         }
     }
     if state.modifiers != 0 {
@@ -687,9 +689,9 @@ impl NativeSubstrate {
         let mut platform = self.inner.platform.lock();
         let linked = self.linked();
         let previous_owner = self.owner();
-        // Publish ownership first. The macOS event-tap barrier rechecks this
-        // atomic after every hide, so it cannot race a handoff and hide the
-        // newly authoritative cursor.
+        // Publish ownership first. The macOS motion barrier serializes its
+        // final correction with this change, so an in-flight sample cannot
+        // pin the newly authoritative cursor to its old parked position.
         platform.set_capture_mode(linked, true);
         self.inner.owner.store(true, Ordering::Release);
         if let Err(error) = platform.show_cursor() {
@@ -777,7 +779,12 @@ impl NativeSubstrate {
     }
 
     #[napi]
-    pub fn synthesize_button(&self, button: String, down: bool) -> Result<()> {
+    pub fn synthesize_button(
+        &self,
+        button: String,
+        down: bool,
+        click_count: Option<u32>,
+    ) -> Result<()> {
         let bit = button_bit(&button);
         if down && bit.is_some() {
             self.inner
@@ -785,7 +792,11 @@ impl NativeSubstrate {
                 .fetch_or(bit.unwrap(), Ordering::AcqRel);
             self.inner.persist_guard_state().map_err(io_napi)?;
         }
-        if let Err(error) = self.inner.platform.lock().synthesize_button(&button, down) {
+        if let Err(error) = self.inner.platform.lock().synthesize_button(
+            &button,
+            down,
+            click_count.unwrap_or(1).max(1),
+        ) {
             if down && bit.is_some() {
                 self.inner
                     .synthetic_buttons
@@ -850,6 +861,23 @@ impl NativeSubstrate {
     }
 
     #[napi]
+    pub fn set_gesture_forwarding(&self, enabled: bool) {
+        self.inner.platform.lock().set_gesture_forwarding(enabled);
+    }
+
+    #[napi]
+    pub fn synthesize_gesture(&self, data: String) -> Result<()> {
+        if !self.linked() || !self.owner() {
+            return Ok(());
+        }
+        self.inner
+            .platform
+            .lock()
+            .synthesize_gesture(&data)
+            .map_err(napi_error)
+    }
+
+    #[napi]
     pub fn assume_input_state(&self, buttons: u32, modifiers: u32) -> Result<()> {
         self.inner
             .synthetic_buttons
@@ -868,7 +896,7 @@ impl NativeSubstrate {
         ] {
             if buttons & bit != 0 {
                 platform
-                    .synthesize_button(button, true)
+                    .synthesize_button(button, true, 1)
                     .map_err(napi_error)?;
             }
         }
@@ -887,10 +915,11 @@ impl NativeSubstrate {
         let buttons = self.inner.synthetic_buttons.load(Ordering::Acquire);
         let modifiers = self.inner.synthetic_modifiers.load(Ordering::Acquire);
         let mut platform = self.inner.platform.lock();
+        platform.cancel_gesture();
         // Ownership transfer must not inject unmatched mouse-up events.
         // A bare right-up opens a context menu even though the user never clicked.
         for button in held_buttons(buttons) {
-            if platform.synthesize_button(button, false).is_ok() {
+            if platform.synthesize_button(button, false, 1).is_ok() {
                 self.inner
                     .synthetic_buttons
                     .fetch_and(!button_bit(button).unwrap_or(0), Ordering::AcqRel);

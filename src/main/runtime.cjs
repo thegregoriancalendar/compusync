@@ -5,6 +5,7 @@ const { CursorController } = require('./cursor.cjs');
 const { MouseLatency } = require('./mouse-latency.cjs');
 const { KeyboardRouter } = require('./keyboard.cjs');
 const { ScrollRouter } = require('./scroll.cjs');
+const { TrackpadGestureRouter } = require('./trackpad-gestures.cjs');
 const { mapModifiers, mapKeyEvent } = require('./key-mapping.cjs');
 const { RecoveryWatchdog } = require('./watchdog.cjs');
 const { registerCursorHotkeys } = require('./hotkeys.cjs');
@@ -168,6 +169,12 @@ class SharedInputRuntime extends EventEmitter {
       native: this.native,
       send: (message) => this.send(message),
     });
+    this.gestures = new TrackpadGestureRouter({
+      cursor: this.cursor,
+      native: this.native,
+      send: (message) => this.send(message),
+      platforms: inputPlatforms,
+    });
     this.watchdog = new RecoveryWatchdog({
       native: this.native,
       cursor: this.cursor,
@@ -193,6 +200,7 @@ class SharedInputRuntime extends EventEmitter {
     this._state = (state) => this.updateLayouts(state?.layouts || {});
     this._key = (event) => this.keyboard.localKey(event?.code, event?.down, event?.modifiers || 0);
     this._scroll = (event) => this.scroll.localScroll(event?.dy);
+    this._gesture = (event) => this.gestures.localGesture(event?.data);
     this._displayChanged = () => this.onLayoutNeeded();
     this._nativeUnlink = () => this.watchdog.trigger('user-hotkey');
     this._nativeOwnership = () => this.cursor.toggleOwnership();
@@ -207,12 +215,14 @@ class SharedInputRuntime extends EventEmitter {
     this.watchdog.bindProcess(this.processLike);
     this.watchdog.bindPowerMonitor(this.powerMonitor);
     this.cursor.start();
+    this.gestures.configure();
     this.latency.start();
     this.session.on('peer-message', this._peerMessage);
     this.session.on('status', this._status);
     this.session.on('state', this._state);
     this.native.on?.('key', this._key);
     this.native.on?.('scroll', this._scroll);
+    this.native.on?.('gesture', this._gesture);
     this.native.on?.('displayChanged', this._displayChanged);
     this.native.on?.('unlinkHotkey', this._nativeUnlink);
     this.native.on?.('toggleOwnershipHotkey', this._nativeOwnership);
@@ -251,7 +261,7 @@ class SharedInputRuntime extends EventEmitter {
     if (clean.type === 'cursor.layout') return this.#receiveCursorLayout(clean);
     if (clean.type === 'cursor.feel') return this.#receiveCursorFeel(clean);
     if (clean.type.startsWith('window.')) return this.windowController?.receive(clean) || false;
-    const handled = routePeerInput({ cursor: this.cursor, keyboard: this.keyboard, scroll: this.scroll, watchdog: this.watchdog }, clean, peerMachineId);
+    const handled = routePeerInput({ cursor: this.cursor, keyboard: this.keyboard, scroll: this.scroll, gestures: this.gestures, watchdog: this.watchdog }, clean, peerMachineId);
     if (clean.type === 'layout.update' && handled) this.#applyDesiredLink();
     return handled;
   }
@@ -341,6 +351,7 @@ class SharedInputRuntime extends EventEmitter {
     this.session.off?.('state', this._state);
     this.native.off?.('key', this._key);
     this.native.off?.('scroll', this._scroll);
+    this.native.off?.('gesture', this._gesture);
     this.native.off?.('displayChanged', this._displayChanged);
     this.native.off?.('unlinkHotkey', this._nativeUnlink);
     this.native.off?.('toggleOwnershipHotkey', this._nativeOwnership);
@@ -426,6 +437,7 @@ class SharedInputRuntime extends EventEmitter {
   #applyActiveAcceleration() {
     if (!this.cursor) return;
     this.cursor.setConfig({ acceleration: this.#activeAcceleration() });
+    this.gestures?.configure();
   }
 
   #applyLinked(linked, reason) {

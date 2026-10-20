@@ -14,6 +14,7 @@ function routePeerInput(components, message, peerMachineId = null) {
     }
     if (message.type === 'key.event') return components.keyboard?.receive(message) || false;
     if (message.type === 'scroll.delta') return components.scroll?.receive(message) || false;
+    if (message.type === 'gesture.trackpad') return components.gestures?.receive(message) || false;
     if (message.type.startsWith('cursor.')) return components.cursor?.receive(message, peerMachineId) || false;
     return false;
   } catch {

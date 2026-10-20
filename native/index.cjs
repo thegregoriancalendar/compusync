@@ -29,6 +29,7 @@ const REQUIRED_SUBSTRATE_METHODS = Object.freeze([
   'configureAcceleration', 'setEventCallback', 'startCapture', 'stopCapture',
   'showCursor', 'hideCursor', 'parkCursor', 'releaseCursor', 'warpCursor',
   'cursorPosition', 'assumeInputState', 'synthesizeButton', 'synthesizeKey', 'synthesizeScroll',
+  'setGestureForwarding', 'synthesizeGesture',
   'foregroundIsElevated', 'releaseInputState', 'installRecoveryGuard',
   'setLinked', 'recover', 'heartbeat', 'displayMetrics', 'enumerateWindows',
   'setWindowBounds', 'focusWindow', 'closeWindow', 'guardWindow',
@@ -154,6 +155,8 @@ class FallbackNativeAdapter extends EventEmitter {
   synthesizeButton() {}
   synthesizeKey() {}
   synthesizeScroll() {}
+  setGestureForwarding() {}
+  synthesizeGesture() {}
   isForegroundElevated() { return false; }
   releaseInputState() {}
   installRecoveryGuard() {}
@@ -214,12 +217,13 @@ class NativeAdapter extends EventEmitter {
         const event = JSON.parse(json);
         this.emit('nativeEvent', event);
         if (event.kind === 'cursorDelta') this.handlers.onDelta?.(event.dx, event.dy, event.dt, event.timestamp);
-        else if (event.kind === 'cursorButton') this.handlers.onButton?.(event.button, event.down);
+        else if (event.kind === 'cursorButton') this.handlers.onButton?.(event.button, event.down, event.clickCount ?? undefined);
         else if (event.kind === 'keyEvent') {
           this.handlers.onModifiers?.(event.modifiers || 0);
           this.emit('key', event);
         } else if (event.kind === 'recovered') this.emit('recovered', event);
         else if (event.kind === 'scrollDelta') this.emit('scroll', event);
+        else if (event.kind === 'trackpadGesture') this.emit('gesture', event);
         else if (event.kind === 'unlinkHotkey') this.emit('unlinkHotkey');
         else if (event.kind === 'toggleOwnershipHotkey') this.emit('toggleOwnershipHotkey');
         else if (event.kind === 'displayChanged') {
@@ -254,9 +258,11 @@ class NativeAdapter extends EventEmitter {
   warpCursor(point) { return this.substrate.warpCursor(this.toPlatformPoint(point)); }
   cursorPosition() { return this.toNormalizedPoint(this.substrate.cursorPosition()); }
   assumeInputState(buttons, modifiers) { return this.substrate.assumeInputState(buttons >>> 0, modifiers >>> 0); }
-  synthesizeButton(button, down) { return this.substrate.synthesizeButton(button, Boolean(down)); }
+  synthesizeButton(button, down, clickCount = 1) { return this.substrate.synthesizeButton(button, Boolean(down), clickCount); }
   synthesizeKey(code, down, modifiers = 0) { return this.substrate.synthesizeKey(code >>> 0, Boolean(down), modifiers >>> 0); }
   synthesizeScroll(dy) { return this.substrate.synthesizeScroll(Number(dy)); }
+  setGestureForwarding(enabled) { return this.substrate.setGestureForwarding(Boolean(enabled)); }
+  synthesizeGesture(data) { return this.substrate.synthesizeGesture(data); }
   isForegroundElevated() { return this.substrate.foregroundIsElevated(); }
   releaseInputState() { return this.substrate.releaseInputState(); }
   installRecoveryGuard() { return this.substrate.installRecoveryGuard(this.guardPath); }

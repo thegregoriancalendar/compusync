@@ -15,6 +15,9 @@ use std::{
     thread::{self, JoinHandle},
 };
 
+#[path = "macos_gestures.rs"]
+mod gestures;
+
 type CfType = *const c_void;
 type CfArray = *const c_void;
 type CfString = *const c_void;
@@ -47,6 +50,7 @@ const CG_EVENT_SCROLL_WHEEL: u32 = 22;
 const CG_EVENT_OTHER_DOWN: u32 = 25;
 const CG_EVENT_OTHER_UP: u32 = 26;
 const CG_EVENT_OTHER_DRAGGED: u32 = 27;
+const CG_FIELD_MOUSE_CLICK_STATE: u32 = 1;
 const CG_FIELD_MOUSE_BUTTON: u32 = 3;
 // Unlike kCGMouseEventDeltaX/Y, these fields contain raw device movement and
 // are not contaminated by CoreGraphics cursor acceleration or our own warps.
@@ -169,6 +173,7 @@ unsafe extern "C" {
     fn CGWarpMouseCursorPosition(point: CgPoint) -> i32;
     fn CGEventCreate(source: CfType) -> CgEvent;
     fn CGEventGetLocation(event: CgEvent) -> CgPoint;
+    fn CGEventSetLocation(event: CgEvent, location: CgPoint);
     fn CGEventGetTimestamp(event: CgEvent) -> u64;
     fn CGEventGetIntegerValueField(event: CgEvent, field: u32) -> i64;
     fn CGEventGetDoubleValueField(event: CgEvent, field: u32) -> f64;
@@ -483,6 +488,9 @@ struct TapContext {
     sink: EventSink,
     linked: AtomicBool,
     owner: AtomicBool,
+    // Serialize position corrections with ownership changes and explicit
+    // warps, so an in-flight non-owner sample cannot undo a handoff warp.
+    parked_position: Mutex<Option<CgPoint>>,
     left_down: AtomicBool,
     drag_generation: AtomicU64,
     drag_moved: AtomicBool,
@@ -513,15 +521,42 @@ fn tap_is_non_owner(context: &TapContext) -> bool {
     )
 }
 
-unsafe fn reinforce_non_owner_motion_barrier(context: &TapContext) -> bool {
+fn set_tap_capture_mode(
+    context: &TapContext,
+    linked: bool,
+    owner: bool,
+    position: Option<CgPoint>,
+) {
+    let mut parked = context.parked_position.lock();
+    if suppress_for_non_owner(linked, owner) {
+        if !tap_is_non_owner(context) || parked.is_none() {
+            *parked = position;
+        }
+    } else {
+        *parked = None;
+    }
+    context.linked.store(linked, Ordering::Release);
+    context.owner.store(owner, Ordering::Release);
+}
+
+unsafe fn reinforce_non_owner_motion_barrier(
+    context: &TapContext,
+    event: CgEvent,
+    warp_cursor: impl FnOnce(CgPoint),
+) -> bool {
+    let mut parked = context.parked_position.lock();
     if !tap_is_non_owner(context) {
         return false;
     }
-    // macOS can restore the mouse/cursor association after display/session
-    // transitions. Reassert it on physical motion, but never issue another
-    // counted cursor hide: HostPlatform owns the one matching hide/show pair.
-    let _ = unsafe { CGAssociateMouseAndMouseCursorPosition(false) };
-    tap_is_non_owner(context)
+    // Mouse/cursor disassociation is foreground-dependent. Returning null
+    // suppresses app delivery, but does not reliably freeze the hardware
+    // cursor in a background app. Pin it explicitly on the capture thread;
+    // CGWarpMouseCursorPosition generates no input events. Never repeat the
+    // counted hide here: HostPlatform owns the balanced hide/show pair.
+    let position = *parked.get_or_insert_with(|| unsafe { CGEventGetLocation(event) });
+    unsafe { CGEventSetLocation(event, position) };
+    warp_cursor(position);
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -865,7 +900,11 @@ unsafe extern "C" fn event_tap(
                     unsafe { CGEventTapEnable(tap, true) };
                 }
             },
-            || unsafe { event_tap_inner(proxy, kind, event, user) },
+            || unsafe {
+                event_tap_inner(proxy, kind, event, user, |position| {
+                    CGWarpMouseCursorPosition(position);
+                })
+            },
         )
     }))
     .unwrap_or(event)
@@ -876,6 +915,7 @@ unsafe fn event_tap_inner(
     kind: u32,
     event: CgEvent,
     user: *mut c_void,
+    warp_cursor: impl FnOnce(CgPoint),
 ) -> CgEvent {
     let context = unsafe { &*(user as *const TapContext) };
     let source_tag = unsafe { CGEventGetIntegerValueField(event, CG_FIELD_SOURCE_USER_DATA) };
@@ -887,6 +927,19 @@ unsafe fn event_tap_inner(
     }
     let compusync_event = source_tag == COMPUSYNC_SOURCE_TAG;
     if compusync_event {
+        if matches!(
+            kind,
+            CG_EVENT_MOUSE_MOVED
+                | CG_EVENT_LEFT_DRAGGED
+                | CG_EVENT_RIGHT_DRAGGED
+                | CG_EVENT_OTHER_DRAGGED
+        ) && unsafe { reinforce_non_owner_motion_barrier(context, event, warp_cursor) }
+        {
+            // A drag posted before relinquishing ownership may still be in
+            // Quartz's queue. It must not move the now-inactive Mac cursor.
+            // Button releases still pass through to clear injected holds.
+            return null_mut();
+        }
         // Do not echo injected peer input back across the transport, but keep
         // the local drag watcher in sync so a peer-driven Chrome drag can
         // still become a live cross-screen handoff.
@@ -925,7 +978,7 @@ unsafe fn event_tap_inner(
             (context.sink)(native);
             // Keep physical devices from moving the non-owner Mac cursor,
             // including trackpad drags that are suppressed below.
-            if unsafe { reinforce_non_owner_motion_barrier(context) } {
+            if unsafe { reinforce_non_owner_motion_barrier(context, event, warp_cursor) } {
                 return null_mut();
             }
             if kind == CG_EVENT_LEFT_DRAGGED
@@ -1004,6 +1057,10 @@ unsafe fn event_tap_inner(
             };
             let mut native = NativeEvent::simple("cursorButton");
             native.button = Some(button.into());
+            native.click_count = Some(unsafe {
+                CGEventGetIntegerValueField(event, CG_FIELD_MOUSE_CLICK_STATE)
+                    .clamp(1, u32::MAX as i64) as u32
+            });
             native.down = Some(matches!(
                 kind,
                 CG_EVENT_LEFT_DOWN | CG_EVENT_RIGHT_DOWN | CG_EVENT_OTHER_DOWN
@@ -1029,6 +1086,7 @@ unsafe fn event_tap_inner(
 
 struct CaptureRuntime {
     context: Arc<TapContext>,
+    gestures: Arc<gestures::Capture>,
     run_loop: CfRunLoop,
     thread: Option<JoinHandle<()>>,
     drag_poll_stop: Arc<AtomicBool>,
@@ -1067,11 +1125,67 @@ impl Drop for CaptureRuntime {
     }
 }
 
+// Quartz does not infer multi-clicks from freshly created mouse events. Keep
+// the captured count on both edges so AppKit sees the original click sequence,
+// independent of transport delays and the non-owner's parked cursor.
+fn create_button_event(
+    button: &str,
+    down: bool,
+    location: Point,
+    click_count: u32,
+) -> Result<OwnedCf, String> {
+    let button = match button {
+        "left" => 0,
+        "right" => 1,
+        "middle" => 2,
+        "x1" | "back" => 3,
+        "x2" | "forward" => 4,
+        _ => return Err("button must be left, right, middle, x1, or x2".into()),
+    };
+    let kind = match (button, down) {
+        (0, true) => CG_EVENT_LEFT_DOWN,
+        (0, false) => CG_EVENT_LEFT_UP,
+        (1, true) => CG_EVENT_RIGHT_DOWN,
+        (1, false) => CG_EVENT_RIGHT_UP,
+        (_, true) => CG_EVENT_OTHER_DOWN,
+        _ => CG_EVENT_OTHER_UP,
+    };
+    let event = OwnedCf(unsafe {
+        CGEventCreateMouseEvent(
+            null(),
+            kind,
+            CgPoint {
+                x: location.x,
+                y: location.y,
+            },
+            button,
+        )
+    });
+    if event.0.is_null() {
+        return Err("CGEventCreateMouseEvent failed".into());
+    }
+    unsafe {
+        CGEventSetIntegerValueField(
+            event.0 as CgEvent,
+            CG_FIELD_SOURCE_USER_DATA,
+            COMPUSYNC_SOURCE_TAG,
+        );
+        CGEventSetIntegerValueField(
+            event.0 as CgEvent,
+            CG_FIELD_MOUSE_CLICK_STATE,
+            click_count.max(1) as i64,
+        );
+    }
+    Ok(event)
+}
+
 pub struct HostPlatform {
     hidden: bool,
     decoupled: bool,
     scroll_remainder: f64,
     capture: Option<CaptureRuntime>,
+    gesture_forwarding: bool,
+    gesture_replay: gestures::Replay,
 }
 unsafe impl Send for HostPlatform {}
 impl HostPlatform {
@@ -1081,6 +1195,8 @@ impl HostPlatform {
             decoupled: false,
             scroll_remainder: 0.0,
             capture: None,
+            gesture_forwarding: false,
+            gesture_replay: gestures::Replay::default(),
         }
     }
 }
@@ -1136,7 +1252,22 @@ impl Platform for HostPlatform {
         }
     }
     fn warp_cursor(&mut self, p: Point) -> Result<(), String> {
-        let code = unsafe { CGWarpMouseCursorPosition(CgPoint { x: p.x, y: p.y }) };
+        let position = CgPoint { x: p.x, y: p.y };
+        let code = {
+            let mut parked = self
+                .capture
+                .as_ref()
+                .map(|capture| capture.context.parked_position.lock());
+            let code = unsafe { CGWarpMouseCursorPosition(position) };
+            if code == 0 {
+                if let Some(parked) = parked.as_mut() {
+                    if parked.is_some() {
+                        **parked = Some(position);
+                    }
+                }
+            }
+            code
+        };
         if code == 0 {
             // CoreGraphics cursor warps do not reliably produce a
             // kCGEventLeftMouseDragged callback. Deliver drag events while a
@@ -1362,42 +1493,15 @@ impl Platform for HostPlatform {
             "close AX window",
         )
     }
-    fn synthesize_button(&mut self, button: &str, down: bool) -> Result<(), String> {
-        let button = match button {
-            "left" => 0,
-            "right" => 1,
-            "middle" => 2,
-            "x1" | "back" => 3,
-            "x2" | "forward" => 4,
-            _ => return Err("button must be left, right, middle, x1, or x2".into()),
-        };
-        let location = self.cursor_position()?;
-        let kind = match (button, down) {
-            (0, true) => CG_EVENT_LEFT_DOWN,
-            (0, false) => CG_EVENT_LEFT_UP,
-            (1, true) => CG_EVENT_RIGHT_DOWN,
-            (1, false) => CG_EVENT_RIGHT_UP,
-            (_, true) => CG_EVENT_OTHER_DOWN,
-            _ => CG_EVENT_OTHER_UP,
-        };
-        let event = unsafe {
-            CGEventCreateMouseEvent(
-                null(),
-                kind,
-                CgPoint {
-                    x: location.x,
-                    y: location.y,
-                },
-                button,
-            )
-        };
-        if event.is_null() {
-            return Err("CGEventCreateMouseEvent failed".into());
-        }
+    fn synthesize_button(
+        &mut self,
+        button: &str,
+        down: bool,
+        click_count: u32,
+    ) -> Result<(), String> {
+        let event = create_button_event(button, down, self.cursor_position()?, click_count)?;
         unsafe {
-            CGEventSetIntegerValueField(event, CG_FIELD_SOURCE_USER_DATA, COMPUSYNC_SOURCE_TAG);
-            CGEventPost(0, event);
-            CFRelease(event)
+            CGEventPost(0, event.0 as CgEvent);
         }
         Ok(())
     }
@@ -1442,6 +1546,24 @@ impl Platform for HostPlatform {
     fn foreground_is_elevated(&self) -> Result<bool, String> {
         Ok(false)
     }
+    fn set_gesture_forwarding(&mut self, enabled: bool) {
+        self.gesture_forwarding = enabled;
+        if let Some(runtime) = &self.capture {
+            runtime.gestures.set_enabled(enabled);
+        }
+        if !enabled {
+            self.gesture_replay.cancel();
+        }
+    }
+    fn synthesize_gesture(&mut self, data: &str) -> Result<(), String> {
+        if !self.gesture_forwarding {
+            return Ok(());
+        }
+        self.gesture_replay.receive(data)
+    }
+    fn cancel_gesture(&mut self) {
+        self.gesture_replay.cancel();
+    }
     fn start_capture(&mut self, sink: EventSink) -> Result<(), String> {
         if self.capture.is_some() {
             return Ok(());
@@ -1449,10 +1571,15 @@ impl Platform for HostPlatform {
         if !unsafe { AXIsProcessTrusted() } {
             return Err("Accessibility permission is required; enable Compusync in System Settings > Privacy & Security > Accessibility".into());
         }
+        let gesture_context = Arc::new(gestures::Capture::new(
+            sink.clone(),
+            self.gesture_forwarding,
+        ));
         let context = Arc::new(TapContext {
             sink,
             linked: AtomicBool::new(false),
             owner: AtomicBool::new(true),
+            parked_position: Mutex::new(None),
             left_down: AtomicBool::new(false),
             drag_generation: AtomicU64::new(0),
             drag_moved: AtomicBool::new(false),
@@ -1461,6 +1588,7 @@ impl Platform for HostPlatform {
             drag_watch: Mutex::new(None),
         });
         let user = Arc::into_raw(context.clone()) as usize;
+        let thread_gestures = gesture_context.clone();
         let (sender, receiver) = std::sync::mpsc::sync_channel::<Result<usize, String>>(1);
         let thread = thread::Builder::new()
             .name("compusync-mac-input".into())
@@ -1503,6 +1631,16 @@ impl Platform for HostPlatform {
                 *(*(user as *const TapContext)).tap.lock() = tap;
                 let source = CFMachPortCreateRunLoopSource(null(), tap, 0);
                 let run_loop = CFRunLoopGetCurrent();
+                let _gesture_tap = match gestures::Tap::install(thread_gestures, run_loop) {
+                    Ok(tap) => tap,
+                    Err(error) => {
+                        CFRelease(source);
+                        CFRelease(tap);
+                        drop(Arc::from_raw(user as *const TapContext));
+                        let _ = sender.send(Err(error));
+                        return;
+                    }
+                };
                 CFRunLoopAddSource(run_loop, source, kCFRunLoopCommonModes);
                 CGEventTapEnable(tap, true);
                 let _ = sender.send(Ok(run_loop as usize));
@@ -1579,6 +1717,7 @@ impl Platform for HostPlatform {
         };
         self.capture = Some(CaptureRuntime {
             context,
+            gestures: gesture_context,
             run_loop,
             thread: Some(thread),
             drag_poll_stop,
@@ -1588,12 +1727,24 @@ impl Platform for HostPlatform {
     }
     fn set_capture_mode(&mut self, linked: bool, owner: bool) {
         self.scroll_remainder = 0.0;
+        if !linked || !owner {
+            self.gesture_replay.cancel();
+        }
         if let Some(runtime) = &self.capture {
-            runtime.context.linked.store(linked, Ordering::Release);
-            runtime.context.owner.store(owner, Ordering::Release)
+            runtime.gestures.set_mode(linked, owner);
+            let position = if linked && !owner {
+                self.cursor_position().ok().map(|point| CgPoint {
+                    x: point.x,
+                    y: point.y,
+                })
+            } else {
+                None
+            };
+            set_tap_capture_mode(&runtime.context, linked, owner, position);
         }
     }
     fn stop_capture(&mut self) {
+        self.gesture_replay.cancel();
         if let Some(mut runtime) = self.capture.take() {
             runtime.stop()
         }
@@ -1639,13 +1790,299 @@ impl Drop for HostPlatform {
 #[cfg(test)]
 mod tests {
     use super::{
-        cursor_visibility_action, suppress_for_non_owner, take_run_loop, CfRunLoop, CgPoint,
+        cursor_visibility_action, suppress_for_non_owner, take_run_loop, CfRunLoop,
         CursorVisibilityAction, CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_X,
         CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_Y,
     };
 
     #[test]
-    fn linked_trackpad_drag_captures_fractional_motion_without_duplicate_appkit_input() {
+    fn inactive_mac_pins_motion_without_losing_raw_input_or_echoing_queued_drags() {
+        use super::*;
+
+        let captured = Arc::new(Mutex::new(Vec::<NativeEvent>::new()));
+        let sink_events = captured.clone();
+        let context = TapContext {
+            sink: Arc::new(move |event| sink_events.lock().push(event)),
+            linked: AtomicBool::new(false),
+            owner: AtomicBool::new(true),
+            parked_position: Mutex::new(None),
+            left_down: AtomicBool::new(false),
+            drag_generation: AtomicU64::new(0),
+            drag_moved: AtomicBool::new(false),
+            move_loop_terminated: AtomicBool::new(false),
+            tap: Mutex::new(null_mut()),
+            drag_watch: Mutex::new(None),
+        };
+        let anchor = CgPoint {
+            x: -250.5,
+            y: 100.25,
+        };
+        set_tap_capture_mode(&context, true, false, Some(anchor));
+        // Reapplying linked state must not adopt a cursor position that has
+        // drifted since the handoff (for example after an app focus change).
+        set_tap_capture_mode(&context, true, false, Some(CgPoint { x: 999.0, y: 999.0 }));
+        let user = &context as *const TapContext as *mut c_void;
+        for tag in [0, COMPUSYNC_SOURCE_TAG] {
+            for kind in [
+                CG_EVENT_MOUSE_MOVED,
+                CG_EVENT_LEFT_DRAGGED,
+                CG_EVENT_RIGHT_DRAGGED,
+                CG_EVENT_OTHER_DRAGGED,
+            ] {
+                for dx in [1, -20, 100] {
+                    let event = OwnedCf(unsafe {
+                        CGEventCreateMouseEvent(
+                            null(),
+                            kind,
+                            CgPoint {
+                                x: 500.0 + dx as f64,
+                                y: 600.0,
+                            },
+                            0,
+                        )
+                    });
+                    assert!(!event.0.is_null());
+                    let input = event.0 as CgEvent;
+                    let mut corrections = Vec::new();
+                    let returned = unsafe {
+                        CGEventSetIntegerValueField(input, CG_FIELD_SOURCE_USER_DATA, tag);
+                        CGEventSetIntegerValueField(
+                            input,
+                            CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_X,
+                            dx,
+                        );
+                        CGEventSetIntegerValueField(
+                            input,
+                            CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_Y,
+                            -2,
+                        );
+                        // Exercise actual Quartz fields and routing, replacing
+                        // only the global cursor warp so the test is harmless.
+                        event_tap_inner(null_mut(), kind, input, user, |p| {
+                            corrections.push((p.x, p.y))
+                        })
+                    };
+                    assert!(returned.is_null());
+                    assert_eq!(corrections, [(anchor.x, anchor.y)]);
+                    let location = unsafe { CGEventGetLocation(input) };
+                    assert_eq!((location.x, location.y), (anchor.x, anchor.y));
+                    if tag == 0 {
+                        let native = captured.lock().pop().unwrap();
+                        assert_eq!(native.kind, "cursorDelta");
+                        assert_eq!(native.dx, Some(dx as f64));
+                        assert_eq!(native.dy, Some(-2.0));
+                    }
+                    assert!(
+                        captured.lock().is_empty(),
+                        "queued peer motion must not echo"
+                    );
+                }
+            }
+        }
+
+        // An injected release must still end AppKit's old drag after handoff.
+        context.left_down.store(true, Ordering::Release);
+        let release = create_button_event(
+            "left",
+            false,
+            Point {
+                x: anchor.x,
+                y: anchor.y,
+            },
+            1,
+        )
+        .unwrap();
+        let input = release.0 as CgEvent;
+        assert_eq!(
+            unsafe {
+                event_tap_inner(null_mut(), CG_EVENT_LEFT_UP, input, user, |_| {
+                    panic!("release must pass")
+                })
+            },
+            input
+        );
+        assert!(!context.left_down.load(Ordering::Acquire));
+
+        let motion = OwnedCf(unsafe {
+            CGEventCreateMouseEvent(
+                null(),
+                CG_EVENT_MOUSE_MOVED,
+                CgPoint { x: 70.0, y: 80.0 },
+                0,
+            )
+        });
+        assert!(!motion.0.is_null());
+        let input = motion.0 as CgEvent;
+        // Both becoming owner and unlinking remove the position lock.
+        for (linked, owner) in [(true, true), (false, false)] {
+            set_tap_capture_mode(&context, linked, owner, None);
+            assert!(context.parked_position.lock().is_none());
+            assert_eq!(
+                unsafe {
+                    event_tap_inner(null_mut(), CG_EVENT_MOUSE_MOVED, input, user, |_| {
+                        panic!("active/unlinked cursor must move freely")
+                    })
+                },
+                input
+            );
+            let location = unsafe { CGEventGetLocation(input) };
+            assert_eq!((location.x, location.y), (70.0, 80.0));
+            // A subsequent handoff must use the new source position.
+            set_tap_capture_mode(&context, true, false, Some(CgPoint { x: 12.0, y: 34.0 }));
+            let next = context.parked_position.lock().unwrap();
+            assert_eq!((next.x, next.y), (12.0, 34.0));
+        }
+    }
+
+    #[test]
+    fn ownership_waits_for_an_inflight_inactive_cursor_correction() {
+        use super::*;
+        use std::{sync::mpsc, time::Duration};
+
+        let context = Arc::new(TapContext {
+            sink: Arc::new(|_| {}),
+            linked: AtomicBool::new(true),
+            owner: AtomicBool::new(false),
+            parked_position: Mutex::new(Some(CgPoint { x: 10.0, y: 20.0 })),
+            left_down: AtomicBool::new(false),
+            drag_generation: AtomicU64::new(0),
+            drag_moved: AtomicBool::new(false),
+            move_loop_terminated: AtomicBool::new(false),
+            tap: Mutex::new(null_mut()),
+            drag_watch: Mutex::new(None),
+        });
+        let input_context = context.clone();
+        let (correcting_tx, correcting_rx) = mpsc::channel();
+        let (finish_tx, finish_rx) = mpsc::channel();
+        let input_thread = thread::spawn(move || {
+            let motion = OwnedCf(unsafe {
+                CGEventCreateMouseEvent(null(), CG_EVENT_MOUSE_MOVED, CgPoint::default(), 0)
+            });
+            assert!(!motion.0.is_null());
+            assert!(unsafe {
+                event_tap_inner(
+                    null_mut(),
+                    CG_EVENT_MOUSE_MOVED,
+                    motion.0 as CgEvent,
+                    Arc::as_ptr(&input_context) as *mut c_void,
+                    |_| {
+                        correcting_tx.send(()).unwrap();
+                        finish_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                        assert!(tap_is_non_owner(&input_context));
+                    },
+                )
+            }
+            .is_null());
+        });
+        correcting_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let owner_context = context.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (owner_tx, owner_rx) = mpsc::channel();
+        let owner_thread = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            set_tap_capture_mode(&owner_context, true, true, None);
+            owner_tx.send(()).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let early_owner = owner_rx.recv_timeout(Duration::from_millis(25));
+        finish_tx.send(()).unwrap();
+        input_thread.join().unwrap();
+        owner_thread.join().unwrap();
+        assert!(matches!(early_owner, Err(mpsc::RecvTimeoutError::Timeout)));
+        owner_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(context.owner.load(Ordering::Acquire));
+        assert!(context.parked_position.lock().is_none());
+    }
+
+    #[test]
+    fn remote_click_counts_survive_quartz_capture_and_playback_without_echo() {
+        use super::*;
+
+        let captured = Arc::new(Mutex::new(Vec::<NativeEvent>::new()));
+        let sink_events = captured.clone();
+        let context = TapContext {
+            sink: Arc::new(move |event| sink_events.lock().push(event)),
+            linked: AtomicBool::new(true),
+            owner: AtomicBool::new(false),
+            parked_position: Mutex::new(None),
+            left_down: AtomicBool::new(false),
+            drag_generation: AtomicU64::new(0),
+            drag_moved: AtomicBool::new(false),
+            move_loop_terminated: AtomicBool::new(false),
+            tap: Mutex::new(null_mut()),
+            drag_watch: Mutex::new(None),
+        };
+        // Use real Quartz fields without posting global input or installing a
+        // hook. Physical clicks on the non-owner must be forwarded/suppressed;
+        // reconstructed peer clicks must pass through once without an echo.
+        for (button, down_kind, up_kind) in [
+            ("left", CG_EVENT_LEFT_DOWN, CG_EVENT_LEFT_UP),
+            ("right", CG_EVENT_RIGHT_DOWN, CG_EVENT_RIGHT_UP),
+            ("middle", CG_EVENT_OTHER_DOWN, CG_EVENT_OTHER_UP),
+        ] {
+            for count in [1, 2, 3, 1] {
+                for (down, kind) in [(true, down_kind), (false, up_kind)] {
+                    let button_number = match button {
+                        "left" => 0,
+                        "right" => 1,
+                        _ => 2,
+                    };
+                    let event = OwnedCf(unsafe {
+                        CGEventCreateMouseEvent(
+                            null(),
+                            kind,
+                            CgPoint { x: 25.0, y: 50.0 },
+                            button_number,
+                        )
+                    });
+                    assert!(!event.0.is_null());
+                    let input = event.0 as CgEvent;
+                    unsafe {
+                        CGEventSetIntegerValueField(input, CG_FIELD_MOUSE_CLICK_STATE, count as i64)
+                    };
+                    let user = &context as *const TapContext as *mut c_void;
+                    assert!(unsafe {
+                        event_tap_inner(null_mut(), kind, input, user, |_| {
+                            panic!("click must not warp")
+                        })
+                    }
+                    .is_null());
+                    let native = captured.lock().pop().unwrap();
+                    assert_eq!(native.button.as_deref(), Some(button));
+                    assert_eq!(native.down, Some(down));
+                    assert_eq!(native.click_count, Some(count));
+                    let json = serde_json::to_value(&native).unwrap();
+                    assert_eq!(json["clickCount"], count);
+                    let replay = create_button_event(
+                        button,
+                        down,
+                        Point { x: 200.0, y: 100.0 },
+                        native.click_count.unwrap(),
+                    )
+                    .unwrap();
+                    let replay_input = replay.0 as CgEvent;
+                    assert_eq!(
+                        unsafe {
+                            CGEventGetIntegerValueField(replay_input, CG_FIELD_MOUSE_CLICK_STATE)
+                        },
+                        count as i64
+                    );
+                    assert_eq!(
+                        unsafe {
+                            event_tap_inner(null_mut(), kind, replay_input, user, |_| {
+                                panic!("click must not warp")
+                            })
+                        },
+                        replay_input
+                    );
+                    assert!(captured.lock().is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn linked_trackpad_drag_captures_motion_without_duplicate_appkit_input() {
         use super::*;
 
         let captured = Arc::new(Mutex::new(Vec::<NativeEvent>::new()));
@@ -1654,6 +2091,7 @@ mod tests {
             sink: Arc::new(move |event| sink_events.lock().push(event)),
             linked: AtomicBool::new(true),
             owner: AtomicBool::new(true),
+            parked_position: Mutex::new(None),
             left_down: AtomicBool::new(false),
             drag_generation: AtomicU64::new(0),
             drag_moved: AtomicBool::new(false),
@@ -1670,17 +2108,16 @@ mod tests {
             let input = event.0 as CgEvent;
             let returned = unsafe {
                 CGEventSetIntegerValueField(input, CG_FIELD_SOURCE_USER_DATA, tag);
-                CGEventSetDoubleValueField(input, CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_X, 0.25);
-                CGEventSetDoubleValueField(
-                    input,
-                    CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_Y,
-                    -0.125,
-                );
+                // Quartz stores synthetic raw movement as integers; fractional
+                // setter values truncate to zero before the callback sees them.
+                CGEventSetIntegerValueField(input, CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_X, 1);
+                CGEventSetIntegerValueField(input, CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_Y, -2);
                 event_tap_inner(
                     null_mut(),
                     kind,
                     input,
                     &context as *const TapContext as *mut c_void,
+                    |_| panic!("owner motion must not be pinned"),
                 )
             };
             assert!(returned.is_null() || returned == input);
@@ -1693,8 +2130,8 @@ mod tests {
         {
             let events = captured.lock();
             assert_eq!(events.len(), 2);
-            assert_eq!(events[1].dx, Some(0.25));
-            assert_eq!(events[1].dy, Some(-0.125));
+            assert_eq!(events[1].dx, Some(1.0));
+            assert_eq!(events[1].dy, Some(-2.0));
         }
         assert!(context.drag_moved.load(Ordering::Acquire));
 
@@ -1724,6 +2161,7 @@ mod tests {
             sink: Arc::new(|_| {}),
             linked: AtomicBool::new(false),
             owner: AtomicBool::new(true),
+            parked_position: Mutex::new(None),
             left_down: AtomicBool::new(false),
             drag_generation: AtomicU64::new(0),
             drag_moved: AtomicBool::new(false),
@@ -1754,6 +2192,7 @@ mod tests {
                             kind,
                             event.0 as CgEvent,
                             Arc::as_ptr(&input_context) as *mut c_void,
+                            |_| panic!("unlinked motion must not be pinned"),
                         );
                     }
                 }

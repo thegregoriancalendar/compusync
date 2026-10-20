@@ -249,9 +249,10 @@ class CursorController extends EventEmitter {
     return true;
   }
 
-  localButton(button, down) {
+  localButton(button, down, clickCount) {
     const bit = BUTTON_BITS[button];
     if (!this.linked || !bit || typeof down !== 'boolean') return false;
+    if (clickCount !== undefined && (!Number.isSafeInteger(clickCount) || clickCount < 1 || clickCount > 0xFFFFFFFF)) return false;
     this.localButtons = down ? this.localButtons | bit : this.localButtons & ~bit;
     if (this.isOwner()) {
       if (down) this.syntheticButtons &= ~bit;
@@ -261,7 +262,7 @@ class CursorController extends EventEmitter {
       else this.syntheticButtons &= ~bit;
     }
     if (!this.linked) return false;
-    return this.#sendPeer({ type: 'cursor.button', button, down }, true);
+    return this.#sendPeer({ type: 'cursor.button', button, down, ...(clickCount === undefined ? {} : { clickCount }) }, true);
   }
 
   receive(message, peerMachineId = null) {
@@ -286,6 +287,7 @@ class CursorController extends EventEmitter {
     if (message.type === 'cursor.button') {
       const bit = BUTTON_BITS[message.button];
       if (!bit || typeof message.down !== 'boolean') return false;
+      if (message.clickCount !== undefined && (!Number.isSafeInteger(message.clickCount) || message.clickCount < 1 || message.clickCount > 0xFFFFFFFF)) return false;
       const wasDown = Boolean((this.localButtons | this.remoteButtons) & bit);
       this.remoteButtons = message.down ? this.remoteButtons | bit : this.remoteButtons & ~bit;
       const isDown = Boolean((this.localButtons | this.remoteButtons) & bit);
@@ -298,8 +300,8 @@ class CursorController extends EventEmitter {
           this.syntheticButtons &= ~bit;
           return true;
         }
-        if (!wasDown && isDown && !this.#synthesizeButton(message.button, bit, true)) return false;
-        else if (wasDown && !isDown && !this.#synthesizeButton(message.button, bit, false)) return false;
+        if (!wasDown && isDown && !this.#synthesizeButton(message.button, bit, true, message.clickCount)) return false;
+        else if (wasDown && !isDown && !this.#synthesizeButton(message.button, bit, false, message.clickCount)) return false;
         else if (this.localButtons & bit) this.syntheticButtons &= ~bit;
       }
       return true;
@@ -361,7 +363,7 @@ class CursorController extends EventEmitter {
       // Native capture owns the active computer's acceleration curve on the
       // input hot path. Mark its output so JS never applies it a second time.
       onDelta: (dx, dy, dt, timestamp) => this.localDelta(dx, dy, dt, timestamp, { accelerated: true }),
-      onButton: (button, down) => this.localButton(button, down),
+      onButton: (button, down, clickCount) => this.localButton(button, down, clickCount),
       onModifiers: (modifiers) => this.setModifiers(modifiers),
     });
   }
@@ -587,8 +589,9 @@ class CursorController extends EventEmitter {
     }
   }
 
-  #synthesizeButton(button, bit, down) {
-    if (!this.#nativeCall('synthesizeButton', button, down)) return false;
+  #synthesizeButton(button, bit, down, clickCount) {
+    const args = clickCount === undefined ? [button, down] : [button, down, clickCount];
+    if (!this.#nativeCall('synthesizeButton', ...args)) return false;
     this.syntheticButtons = down ? this.syntheticButtons | bit : this.syntheticButtons & ~bit;
     return true;
   }
