@@ -44,6 +44,6 @@ test('renderer cursor settings are strictly validated', () => {
   assert.equal(settings.edgeResistanceVU, 50);
   assert.throws(() => validateCursorSettings({ ...settings, edgeResistanceVU: 1001 }), /between 0 and 1000/);
   assert.equal(settings.displayOffset, -.4);
-  assert.throws(() => validateCursorSettings({ ...settings, macPosition: 'bottom' }), /left, right, or above/);
+  assert.throws(() => validateCursorSettings({ ...settings, macPosition: 'bottom' }), /valid arrangement/);
   assert.throws(() => validateCursorSettings({ ...settings, displayOffset: 1.1 }), /between -1 and 1/);
 });

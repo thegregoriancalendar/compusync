@@ -177,6 +177,7 @@ function details() {
   const ips = addresses();
   return {
     id: config.id, name: config.name, platform: process.platform, edge: config.edge, autoLaunch: config.autoLaunch,
+    members: sync?.members || [],
     clipboardSync: config.clipboardSync,
     mouseLatency: inputRuntime?.latency.state() || null,
     audio: audioRouter?.state() || null,
@@ -469,7 +470,7 @@ async function startSession() {
   messagesService = null;
   if (sync) await sync.stop();
   const layout = localLayout();
-  sync = new Session({ ...config, layout, startClosed: backgroundLaunch });
+  sync = new Session({ ...config, platform: process.platform, layout, startClosed: backgroundLaunch });
   if (process.env.COMPUSYNC_LOG_PATH) {
     logSync = new LogSync({
       session: sync, logPath: process.env.COMPUSYNC_LOG_PATH,
@@ -590,7 +591,7 @@ function setupIpc() {
       } else if (command === 'audio-outputs') {
         await audioRouter.refreshOutputs();
       } else if (command === 'audio-volume') {
-        await audioRouter.setVolume(data?.platform, data?.level);
+        await audioRouter.setVolume(data?.deviceId, data?.level);
       } else if (command === 'audio-setup') {
         await shell.openExternal('https://vb-audio.com/Cable/');
       } else if (command === 'audio-source') {

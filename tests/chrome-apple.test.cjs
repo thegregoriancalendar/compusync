@@ -137,7 +137,7 @@ test('a background New Tab blocks fresh Mac capture with an actionable explanati
   });
 });
 
-test('prepared Apple window retains received all-tab history for an unchanged round trip', async () => {
+for (const origin of ['win-a', 'mac-a']) test(`Apple window retains received history for a round trip from ${origin}`,  async () => {
   const nativeWindow = {
     id: 'ax:prepared', processName: 'Google Chrome', visible: true,
     title: 'Active', bounds: { x: 10, y: 20, width: 800, height: 600 },
@@ -166,7 +166,7 @@ test('prepared Apple window retains received all-tab history for an unchanged ro
     { currentIndex: 1, entries: ['https://before-last.example/', 'https://last.example/'] },
   ];
   const descriptor = {
-    schemaVersion: 1, id: 'round-trip-history', adapterId: 'chrome', origin: 'win-a', capturedAt: 1,
+    schemaVersion: 1, id: 'round-trip-history', adapterId: 'chrome', origin, capturedAt: 1,
     geometryVU: { x: 0, y: 0, w: 800, h: 600 }, state: 'normal',
     payload: {
       activeIdx: 1,

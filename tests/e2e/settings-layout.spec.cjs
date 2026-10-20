@@ -13,6 +13,10 @@ test('screen editor snaps two laptops without permitting the Mac top seam', asyn
   try {
     await expect.poll(() => app.windows().some((page) => page.url().endsWith('settings.html'))).toBe(true);
     const page = app.windows().find((candidate) => candidate.url().endsWith('settings.html'));
+    await page.evaluate(async () => {
+      const next = await window.compusync.bootstrap();
+      render({ ...next, members: [{ id: 'mac', name: 'Mac', platform: 'darwin' }, { id: 'windows', name: 'Windows', platform: 'win32' }] });
+    });
     const mac = page.locator('#layout-mac');
     const windows = page.locator('#layout-windows');
     await mac.scrollIntoViewIfNeeded();
@@ -24,7 +28,7 @@ test('screen editor snaps two laptops without permitting the Mac top seam', asyn
     await page.mouse.down();
     await page.mouse.move(winBox.x + winBox.width + macBox.width, winBox.y + winBox.height / 2, { steps: 5 });
     await page.mouse.up();
-    await expect(page.locator('#layout-description')).toContainText('Mac is right of Windows');
+    await expect(page.locator('#layout-description')).toContainText('is right of');
 
     const movedMac = await mac.boundingBox();
     const movedWin = await windows.boundingBox();
@@ -32,7 +36,7 @@ test('screen editor snaps two laptops without permitting the Mac top seam', asyn
     await page.mouse.down();
     await page.mouse.move(movedWin.x + movedWin.width / 2, movedWin.y - movedMac.height, { steps: 5 });
     await page.mouse.up();
-    await expect(page.locator('#layout-description')).toContainText('Mac is above Windows');
+    await expect(page.locator('#layout-description')).toContainText('is above');
     await expect.poll(() => page.evaluate(() => window.compusync.bootstrap().then((value) => value.cursorSettings.macPosition)))
       .toBe('top');
 

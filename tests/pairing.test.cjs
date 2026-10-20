@@ -8,7 +8,7 @@ const { newCode, normalizeCode, claimCode, pairWithCode } = require('../src/core
 const { advertise, discover } = require('../src/core/discovery.cjs');
 
 async function hostFor(t) {
-  const host = new Session({ id: 'host', name: 'Host', role: 'host', port: 0, bindHost: '127.0.0.1', secret: newSecret(), discovery: false });
+  const host = new Session({ platform: 'darwin', id: 'host', name: 'Host', role: 'host', port: 0, bindHost: '127.0.0.1', secret: newSecret(), discovery: false });
   await host.start();
   t.after(() => host.stop());
   return { host, endpoint: { host: '127.0.0.1', port: host.port } };

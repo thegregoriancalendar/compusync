@@ -4,6 +4,7 @@ const { EventEmitter } = require('node:events');
 const { randomUUID, randomBytes } = require('node:crypto');
 const { AUDIO_VERSION, sanitizeAudioMessage, sanitizeVolume, validVolumeLevel, validPlaybackMode } = require('../core/audio-contract.cjs');
 const { stereoAssignment } = require('../renderer/screen-layout.js');
+const { supportedPair, deviceSlots } = require('../shared/devices.js');
 
 class AudioRouter extends EventEmitter {
   constructor({ session, engine, platform = process.platform, outputId = '', sourceId = '', playbackMode = 'stereo', layoutSettings = {} }) {
@@ -42,17 +43,39 @@ class AudioRouter extends EventEmitter {
   state() {
     const split = this.splitState();
     return { role: this.route?.role || null, phase: this.phase, message: this.message, active: Boolean(this.route),
-      canStart: this.connected && this.canCapture && this.peer?.canReceive === true && this.peer.platform !== this.platform && this.routing.ready && !this.route
+      canStart: this.connected && this.canCapture && this.peer?.canReceive === true && this.compatiblePeer() && this.routing.ready && !this.route
         && (this.playbackMode !== 'split-stereo' || split.ready),
       playbackMode: this.route?.mode || this.playbackMode, stereoSplitAvailable: this.engine.supportsStereoSplit === true,
-      stereoSplit: this.route?.channels ? { ready: true, channels: this.route.channels } : split,
+      stereoSplit: this.route?.channels ? { ready: true, channels: this.deviceChannels(this.route) } : split,
       peerReady: Boolean(this.peer), canCapture: this.canCapture, available: this.engine.available,
       sourceId: this.sourceId, routing: this.routing, outputId: this.outputId, outputs: this.outputs, timing: this.timing,
       warning: this.route?.warning || null,
-      volumes: {
-        mac: this.platform === 'darwin' ? this.volume : this.peer?.platform === 'darwin' ? this.peerVolume : null,
-        windows: this.platform === 'win32' ? this.volume : this.peer?.platform === 'win32' ? this.peerVolume : null,
-      } };
+      volumes: Object.fromEntries(this.session.members.map((member) => [member.id,
+        member.id === this.session.self.id ? this.volume : this.peerVolume])) };
+  }
+
+  compatiblePeer() {
+    return supportedPair(this.platform, this.peer?.platform)
+      && (this.platform !== this.peer.platform || this.peer.deviceRouting === true);
+  }
+
+  slots() {
+    return deviceSlots(this.session.members.map((member) => ({ ...member,
+      platform: member.id === this.session.self.id ? this.platform : this.peer?.platform || member.platform,
+    })), this.session.state?.layouts);
+  }
+
+  deviceChannels(route) {
+    if (route.channelBasis === 'device') return route.channels;
+    const slots = this.slots();
+    return Object.fromEntries(Object.entries(slots).filter(([, device]) => device).map(([slot, device]) => [device.id, route.channels[slot]]));
+  }
+
+  validRouteChannels(message) {
+    if (message.mode !== 'split-stereo') return true;
+    if (message.channelBasis !== 'device') return this.platform !== this.peer?.platform;
+    return this.peer?.deviceRouting === true && this.session.members.length === 2
+      && this.session.members.every((member) => Object.hasOwn(message.channels, member.id));
   }
 
   update(phase, message) {
@@ -79,6 +102,7 @@ class AudioRouter extends EventEmitter {
 
   hello() {
     this.helloSent = this.session.sendPeer({ type: 'audio.hello', version: AUDIO_VERSION,
+      deviceRouting: true,
       platform: ['darwin', 'win32'].includes(this.platform) ? this.platform : 'unsupported',
       canSend: this.canCapture, canReceive: this.engine.available && ['darwin', 'win32'].includes(this.platform),
       ...(this.engine.supportsStereoSplit ? { stereoSplit: true } : {}) });
@@ -103,6 +127,8 @@ class AudioRouter extends EventEmitter {
     const message = sanitizeAudioMessage(value);
     if (!message) return;
     if (message.type === 'audio.hello') {
+      const member = this.session.members.find((candidate) => candidate.id === memberId);
+      if (member.platform && member.platform !== message.platform) return;
       const first = !this.peer;
       this.peer = message;
       // Reply once as well as announcing on connect: either listener may start first.
@@ -141,16 +167,17 @@ class AudioRouter extends EventEmitter {
     }
     if (message.type === 'audio.channels') {
       if (this.route?.id !== message.id || this.route.role !== 'receiver' || this.route.mode !== 'split-stereo') return;
+      if (!this.validRouteChannels(message) || message.channelBasis !== this.route.channelBasis) return;
       try {
-        this.engine.setPlaybackChannel(message.channels[this.platform === 'darwin' ? 'mac' : 'windows']);
+        this.engine.setPlaybackChannel(this.channelFor(message));
         this.route.channels = message.channels;
         this.emit('state', this.state());
       } catch (error) { this.fail(this.route, error); }
       return;
     }
     if (message.type === 'audio.offer') {
-      if (!['darwin', 'win32'].includes(this.platform) || !this.engine.available || !this.peer?.canSend || this.peer.platform === this.platform) return;
-      if (message.mode === 'split-stereo' && (!this.engine.supportsStereoSplit || !this.peer.stereoSplit)) {
+      if (!this.engine.available || !this.peer?.canSend || !this.compatiblePeer()) return;
+      if (!this.validRouteChannels(message) || (message.mode === 'split-stereo' && (!this.engine.supportsStereoSplit || !this.peer.stereoSplit))) {
         this.session.sendPeer({ type: 'audio.stop', id: message.id });
         return;
       }
@@ -158,7 +185,7 @@ class AudioRouter extends EventEmitter {
         if (this.route.role !== 'sender' || this.route.ready || message.id >= this.route.id) return;
         this.stopRoute('Resolving simultaneous audio requests.');
       }
-      const route = this.route = { id: message.id, role: 'receiver', mode: message.mode || 'stereo', channels: message.channels };
+      const route = this.route = { id: message.id, role: 'receiver', mode: message.mode || 'stereo', channels: message.channels, channelBasis: message.channelBasis };
       this.update('connecting', `Connecting to ${this.peer.platform === 'win32' ? 'Windows' : 'Mac'} audio...`);
       this.armTimeout(route, 90_000);
       const key = randomBytes(32).toString('hex');
@@ -192,26 +219,32 @@ class AudioRouter extends EventEmitter {
     const split = this.splitState();
     if (this.playbackMode === 'split-stereo' && !split.ready) throw new Error(split.reason);
     if (!this.state().canStart) throw new Error(this.platform === 'darwin'
-      ? 'Connect to a Windows laptop running this version of CompuSync first. Mac audio requires the rebuilt native addon and macOS 14.6 or later.'
+      ? 'Connect to a Mac or Windows laptop running this version of CompuSync first. Mac audio requires the rebuilt native addon and macOS 14.6 or later.'
       : this.routing.reason || 'Connect to a Mac running the same current build and refresh audio devices first.');
     const route = this.route = { id: randomUUID(), role: 'sender', mode: this.playbackMode,
-      ...(this.playbackMode === 'split-stereo' ? { channels: split.channels } : {}),
+      ...(this.playbackMode === 'split-stereo' ? this.wireChannels(split.channels) : {}),
       outputId: this.platform === 'win32' ? this.routing.outputId || this.outputId : '' };
     this.update('starting', this.platform === 'win32' ? 'Preparing Windows audio routing and recovery.' : 'Starting Mac audio capture. Approve the macOS audio permission if prompted.');
     this.armTimeout(route, 90_000);
     try { this.send({ type: 'audio.offer', id: route.id,
-      ...(route.mode === 'split-stereo' ? { mode: route.mode, channels: route.channels } : {}) }); }
+      ...(route.mode === 'split-stereo' ? { mode: route.mode, channels: route.channels, ...(route.channelBasis ? { channelBasis: route.channelBasis } : {}) } : {}) }); }
     catch (error) { this.fail(route, error); }
   }
 
   splitState() {
     if (!this.engine.supportsStereoSplit) return { ready: false, reason: 'Rebuild the native addon to enable split stereo.' };
     if (!this.connected || !this.peer?.stereoSplit) return { ready: false, reason: 'Connect both laptops with split stereo support. Update and rebuild both native addons.' };
-    return stereoAssignment(this.session.state?.layouts, this.layoutSettings);
+    return stereoAssignment(this.session.state?.layouts, this.layoutSettings, this.session.members);
+  }
+
+  wireChannels(channels, deviceRouting = this.peer?.deviceRouting) {
+    if (deviceRouting) return { channels, channelBasis: 'device' };
+    const slots = this.slots();
+    return { channels: { mac: channels[slots.mac?.id], windows: channels[slots.windows?.id] } };
   }
 
   channelFor(route) {
-    return route.channels?.[this.platform === 'darwin' ? 'mac' : 'windows'] || 'stereo';
+    return route.channels?.[route.channelBasis === 'device' ? this.session.self.id : this.platform === 'darwin' ? 'mac' : 'windows'] || 'stereo';
   }
 
   setPlaybackMode(mode) {
@@ -230,11 +263,12 @@ class AudioRouter extends EventEmitter {
     if (route?.role === 'sender' && route.mode === 'split-stereo') {
       const split = this.splitState();
       if (!split.ready) { this.stopRoute(split.reason); return; }
-      if (JSON.stringify(split.channels) !== JSON.stringify(route.channels)) {
+      const next = this.wireChannels(split.channels, route.channelBasis === 'device');
+      if (JSON.stringify(next.channels) !== JSON.stringify(route.channels)) {
         try {
-          this.send({ type: 'audio.channels', id: route.id, mode: route.mode, channels: split.channels });
-          this.engine.setPlaybackChannel(split.channels[this.platform === 'darwin' ? 'mac' : 'windows']);
-          route.channels = split.channels;
+          this.send({ type: 'audio.channels', id: route.id, mode: route.mode, ...next });
+          this.engine.setPlaybackChannel(this.channelFor(next));
+          Object.assign(route, next);
         } catch (error) { this.fail(route, error); return; }
       }
     }
@@ -356,12 +390,12 @@ class AudioRouter extends EventEmitter {
     return volume;
   }
 
-  async setVolume(platform, level) {
-    if (!['darwin', 'win32'].includes(platform) || !validVolumeLevel(level)) {
+  async setVolume(deviceId, level) {
+    if (!deviceId || !this.session.members.some((member) => member.id === deviceId) || !validVolumeLevel(level)) {
       throw new Error('Choose a laptop and a volume between 0 and 100.');
     }
-    if (platform === this.platform) { this.setLocalVolume(level); return; }
-    if (!this.connected || this.peer?.platform !== platform || !this.peerVolume || this.peerVolume.error) {
+    if (deviceId === this.session.self.id) { this.setLocalVolume(level); return; }
+    if (!this.connected || !this.peer || !this.peerVolume || this.peerVolume.error) {
       throw new Error('Connect to the other laptop with volume controls available first.');
     }
     if (this.volumeRequests.size >= 16) throw new Error('Wait for the previous volume adjustment to finish.');

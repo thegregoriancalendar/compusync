@@ -5,6 +5,7 @@ const { promisify } = require('node:util');
 const { WebSocket } = require('ws');
 const { newSecret, createChannel, handshakeSalt, validHost } = require('./wire.cjs');
 const { discover } = require('./discovery.cjs');
+const { normalizeMember, advertisedPlatform, pairingError } = require('../shared/devices.js');
 
 const PROTOCOL_VERSION = 2;
 
@@ -29,7 +30,7 @@ async function pairingSecret(code, salt) {
   return key.toString('base64url');
 }
 
-function claimCode(endpoint, code, { timeout = 3500 } = {}) {
+function claimCode(endpoint, code, { timeout = 3500, platform = process.platform } = {}) {
   if (!validHost(endpoint.host) || !Number.isInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535) return Promise.reject(new Error('Invalid laptop address.'));
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(`ws://${endpoint.host}:${endpoint.port}`, { handshakeTimeout: timeout, maxPayload: 16384, perMessageDeflate: false });
@@ -60,25 +61,34 @@ function claimCode(endpoint, code, { timeout = 3500 } = {}) {
         } else if (stage === 'ready') {
           const message = channel.open(raw);
           if (message.type !== 'pair-ready') throw new Error('Pairing failed.');
+          if (message.member !== undefined && !normalizeMember(message.member)) throw new Error('Invalid laptop identity.');
+          const problem = pairingError(advertisedPlatform(platform), message.member?.platform);
+          if (problem) throw Object.assign(new Error(problem), { code: 'UNSUPPORTED_PAIR' });
           stage = 'claim';
-          socket.send(channel.seal({ type: 'claim' }));
+          socket.send(channel.seal({ type: 'claim', platform: advertisedPlatform(platform) }));
         } else if (stage === 'claim') {
           const message = channel.open(raw);
+          if (message.type === 'rejected' && message.code === 'UNSUPPORTED_PAIR') {
+            throw Object.assign(new Error(message.message), { code: message.code });
+          }
           if (message.type !== 'paired' || typeof message.secret !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(message.secret)) throw new Error('Pairing failed.');
-          finish(null, { ...endpoint, secret: message.secret });
+          if (message.member !== undefined && !normalizeMember(message.member)) throw new Error('Invalid laptop identity.');
+          finish(null, { host: endpoint.host, port: endpoint.port, secret: message.secret,
+            ...(message.member ? { peer: normalizeMember(message.member) } : {}) });
         } else throw new Error('Unexpected pairing message.');
       } catch (error) { finish(error); }
     });
   });
 }
 
-async function pairWithCode(value, { excludeId, address, port = 43187, discoveryOptions } = {}) {
+async function pairWithCode(value, { excludeId, address, port = 43187, discoveryOptions, platform = process.platform } = {}) {
   const code = normalizeCode(value);
   if (address && !validHost(address)) throw new Error('Enter a hostname or IPv4 address, without a URL prefix.');
   const endpoints = address ? [{ host: address, port }] : await discover({ ...discoveryOptions, excludeId });
   if (!endpoints.length) throw new Error('No laptop found. Keep both apps open on the same Wi-Fi, or enter its address under Connection help.');
   for (const endpoint of endpoints.slice(0, 8)) {
-    try { return await claimCode(endpoint, code); } catch { /* Another host may own the code. */ }
+    try { return await claimCode(endpoint, code, { platform }); }
+    catch (error) { if (error.code === 'UNSUPPORTED_PAIR') throw error; /* Another host may own the code. */ }
   }
   throw new Error('Code not found or expired. Check the code or generate a new one on the other laptop.');
 }

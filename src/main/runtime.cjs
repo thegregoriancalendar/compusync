@@ -11,6 +11,7 @@ const { registerCursorHotkeys } = require('./hotkeys.cjs');
 const { sanitizePeerMessage, policyForMessage } = require('./messages.cjs');
 const { routePeerInput } = require('./input-runtime.cjs');
 const { placementFromDisplays, layoutPair, layoutMacAndWindows, normalizePlacement } = require('./virtualspace.cjs');
+const { deviceSlots, layoutPosition, pairingError } = require('../shared/devices.js');
 
 const DEFAULT_ACCELERATION = Object.freeze({ base: 1, threshold: .5, slope: .015 });
 
@@ -37,12 +38,15 @@ function derivePairPlacements(layouts, hostId, peerId, settings) {
   if (!host || !peer) return host ? [host] : peer ? [peer] : [];
   const hostPlatform = layouts?.[hostId]?.platform;
   const peerPlatform = layouts?.[peerId]?.platform;
+  if (pairingError(hostPlatform, peerPlatform)) return [];
+  const slots = deviceSlots([{ id: hostId }, { id: peerId }], layouts);
   const macId = hostPlatform === 'darwin' ? hostId
     : peerPlatform === 'darwin' ? peerId
       : hostPlatform === 'win32' ? peerId
         : peerPlatform === 'win32' ? hostId : null;
   if (macId) {
-    const arranged = layoutMacAndWindows(macId === hostId ? peer : host, macId === hostId ? host : peer, settings);
+    const arranged = layoutMacAndWindows(macId === hostId ? peer : host, macId === hostId ? host : peer,
+      { ...settings, macPosition: layoutPosition(settings?.macPosition, slots) });
     return [hostId, peerId].map((id) => arranged.find((placement) => placement.machineId === id));
   }
   // Compatibility for a peer that has not yet reported its platform.

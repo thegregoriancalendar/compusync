@@ -26,7 +26,7 @@ test('Latency Monitor has its own page, displays directional timings and clears 
     await page.evaluate(async () => {
       const next = await window.compusync.bootstrap();
       window.latencyTestDetails = {
-        ...next, platform: 'win32', cursorSettings: { ...next.cursorSettings, linked: true },
+        ...next, id: 'windows', platform: 'win32', members: [{ id: 'mac', name: 'Mac', id: 'mac', platform: 'darwin' }, { id: 'windows', name: 'Windows', platform: 'win32' }], cursorSettings: { ...next.cursorSettings, linked: true },
         status: { ...next.status, phase: 'connected', peers: [{ name: 'Mac' }] },
         mouseLatency: { calibrating: false, networkRttMs: 4.2,
           incoming: { medianMs: 12.3, p95Ms: 35.6, uncertaintyMs: 2.1, samples: 40 },
@@ -39,7 +39,7 @@ test('Latency Monitor has its own page, displays directional timings and clears 
     await expect(page.locator('#latency-windows-mac-p95')).toHaveText('~65.4 ms');
     await expect(page.locator('#mouse-latency-network')).toContainText('4.2 ms');
     await expect(page.locator('#latency-mac-windows')).toHaveAttribute('title', /40 samples; clock uncertainty about/);
-    await page.evaluate(() => render({ ...window.latencyTestDetails, platform: 'darwin' }));
+    await page.evaluate(() => render({ ...window.latencyTestDetails, id: 'mac', platform: 'darwin' }));
     await expect(page.locator('#latency-mac-windows')).toHaveText('~18.7 ms');
     await expect(page.locator('#latency-windows-mac')).toHaveText('~12.3 ms');
     await page.evaluate(() => render({ ...window.latencyTestDetails,

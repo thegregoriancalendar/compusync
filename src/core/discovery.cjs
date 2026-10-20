@@ -32,7 +32,8 @@ async function advertise(getHost, options = {}) {
       const host = getHost();
       if (!host) return;
       // Neither the code nor any derivative of it is advertised.
-      const reply = Buffer.from(JSON.stringify({ protocol: PROTOCOL, type: 'host', nonce: query.nonce, id: host.id, port: host.port }));
+      const reply = Buffer.from(JSON.stringify({ protocol: PROTOCOL, type: 'host', nonce: query.nonce, id: host.id, port: host.port,
+        ...(['darwin', 'win32', 'unsupported'].includes(host.platform) ? { platform: host.platform } : {}) }));
       socket.send(reply, remote.port, remote.address, () => {});
     } catch { /* Ignore unrelated LAN packets. */ }
   });
@@ -59,7 +60,8 @@ async function discover({ excludeId, port = DISCOVERY_PORT, timeout = 1600, dest
         const message = JSON.parse(raw.toString());
         if (message.protocol !== PROTOCOL || message.type !== 'host' || message.nonce !== nonce || typeof message.id !== 'string' || message.id === excludeId || !Number.isInteger(message.port) || message.port < 1 || message.port > 65535) return;
         const key = `${remote.address}:${message.port}`;
-        found.set(key, { host: remote.address, port: message.port });
+        found.set(key, { host: remote.address, port: message.port,
+          ...(['darwin', 'win32', 'unsupported'].includes(message.platform) ? { platform: message.platform } : {}) });
       } catch { /* Ignore malformed/unrelated packets. */ }
     });
     socket.bind(0, '0.0.0.0', () => {

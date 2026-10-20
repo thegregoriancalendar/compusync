@@ -23,7 +23,7 @@ test('audio latency shows either direction without linked cursors and clears sta
     await page.evaluate(async () => {
       const next = await window.compusync.bootstrap();
       window.audioLatencyDetails = {
-        ...next, platform: 'win32', cursorSettings: { ...next.cursorSettings, linked: false },
+        ...next, id: 'windows', platform: 'win32', members: [{ id: 'mac', name: 'Mac', id: 'mac', platform: 'darwin' }, { id: 'windows', name: 'Windows', platform: 'win32' }], cursorSettings: { ...next.cursorSettings, linked: false },
         status: { ...next.status, phase: 'connected', peers: [{ name: 'Mac' }] },
         audio: { ...next.audio, active: true, role: 'sender', phase: 'streaming',
           timing: { clockReady: true, playing: true, delayMs: 175, rttMs: 4.2,
@@ -40,7 +40,7 @@ test('audio latency shows either direction without linked cursors and clears sta
     await expect(page.locator('#audio-latency-resyncs')).toHaveText('2');
     await expect(page.locator('#latency-windows-mac')).toHaveText('\u2014');
     // Direction follows the source, including when viewing it on the receiver.
-    await page.evaluate(() => render({ ...window.audioLatencyDetails, platform: 'darwin',
+    await page.evaluate(() => render({ ...window.audioLatencyDetails, id: 'mac', platform: 'darwin',
       audio: { ...window.audioLatencyDetails.audio, role: 'receiver', phase: 'receiving' } }));
     await expect(page.locator('#audio-latency-status')).toContainText('Windows \u2192 Mac');
     await page.evaluate(() => render({ ...window.audioLatencyDetails,

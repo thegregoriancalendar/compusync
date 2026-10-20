@@ -1,6 +1,10 @@
 # Compusync — Shared Cursor & Window Teleport
 ## Implementation Spec v3
 
+> **Historical design specification.** This records the original cursor/window-handoff proposal; it is not the current setup guide or a claim that every target has been physically verified. Use the [README](README.md), [current design choices](docs/DESIGN_CHOICES.md), and [acceptance checklist](docs/testing.md) for implemented behavior and testing.
+>
+> Later changes supersede several requirements below: the sandbox/shared desktop is retired; Windows uses a manually loaded Chrome extension and native messaging with the user's existing profile; macOS performs first-run permission checks and optionally uses JavaScript from Apple Events for page-state transfer; a window released across the seam keeps both portions until it moves fully onto one computer. Mac-to-Mac pairing, clipboard sharing, bidirectional audio, and Messages Companion were added after this proposal. Paths, milestones, timing targets, and platform assumptions below are historical planning material.
+
 ---
 
 ## 0. Scope

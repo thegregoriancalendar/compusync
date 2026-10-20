@@ -65,7 +65,8 @@ test('released text selections survive periodic settings and message updates', a
     await page.getByRole('tab', { name: 'Latency Monitor' }).click();
     await page.evaluate(() => {
       window.selectionDetails = {
-        ...window.selectionDetails, platform: 'win32',
+        ...window.selectionDetails, id: 'windows', platform: 'win32',
+        members: [{ id: 'mac', name: 'Mac', platform: 'darwin' }, { id: 'windows', name: 'Windows', platform: 'win32' }],
         status: { phase: 'connected', peers: [{ name: 'Mac' }] },
         cursorSettings: { ...window.selectionDetails.cursorSettings, linked: true },
         mouseLatency: { calibrating: false, incoming: { medianMs: 12.3, p95Ms: 20, uncertaintyMs: 1, samples: 10 } },

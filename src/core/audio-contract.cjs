@@ -7,6 +7,9 @@ const validVolumeLevel = (level) => Number.isInteger(level) && level >= 0 && lev
 const validPlaybackMode = (mode) => ['stereo', 'split-stereo'].includes(mode);
 const validChannels = (channels) => channels && ['left', 'right'].includes(channels.mac)
   && ['left', 'right'].includes(channels.windows) && channels.mac !== channels.windows;
+const validDeviceChannels = (channels) => channels && typeof channels === 'object' && !Array.isArray(channels)
+  && Object.keys(channels).length === 2 && Object.keys(channels).every((id) => /^[a-zA-Z0-9-]{1,80}$/.test(id))
+  && Object.values(channels).includes('left') && Object.values(channels).includes('right');
 
 function sanitizeVolume(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -26,10 +29,12 @@ function sanitizeAudioMessage(value) {
   if (value.type === 'audio.hello') {
     if (value.version !== AUDIO_VERSION || !['darwin', 'win32', 'unsupported'].includes(value.platform)
       || typeof value.canSend !== 'boolean' || typeof value.canReceive !== 'boolean'
+      || (value.deviceRouting !== undefined && typeof value.deviceRouting !== 'boolean')
       || (value.stereoSplit !== undefined && typeof value.stereoSplit !== 'boolean')) return null;
     return { type: value.type, version: AUDIO_VERSION, platform: value.platform,
       canSend: value.platform !== 'unsupported' && value.canSend,
       canReceive: value.platform !== 'unsupported' && value.canReceive,
+      ...(value.deviceRouting === true ? { deviceRouting: true } : {}),
       ...(value.stereoSplit === true ? { stereoSplit: true } : {}) };
   }
   if (value.type === 'audio.volume-state') {
@@ -47,6 +52,11 @@ function sanitizeAudioMessage(value) {
   if (value.type === 'audio.channels' || (value.type === 'audio.offer' && value.mode !== undefined)) {
     if (!validPlaybackMode(value.mode)) return null;
     if (value.mode === 'split-stereo') {
+      if (value.channelBasis !== undefined && value.channelBasis !== 'device') return null;
+      if (value.channelBasis === 'device') {
+        if (!validDeviceChannels(value.channels)) return null;
+        return { type: value.type, id: value.id, mode: value.mode, channelBasis: 'device', channels: { ...value.channels } };
+      }
       if (!validChannels(value.channels)) return null;
       return { type: value.type, id: value.id, mode: value.mode,
         channels: { mac: value.channels.mac, windows: value.channels.windows } };

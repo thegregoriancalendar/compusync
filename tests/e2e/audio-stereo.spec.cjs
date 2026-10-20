@@ -30,8 +30,8 @@ test('Audio manager persists split mode, follows saved layout, and shows the act
     await expect(page.locator('#audio-start')).toBeDisabled();
     expect(JSON.parse(fs.readFileSync(path.join(profile, 'settings.json'), 'utf8')).audioPlaybackMode).toBe('split-stereo');
 
-    const paired = await claimCode({ host: '127.0.0.1', port: info.port }, info.invitation.code);
-    peer = new Session({ id: 'stereo-test-mac', name: 'Stereo Mac', role: 'join', secret: paired.secret,
+    const paired = await claimCode({ host: '127.0.0.1', port: info.port }, info.invitation.code, { platform: 'darwin' });
+    peer = new Session({ platform: 'darwin', id: 'stereo-test-mac', name: 'Stereo Mac', role: 'join', secret: paired.secret,
       host: '127.0.0.1', port: info.port, discovery: false,
       layout: { revision: 1, platform: 'darwin', edge: 'right', activeDisplayId: 'main',
         displays: [{ id: 'main', primary: true, scaleFactor: 1,

@@ -3,6 +3,7 @@
 const api = window.compusync;
 const $ = (id) => document.getElementById(id);
 const { setText, reconcileChildren } = window.CompuSyncDOM;
+const { deviceSlots, sameMacPair, layoutPosition, deviceLabel, platformName } = window.CompuSyncDevices;
 let details;
 let selectedTab = false;
 let copyTimer;
@@ -24,22 +25,34 @@ const localCursorDefaults = {
   linked: true,
 };
 
+function pairedDevices(next = details) {
+  const members = next.members?.length ? next.members : [
+    { id: next.id, name: next.name, platform: next.platform }, ...(next.status?.peers || []),
+  ];
+  if (!next.members?.length && next.status?.role === 'join' && members.length === 2) members.reverse();
+  return deviceSlots(members, next.state?.layouts);
+}
+
 function diagramGroups(next) {
-  const layouts = Object.values(next.state?.layouts || {});
+  const layouts = next.state?.layouts || {};
+  const slots = pairedDevices(next);
   return window.CompuSyncScreenLayout.monitorGroups({
-    mac: layouts.find((candidate) => candidate.platform === 'darwin'),
-    windows: layouts.find((candidate) => candidate.platform === 'win32'),
+    mac: layouts[slots.mac?.id],
+    windows: layouts[slots.windows?.id],
   }, { mac: 1.55, windows: 1.7 });
 }
 
-function renderMonitorGroup(element, platform, group, computerName) {
-  const signature = JSON.stringify([platform, group, computerName]);
+function renderMonitorGroup(element, device, group, slots) {
+  const signature = JSON.stringify([device, group, slots]);
   if (monitorSignatures.get(element) === signature) return;
   monitorSignatures.set(element, signature);
   element.replaceChildren();
-  const platformName = platform === 'mac' ? 'Mac' : 'Windows';
+  const labelText = deviceLabel(device, slots);
   const count = group.monitors.length;
-  element.setAttribute('aria-label', `${platformName} computer with ${count} display${count === 1 ? '' : 's'}. Drag to arrange.`);
+  element.dataset.deviceId = device?.id || '';
+  element.classList.toggle('mac', device?.platform === 'darwin');
+  element.classList.toggle('windows', device?.platform === 'win32');
+  element.setAttribute('aria-label', `${labelText} computer with ${count} display${count === 1 ? '' : 's'}. Drag to arrange.`);
   for (const [index, monitor] of group.monitors.entries()) {
     const display = document.createElement('span');
     display.className = `layout-monitor${monitor.primary ? ' primary' : ''}`;
@@ -47,11 +60,11 @@ function renderMonitorGroup(element, platform, group, computerName) {
     display.style.top = `${monitor.y}px`;
     display.style.width = `${monitor.w}px`;
     display.style.height = `${monitor.h}px`;
-    display.title = `${platformName} display ${index + 1}${monitor.primary ? ' (primary)' : ''}`;
+    display.title = `${labelText} display ${index + 1}${monitor.primary ? ' (primary)' : ''}`;
     const label = document.createElement('strong');
-    label.textContent = count === 1 ? platformName : String(index + 1);
+    label.textContent = count === 1 ? platformName(device?.platform) : String(index + 1);
     display.append(label);
-    if (platform === 'mac' && Math.abs(monitor.y) < .5) {
+    if (device?.platform === 'darwin' && Math.abs(monitor.y) < .5) {
       const blocked = document.createElement('span');
       blocked.className = 'blocked-edge';
       blocked.setAttribute('aria-hidden', 'true');
@@ -61,13 +74,15 @@ function renderMonitorGroup(element, platform, group, computerName) {
   }
   const label = document.createElement('span');
   label.className = 'layout-group-label';
-  label.textContent = `${platformName}${computerName ? ` · ${computerName}` : ''} · ${count} display${count === 1 ? '' : 's'}`;
+  label.textContent = `${labelText}${device?.name && !sameMacPair(slots) ? ` · ${device.name}` : ''} · ${count} display${count === 1 ? '' : 's'}`;
   element.append(label);
 }
 
 function renderScreenLayout(next = details) {
   if (!next || !window.CompuSyncScreenLayout || $('connection-page').hidden) return;
   const editor = $('screen-layout-editor');
+  const slots = pairedDevices(next);
+  layoutDraft.macPosition = layoutPosition(layoutDraft.macPosition, slots);
   const groups = diagramGroups(next);
   layoutBaseRects = window.CompuSyncScreenLayout.arrangeDiagram(
     editor.clientWidth, editor.clientHeight, layoutDraft.macPosition, layoutDraft.displayOffset, groups,
@@ -83,7 +98,6 @@ function renderScreenLayout(next = details) {
   editor.style.backgroundSize = `${gridSize}px ${gridSize}px`;
   editor.style.backgroundPosition = `${gridOrigin.x}px ${gridOrigin.y}px`;
   setText($('layout-zoom-level'), `${Math.round(layoutView.zoom * 100)}%`);
-  const peer = next.status?.peers?.[0];
   for (const [platform, id] of [['mac', 'layout-mac'], ['windows', 'layout-windows']]) {
     const rect = layoutRects[platform];
     const baseRect = layoutBaseRects[platform];
@@ -94,11 +108,13 @@ function renderScreenLayout(next = details) {
       left: `${rect.x}px`, top: `${rect.y}px`, width: `${baseRect.w}px`, height: `${baseRect.h}px`,
       transform: `scale(${layoutView.zoom})`, transformOrigin: 'top left',
     });
-    const nativePlatform = platform === 'mac' ? 'darwin' : 'win32';
-    const computerName = next.platform === nativePlatform ? next.name : peer?.name || '';
-    renderMonitorGroup(element, platform, groups[platform], computerName);
+    renderMonitorGroup(element, slots[platform], groups[platform], slots);
   }
-  setText($('layout-description'), window.CompuSyncScreenLayout.arrangementText(layoutDraft.macPosition));
+  setText($('layout-description'), window.CompuSyncScreenLayout.arrangementText(layoutDraft.macPosition,
+    deviceLabel(slots.mac, slots), deviceLabel(slots.windows, slots)));
+  setText($('layout-edge-help'), sameMacPair(slots)
+    ? 'Both Macs reserve their top/menu-bar edge. Arrange the laptops left or right of each other.'
+    : 'A Mac’s top/menu-bar edge cannot be used for crossing.');
 }
 
 function setValueUnlessEditing(id, value) {
@@ -177,10 +193,10 @@ function render(next) {
   if (!layoutDrag) layoutDraft = { macPosition: cursor.macPosition, displayOffset: cursor.displayOffset };
   $('pairing-card').hidden = connected;
   $('status-dot').className = `dot ${status.phase}`;
-  setText($('status'), connected ? `Connected to ${status.peers[0]?.name || 'your other laptop'}` : {
+  setText($('status'), connected ? `Connected to ${status.peers[0]?.name || 'your other laptop'} (${platformName(status.peers[0]?.platform)})` : {
     starting: 'Getting ready', hosting: 'Ready to pair', connecting: 'Connecting…', reconnecting: 'Waiting for your other laptop', error: 'Connection needs attention',
   }[status.phase] || 'Not connected');
-  setText($('status-description'), status.message || (connected ? 'Cursor and Chrome handoff are ready between your laptops.' : status.role === 'host' ? `${next.name} · Share the invitation below.` : 'Keep CompuSync open on the other laptop.'));
+  setText($('status-description'), status.message || (connected ? 'Cursor and Chrome handoff are ready between your laptops.' : status.role === 'host' ? `${next.name} (${platformName(next.platform)}) · Share the invitation below.` : 'Keep CompuSync open on the other laptop.'));
   $('hosting').hidden = status.role !== 'host' || status.phase === 'error';
   $('create-host').hidden = !$('hosting').hidden;
   const code = next.invitation?.code || '';
@@ -235,7 +251,11 @@ function render(next) {
 function renderMouseLatency(next) {
   const latency = next.mouseLatency;
   const linked = next.status.phase === 'connected' && next.cursorSettings?.linked === true;
-  const windows = next.platform === 'win32';
+  const slots = pairedDevices(next);
+  const windows = slots.windows?.id === next.id;
+  const first = deviceLabel(slots.mac, slots), second = deviceLabel(slots.windows, slots);
+  setText($('latency-mac-windows-label'), `${first} → ${second}`);
+  setText($('latency-windows-mac-label'), `${second} → ${first}`);
   const directions = {
     'mac-windows': windows ? latency?.incoming : latency?.outgoing,
     'windows-mac': windows ? latency?.outgoing : latency?.incoming,
@@ -265,8 +285,9 @@ function renderAudioLatency(next) {
   const connected = next.status.phase === 'connected';
   const active = connected && audio?.active === true;
   const ready = active && audio.phase !== 'error' && timing?.clockReady === true && timing?.playing === true;
-  const local = next.platform === 'win32' ? 'Windows' : 'Mac';
-  const peer = next.platform === 'win32' ? 'Mac' : 'Windows';
+  const slots = pairedDevices(next);
+  const local = deviceLabel(Object.values(slots).find((device) => device?.id === next.id), slots);
+  const peer = deviceLabel(Object.values(slots).find((device) => device && device.id !== next.id), slots);
   const direction = audio?.role === 'sender' ? `${local} \u2192 ${peer}` : `${peer} \u2192 ${local}`;
   const ms = (value, prefix = '~', signed = false) => ready && Number.isFinite(value)
     ? `${prefix}${signed && value > 0 ? '+' : ''}${value.toFixed(2)} ms` : '\u2014';
@@ -295,8 +316,9 @@ function renderAudio(next) {
   $('audio-playback-mode').disabled = active || !audio?.available;
   $('audio-playback-mode').querySelector('[value="split-stereo"]').disabled = !audio?.stereoSplitAvailable;
   const channels = audio?.stereoSplit?.channels;
+  const slots = pairedDevices(next);
   setText($('audio-channels'), split
-    ? channels ? `Mac: ${channels.mac} channel \u00b7 Windows: ${channels.windows} channel. Each plays its channel through both local speakers. Assignments follow the main displays in Screen layout.`
+    ? channels ? `${deviceLabel(slots.mac, slots)}: ${channels[slots.mac?.id]} channel \u00b7 ${deviceLabel(slots.windows, slots)}: ${channels[slots.windows?.id]} channel. Each plays its channel through both local speakers. Assignments follow the main displays in Screen layout.`
       : audio?.stereoSplit?.reason || 'Connect both laptops and arrange their main displays left and right in Screen layout.'
     : 'Both laptops play the full stereo mix. Split stereo assigns left and right using the main displays in Screen layout.');
   $('audio-mode').className = `mode-badge${active ? '' : ' unlinked'}`;
@@ -341,15 +363,20 @@ function renderAudio(next) {
     select.dataset.outputs = signature;
   }
   select.value = audio?.outputId || '';
-  for (const [device, platform] of [['mac', 'darwin'], ['windows', 'win32']]) {
+  for (const [device, member] of Object.entries(slots)) {
     const slider = $(`audio-volume-${device}`);
-    const volume = audio?.volumes?.[device];
+    const label = deviceLabel(member, slots);
+    setText($(`audio-volume-${device}-label`), `${label} volume`);
+    slider.dataset.deviceId = member?.id || '';
+    const local = member?.id === next.id;
+    const volume = audio?.volumes?.[member?.id];
     const available = Number.isInteger(volume?.level) && !volume.error;
     slider.disabled = !available;
-    const edit = volumeEdits.get(device);
-    if (!available && edit) {
+    let edit = volumeEdits.get(device);
+    if (edit && (!available || edit.deviceId !== member?.id)) {
       clearTimeout(edit.timer);
       volumeEdits.delete(device);
+      edit = null;
     }
     if (!available || !edit) {
       slider.value = available ? volume.level : 0;
@@ -358,10 +385,10 @@ function renderAudio(next) {
       slider.setAttribute('aria-valuetext', value);
     }
     setText($(`audio-volume-${device}-status`), volume?.error || (available
-      ? `${volume.label}${next.platform === platform ? ' · This laptop' : ''}`
-      : next.platform === platform ? 'Reading output volume…'
+      ? `${volume.label}${local ? ' · This laptop' : ''}`
+      : local ? 'Reading output volume…'
         : next.status.phase === 'connected' ? 'Volume controls are unavailable on the other laptop.'
-          : `Connect ${device === 'mac' ? 'the Mac' : 'Windows'} to adjust its volume.`));
+          : 'Connect the other laptop to adjust its volume.'));
   }
   setText($('audio-help'), !audio?.available
     ? 'Rebuild the native addon on both laptops to enable audio routing.'
@@ -401,7 +428,7 @@ async function sendVolume(device) {
   clearTimeout(edit.timer);
   edit.sending = true;
   const level = edit.level;
-  await audioCommand('audio-volume', { platform: device === 'mac' ? 'darwin' : 'win32', level });
+  await audioCommand('audio-volume', { deviceId: edit.deviceId, level });
   if (volumeEdits.get(device) !== edit) return;
   edit.sending = false;
   if (edit.level !== level) { void sendVolume(device); return; }
@@ -531,7 +558,7 @@ for (const [id, platform] of [['layout-mac', 'mac'], ['layout-windows', 'windows
     const snapped = window.CompuSyncScreenLayout.snapDragged(platform, {
       x: point.x - layoutDrag.offsetX,
       y: point.y - layoutDrag.offsetY,
-    }, layoutBaseRects);
+    }, layoutBaseRects, !sameMacPair(pairedDevices()));
     if (!snapped) return;
     layoutDraft = snapped;
     renderScreenLayout();
@@ -549,6 +576,7 @@ for (const [id, platform] of [['layout-mac', 'mac'], ['layout-windows', 'windows
       ? { ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'top' }
       : { ArrowLeft: 'right', ArrowRight: 'left', ArrowDown: 'top' };
     if (!positions[event.key]) return;
+    if (positions[event.key] === 'top' && sameMacPair(pairedDevices())) return;
     layoutDraft = { macPosition: positions[event.key], displayOffset: 0 };
     renderScreenLayout();
     void savePreferences();
@@ -624,7 +652,7 @@ $('audio-output').addEventListener('change', () => audioCommand('audio-output', 
 for (const device of ['mac', 'windows']) {
   const slider = $(`audio-volume-${device}`);
   slider.addEventListener('input', () => {
-    const edit = volumeEdits.get(device) || { sending: false };
+    const edit = volumeEdits.get(device) || { sending: false, deviceId: slider.dataset.deviceId };
     clearTimeout(edit.timer);
     edit.level = Number(slider.value);
     volumeEdits.set(device, edit);

@@ -1,99 +1,100 @@
 # Run CompuSync on a Mac
 
-CompuSync runs natively on both computers. On the Mac it provides the menu-bar/settings UI, native shared-cursor input, and Chrome handoff. The legacy shared surface, workspace, and bundled editor are retired and are never created.
+CompuSync pairs two Macs or a Mac and Windows 11. Run the same current source revision on both computers on the same local network. Windows-to-Windows pairing is not supported. For the Windows app and Chrome extension instructions, use the [README](../README.md#windows-11).
 
-## Run from source
+## Install and build from source
 
-1. Install Node.js 22.12 or newer.
-2. Install Xcode Command Line Tools:
+1. Install [Node.js](https://nodejs.org/en/download) 22.12 or newer, including npm. CI uses Node.js 22.
+2. Install Xcode Command Line Tools, which include Git:
 
    ```sh
    xcode-select --install
    ```
 
-3. Install the stable Rust toolchain from [rustup.rs](https://rustup.rs). If `npm run native:build` reports `spawnSync cargo ENOENT`, Cargo is missing or is not on the shell's `PATH`. After installing Rust, open a new Terminal or load it in the current shell:
+3. Install the stable Rust toolchain from [rustup.rs](https://rustup.rs/). Open a new Terminal after installation. If Cargo is installed but unavailable in the current shell, load its environment:
 
    ```sh
    source "$HOME/.cargo/env"
    cargo --version
    ```
 
-4. In the repository directory, install, build, verify, and start:
+4. Clone the repository and build locally:
 
    ```sh
+   git clone https://github.com/thegregoriancalendar/compusync.git
+   cd compusync
    npm ci
    npm run native:build
    npm run native:smoke
    npm start
    ```
 
-Build the native addon on the Mac. Do not copy Windows `node_modules` or native output. Apple Silicon produces `native/compusync-native.darwin-arm64.node`; Intel produces the corresponding `darwin-x64` addon. A Windows `.exe` cannot run on macOS.
+Future launches need only `npm start` from the checkout unless source/dependencies/native code changed. Build on each computer; do not copy Windows dependencies or native output. Apple Silicon uses `native/compusync-native.darwin-arm64.node`; Intel uses the corresponding `darwin-x64` addon. The smoke command checks that Node and Electron can load the local addon and recovery guard.
 
-## Grant macOS permissions
+## First-run permissions
 
-CompuSync uses:
+At startup, CompuSync checks these permissions and requests access during first-run onboarding when the native permission APIs are available:
 
-- **Accessibility** to detect and position Chrome windows and to participate in native input recovery.
-- **Input Monitoring** so either computer's mouse and keyboard can drive the shared cursor.
-- **Automation** for Chrome tab handoff. This prompt is deferred until the first eligible Chrome crossing.
+| Privacy & Security setting | Purpose |
+| --- | --- |
+| Accessibility | Shared input and native Chrome window detection/positioning. |
+| Input Monitoring | Mouse/keyboard capture while cursors are linked. |
+| Automation → Google Chrome | Reading and recreating Chrome tabs. |
 
-Use the action in the settings notice to open the relevant System Settings pane. If macOS still shows the old permission state after granting access, fully quit and reopen CompuSync. Do not enable Chrome's **JavaScript from Apple Events** setting; CompuSync does not require it.
+Use the setup notice's action to open the relevant **System Settings → Privacy & Security** pane. Source runs may be attributed to Electron or the launching Terminal/IDE; grant the application macOS identifies. Fully quit and reopen CompuSync after a permission change if the state remains stale. Closing settings leaves the menu-bar process running; use **Quit on this laptop** to stop it.
 
-## Messages Companion
+Denied permissions remain visible in settings. Rebuild the native addon if the app reports that native permission checks are unavailable; an old/missing addon cannot request the current onboarding permissions. Approval of Chrome Automation does not grant recording, Messages, or Full Disk Access.
 
-On Windows, right-click CompuSync's system tray icon and choose **Messages Companion…** after the Mac connects. Conversations and history are read from the Mac's Messages database in read-only mode; sending uses Messages Automation.
+## Chrome handoff on Mac
 
-Contact names come from the Mac's locally synced Contacts databases, read in read-only mode under the same Full Disk Access grant. The companion matches phone numbers and email addresses, keeps saved group titles, and shows handles for unknown or ambiguous contacts. Contact changes are picked up within about a minute while the companion is visible. Only names belonging to conversation participants are sent to Windows. If names are missing, check that the corresponding contacts appear in the Mac's Contacts app.
+Install Google Chrome and approve its Automation permission. **No Chrome extension, Developer-mode extension installation, or native messaging host is required on the Mac.**
 
-On the Mac, grant **System Settings > Privacy & Security > Full Disk Access** to the app running CompuSync. For `npm start` in Terminal, grant it to Terminal; for an installed build, grant it to CompuSync. Fully quit the running CompuSync process and restart it after changing permissions. Launching another copy while the old process is still in the menu bar keeps the old process running.
+For scroll positions, nested scroll areas, ordinary form drafts, checkbox/selection state, and expanded details to follow a window, enable **Chrome → View → Developer → Allow JavaScript from Apple Events**. This Chrome preference is separate from macOS Automation permission. Basic tab/URL handoff works without it; page-state capture shows a setup notice when the preference is disabled. CompuSync does not enable it on the user's behalf.
 
-When sending, approve control of **Messages** under **Privacy & Security > Automation** for the app running CompuSync. Full Disk Access and Automation are separate permissions. The companion displays read and send errors and retries loading conversations while it is visible.
+Drag a normal supported Chrome window through the linked seam. Releasing while it spans both computers leaves both portions visible. Pick up either portion to continue; the other window closes only after a completed handoff fully onto one computer. Maximized/fullscreen Chrome transfers without a live straddle. Unsupported applications remain local.
 
-## Connect and link
+Tab order, pinning, and active tab are preserved where supported. Chrome's Mac automation API does not expose the full back/forward stack; retained history is discarded after navigation or tab reordering. Page-state transfer is best effort, not continuous interaction synchronization. Passwords, cookies, storage, file inputs, and website login sessions are not copied; sign into sites separately on each computer.
 
-1. Run the same current CompuSync revision on both laptops and keep them on the same local network.
-2. On one computer, choose **Share from here** and copy its eight-character code.
-3. On the other, choose **Join other laptop**, enter the code, and select **Connect laptops**.
-4. Wait for **Connected** on both computers. A saved pairing alone is not a live connection.
-5. Under **Screen layout**, choose the arrangement matching the desk and adjust the alignment offset if needed.
-6. Select **Link cursors**.
+## Pair and arrange the computers
 
-Automatic discovery uses UDP port 43188 and the direct connection normally uses TCP port 43187. If discovery is blocked, use **Connection help** to enter the host address. Allow local-network access if macOS or a firewall prompts for it.
+1. Start both apps. Choose **Share from here** on one and enter its eight-character code under **Join other laptop** on the other.
+2. Wait for **Connected** on both. A saved pairing alone is not a live connection.
+3. Use **Screen layout** to match the physical arrangement and alignment. Two Macs use left/right placement with both top/menu-bar edges reserved. A mixed pair also supports Windows below the Mac.
+4. Select **Link cursors**. Cmd+Shift+Y moves ownership to the other computer; Cmd+Shift+U toggles linking and restores local input when unlinking.
 
-There is no **Open shared window** step. Starting or activating CompuSync opens only **Connection & settings**. Closing settings leaves the menu-bar process running, and Cmd+, reopens it.
+Discovery uses UDP 43188 and the direct connection normally uses TCP 43187. If discovery is blocked, use **Connection help** to enter the sharing computer's address. Saved reconnect retries its recorded address; a changed host address may require fresh pairing/discovery or manual entry. Both apps must remain running.
 
-## Use the Mac cursor and Chrome
+Activating CompuSync opens **Connection & settings**. Closing settings leaves the menu-bar app running; Cmd+, reopens it. Latency Monitor is a separate page within settings. The optional Windows Messages Companion and temporary Chrome seam overlay are current features; the old shared desktop/workspace/editor are retired.
 
-Move through the configured left, right, or bottom seam to transfer cursor and keyboard ownership. Cmd+Shift+Y transfers ownership directly. Cmd+Shift+U unlinks immediately and restores local input.
+## Optional audio sharing
 
-Drag a normal Chrome window through the seam to hand it to the other computer. CompuSync prepares a native destination Chrome window, preserves its supported tab state, and commits based on which side contains most of the window when released. Maximized and fullscreen Chrome use an instant transfer; unsupported windows remain local.
+Either Mac can send in a Mac pair; either computer can send in a mixed pair. Mac system-audio capture requires **macOS 14.6 or newer** and **System Audio Recording** approval when capture first starts. If access was denied, check **Privacy & Security → Screen & System Audio Recording**, fully quit the source app, and retry.
 
-Chrome's public Apple Events interface exposes current tab state but not the complete native back/forward entry collection. CompuSync retains bounded history metadata only while the prepared tabs remain unchanged. Navigating or rearranging tabs on the Mac discards retained metadata instead of restoring stale history.
+In **Audio manager**, choose playback outputs and start sharing from the source. Cursor linking can remain off. Choose full stereo or split stereo by screen layout; stop sharing before changing mode. Volume controls affect the selected devices' system volume. Start with built-in or wired outputs, and use the [audio guide](audio-routing.md) for permission identity, launch troubleshooting, Windows sender setup, and physical timing tests. Windows requires standard VB-CABLE only when it sends audio.
 
-## Build a Mac application
+## Optional Messages Companion
 
-Run packaging on macOS:
+On Windows, open **Messages Companion…** from CompuSync's system tray menu after pairing with the Mac. Conversations and history come from the Mac's Messages database in read-only mode. Contact names come from locally synced Contacts databases; only names for conversation participants are sent to Windows.
+
+On the Mac, grant **Full Disk Access** to the application running CompuSync: Terminal for `npm start` launched in Terminal, the relevant IDE for an IDE launch, or CompuSync for an installed build. Fully quit the running app and restart it after changing access. A second launch while an older menu-bar instance is running activates the existing process instead of replacing it.
+
+Approve **Automation → Messages** when sending is requested. Full Disk Access and Messages Automation are separate permissions. If names are missing, verify the contacts exist in the Mac's Contacts app. The companion displays read/send errors; it cannot bypass OS permissions.
+
+## Updates and optional packages
+
+Source installations update through Git and a local rebuild; follow [Update a source installation](../README.md#update-a-source-installation). A Mac has no Chrome extension to reload. Windows users must reload their managed extension after the updated app restages it.
+
+Optional local packages must be built on macOS:
 
 ```sh
-# DMG and ZIP for the current Mac architecture
+npm run build
 npm run dist:mac
-
-# Explicit architecture
-npm run dist:mac -- --arm64
-npm run dist:mac -- --x64
 ```
 
-Outputs are written to `dist/`. Development packages are unsigned. Production distribution requires the appropriate Apple signing and notarization workflow.
+`build` produces an unpacked app bundle; `dist:mac` produces a DMG and ZIP in `dist/`. These commands build the Rust addon for the local toolchain and name it for Node's architecture. Use matching native Node/Rust toolchains on the intended Mac architecture. Passing `--x64` or `--arm64` to Electron Builder alone does not cross-compile the addon or recovery guard; build on the matching architecture or implement/test cross-compilation first.
 
-## Physical verification
+Signing/notarization and hosted installer updates are separate from running source locally. See the [optional release guide](releases.md); package configuration does not establish that a downloadable signed release exists.
 
-Hosted automation cannot prove actual Windows-to-Mac behavior. Before release, complete [the acceptance checklist](testing.md), especially:
+## Verify on the intended Macs
 
-- cursor ownership and input recovery in both directions;
-- Retina and Windows mixed-scale seam alignment;
-- Accessibility, Input Monitoring, and Automation denial/remediation;
-- Chrome transfer, reversal, and failure recovery;
-- real network discovery, firewall prompts, weak Wi-Fi, and reconnect;
-- sleep/wake, display hotplug, menu-bar behavior, and start at sign-in;
-- DMG and ZIP launch behavior on the target architecture;
-- confirmation that the retired shared surface never appears.
+Use the [acceptance checklist](testing.md), including both host roles for Mac-to-Mac and Mac-to-Windows. Native input, trackpad held drags, Retina/mixed-scale placement, permission identity, Chrome setup/state transfer, network discovery, suspend/wake, audio alignment, and packaged launch behavior require real-device evidence. Same-machine Electron tests cannot establish these results.

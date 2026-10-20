@@ -29,7 +29,7 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function hostLayout(revision = 1) {
   return {
-    revision,
+    revision, platform: 'win32',
     edge: 'right',
     activeDisplayId: 'win-display',
     displays: [{
@@ -44,7 +44,7 @@ function hostLayout(revision = 1) {
 
 function peerLayout(revision = 1) {
   return {
-    revision,
+    revision, platform: 'darwin',
     edge: 'left',
     activeDisplayId: 'mac-display',
     displays: [{

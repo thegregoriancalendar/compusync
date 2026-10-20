@@ -7,6 +7,7 @@ const { normalizeLayout, buildTopology, normalizeLogicalRect } = require('./geom
 const { newSecret, createChannel, handshakeSalt } = require('./wire.cjs');
 const { newCode, pairingSecret, CODE_LIFETIME } = require('./pairing.cjs');
 const { advertise } = require('./discovery.cjs');
+const { normalizeMember, advertisedPlatform, pairingError } = require('../shared/devices.js');
 
 const PROTOCOL_VERSION = 2;
 const DRAG_TOKEN = /^[A-Za-z0-9_-]{8,80}$/;
@@ -20,7 +21,7 @@ const PEER_CONTROL_CHANNEL_MAX = 48 * 1024;
 const PEER_LOSSY_BACKPRESSURE_MAX = 16 * 1024;
 const CONTROL_MESSAGES_PER_SECOND = 1200;
 
-const validMember = (member) => member && /^[a-zA-Z0-9-]{1,80}$/.test(member.id) && typeof member.name === 'string' && member.name.length > 0 && member.name.length <= 80;
+const validMember = (member) => Boolean(normalizeMember(member));
 
 function sanitizeDataMessage(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -118,7 +119,7 @@ class Session extends EventEmitter {
   constructor(config) {
     super();
     this.config = config;
-    this.self = { id: config.id, name: config.name };
+    this.self = { id: config.id, name: config.name, platform: advertisedPlatform(config.platform ?? config.layout?.platform ?? process.platform) };
     this.state = initialState(config.id, Date.now(), config.layout);
     if (config.startClosed) this.state.open = false;
     this.members = [this.self];
@@ -176,7 +177,7 @@ class Session extends EventEmitter {
     this.refreshCode();
     if (this.config.discovery !== false) {
       try {
-        this.discovery = await advertise(() => this.canPair() ? { id: this.self.id, port: this.port } : null);
+        this.discovery = await advertise(() => this.canPair() ? { id: this.self.id, platform: this.self.platform, port: this.port } : null);
       } catch { this.discoveryError = 'Automatic discovery is unavailable. Use the laptop address in Connection help.'; }
     }
     this.setStatus('hosting');
@@ -246,7 +247,7 @@ class Session extends EventEmitter {
             finally { deriving = false; this.pairingInFlight--; }
             if (socket.readyState !== WebSocket.OPEN || this.stopped) return;
             channel = createChannel(secret, combined, true);
-            socket.send(channel.seal({ type: 'pair-ready' }));
+            socket.send(channel.seal({ type: 'pair-ready', member: this.self }));
           } else {
             mode = purpose === 'data' ? 'data' : 'session';
             channel = createChannel(this.config.secret, combined, true, purpose === 'data'
@@ -258,10 +259,18 @@ class Session extends EventEmitter {
         const message = channel.open(raw);
         if (mode === 'pair') {
           if (message.type !== 'claim' || !this.canPair() || this.pairingCode !== codeForAttempt) throw new Error('Code no longer valid.');
+          if (message.platform !== undefined && !['darwin', 'win32', 'unsupported'].includes(message.platform)) throw new Error('Invalid platform.');
+          const problem = pairingError(this.self.platform, message.platform);
+          if (problem) {
+            mode = 'done';
+            socket.send(channel.seal({ type: 'rejected', code: 'UNSUPPORTED_PAIR', message: problem }));
+            socket.close(1008, 'Unsupported pair');
+            return;
+          }
           mode = 'done';
           this.pairingCode = null;
           clearTimeout(this.pairingTimer);
-          socket.send(channel.seal({ type: 'paired', secret: this.config.secret }));
+          socket.send(channel.seal({ type: 'paired', secret: this.config.secret, member: this.self }));
           this.emit('status', this.status());
           socket.close(1000, 'Paired');
           return;
@@ -291,12 +300,18 @@ class Session extends EventEmitter {
         }
         if (!member) {
           if (message.type !== 'hello' || !validMember(message.member) || message.member.id === this.self.id) throw new Error('Invalid identity.');
+          const problem = pairingError(this.self.platform, message.member.platform);
+          if (problem) {
+            socket.send(channel.seal({ type: 'rejected', code: 'UNSUPPORTED_PAIR', message: problem }));
+            socket.close(1008, 'Unsupported pair');
+            return;
+          }
           if (this.connections.size > 0) {
             socket.send(channel.seal({ type: 'rejected', message: 'Two laptops are already connected. Disconnect the other laptop first.' }));
             socket.close(1008, 'Session full');
             return;
           }
-          member = { id: message.member.id, name: message.member.name };
+          member = normalizeMember(message.member);
           clearTimeout(timeout);
           const dataToken = newSecret();
           this.connections.set(member.id, { socket, channel, dataToken, dataSocket: null, dataChannel: null });
@@ -349,6 +364,7 @@ class Session extends EventEmitter {
     this.socket = socket;
     this.channel = null;
     let authenticated = false;
+    let incompatible = false;
     let failure = 'Connection lost. Reconnecting automatically…';
     let lastTraffic = Date.now();
     const timer = setTimeout(() => { failure = 'The other laptop did not finish pairing. Check the invitation.'; socket.terminate(); }, 6000);
@@ -375,14 +391,18 @@ class Session extends EventEmitter {
           this.emit('peer-message', clean, memberId);
           return;
         }
-        if (message.type === 'rejected') { failure = message.message; socket.close(); return; }
+        if (message.type === 'rejected') { failure = message.message; incompatible = message.code === 'UNSUPPORTED_PAIR'; socket.close(); return; }
         if (!['welcome', 'snapshot'].includes(message.type) || !Array.isArray(message.members) || message.members.length !== 2 || !message.members.every(validMember) || !message.members.some((m) => m.id === this.self.id)) throw new Error('Invalid state.');
+        if (message.members[0].id === message.members[1].id) throw new Error('Duplicate identity.');
+        const remote = message.members.find((candidate) => candidate.id !== this.self.id);
+        const problem = pairingError(this.self.platform, remote.platform || message.state?.layouts?.[remote.id]?.platform);
+        if (problem) { failure = problem; incompatible = true; socket.close(); return; }
         if (!authenticated && message.type !== 'welcome') throw new Error('Missing welcome.');
         if (!authenticated && !DATA_TOKEN.test(message.dataToken)) throw new Error('Missing data binding.');
         const nextState = validateSnapshot(message.state, message.members);
         if (!nextState) throw new Error('Invalid state.');
         this.state = nextState;
-        this.members = message.members;
+        this.members = message.members.map(normalizeMember);
         if (Number.isFinite(message.serverTime)) {
           const offset = message.serverTime - Date.now();
           this.clockOffsetMs = authenticated ? this.clockOffsetMs * .9 + offset * .1 : offset;
@@ -420,6 +440,7 @@ class Session extends EventEmitter {
         this.state.drag = null;
       }
       this.emit('state', this.state);
+      if (incompatible) { this.setStatus('error', failure); return; }
       this.setStatus('reconnecting', failure);
       this.retryTimer = setTimeout(() => this.connect(), this.retryDelay);
       this.retryDelay = Math.min(5000, this.retryDelay * 2);
@@ -580,6 +601,17 @@ class Session extends EventEmitter {
   }
 
   apply(id, action) {
+    if (action?.type === 'layout') {
+      const member = this.members.find((candidate) => candidate.id === id);
+      if (member?.platform && action.layout?.platform && action.layout.platform !== member.platform) return false;
+      const problem = id !== this.self.id && pairingError(this.self.platform, action.layout?.platform);
+      if (problem) {
+        const connection = this.connections.get(id);
+        connection?.socket.send(connection.channel.seal({ type: 'rejected', code: 'UNSUPPORTED_PAIR', message: problem }));
+        connection?.socket.close(1008, 'Unsupported pair');
+        return false;
+      }
+    }
     const next = reduce(this.state, id, action, this.members.map((m) => m.id));
     if (next === this.state) return false;
     this.state = next;

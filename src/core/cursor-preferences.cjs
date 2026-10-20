@@ -58,7 +58,7 @@ function assertNumber(name, value, limits) {
 
 function validateCursorSettings(value) {
   if (!value || typeof value !== 'object' || !MAC_POSITIONS.includes(value.macPosition)) {
-    throw new Error('Arrange the Mac to the left, right, or above Windows.');
+    throw new Error('Choose a valid arrangement for the two laptops.');
   }
   if (!value.acceleration || typeof value.acceleration !== 'object') throw new Error('Enter valid pointer acceleration settings.');
   return {

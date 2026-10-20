@@ -48,8 +48,34 @@ test('short code pairs two laptops through automatic discovery', async () => {
     await peer.settings.locator('#join-code').pressSequentially(code.toLowerCase().replace('-', ''));
     await expect(peer.settings.locator('#join-code')).toHaveValue(code);
     await peer.settings.locator('#join-code').press('Enter');
+    if (process.platform === 'win32') {
+      await expect(peer.settings.locator('#error')).toContainText('Windows-to-Windows is not supported yet');
+      await expect(host.settings.locator('#invitation')).toHaveValue(code);
+      await expect(peer.settings.locator('#cursor-mode')).toBeDisabled();
+      return;
+    }
     await expect(peer.settings.locator('#status')).toContainText('Connected to', { timeout: 15000 });
     await expect(host.settings.locator('#status')).toContainText('Connected to');
+    const info = await peer.settings.evaluate(() => window.compusync.bootstrap());
+    expect(info.members.map((member) => member.platform)).toEqual(['darwin', 'darwin']);
+    await expect(host.settings.locator('#layout-windows')).toHaveAttribute('aria-label', /Mac 2/);
+    await expect(peer.settings.locator('#layout-mac')).toHaveAttribute('aria-label', /Mac 1/);
+    await expect(host.settings.locator('.blocked-edge')).toHaveCount(2);
+    for (const laptop of [host, peer]) {
+      await expect(laptop.settings.locator('#audio-volume-mac-label')).toHaveText('Mac 1 volume');
+      await expect(laptop.settings.locator('#audio-volume-windows-label')).toHaveText('Mac 2 volume');
+      await expect(laptop.settings.locator('#audio-volume-mac')).toHaveAttribute('data-device-id', info.members[0].id);
+      await expect(laptop.settings.locator('#audio-volume-windows')).toHaveAttribute('data-device-id', info.members[1].id);
+    }
+    await peer.settings.locator('#layout-windows').focus();
+    await peer.settings.locator('#layout-windows').press('ArrowLeft');
+    await expect(host.settings.locator('#layout-description')).toContainText('Mac 1 is right of Mac 2');
+    await expect(peer.settings.locator('#layout-description')).toContainText('Mac 1 is right of Mac 2');
+    await peer.settings.locator('#layout-windows').press('ArrowDown');
+    await expect(peer.settings.locator('#layout-description')).toContainText('Mac 1 is right of Mac 2');
+    await peer.settings.locator('#layout-windows').press('ArrowRight');
+    await expect(host.settings.locator('#layout-description')).toContainText('Mac 1 is left of Mac 2');
+    await host.settings.screenshot({ path: 'test-results/mac-to-mac-settings.png', fullPage: true });
     await expect(host.settings.locator('#cursor-mode')).toBeEnabled();
     await expect(peer.settings.locator('#cursor-mode')).toBeEnabled();
     await expect(host.settings.locator('#pairing-card')).toBeHidden();

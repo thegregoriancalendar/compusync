@@ -78,7 +78,7 @@ function fixture(t, content = 'local startup\n') {
 async function pair(t, hostText = 'Windows startup\n', peerText = 'Mac startup\n') {
   const { root, cleanup } = workspace(t);
   const secret = newSecret();
-  const host = new Session({ id: 'windows', name: 'Windows laptop', role: 'host', port: 0, secret, discovery: false, bindHost: '127.0.0.1' });
+  const host = new Session({ platform: 'win32', id: 'windows', name: 'Windows laptop', role: 'host', port: 0, secret, discovery: false, bindHost: '127.0.0.1' });
   let peer;
   const services = [];
   const errors = [];
@@ -89,7 +89,7 @@ async function pair(t, hostText = 'Windows startup\n', peerText = 'Mac startup\n
     await host.stop();
   });
   await host.start();
-  peer = new Session({ id: 'mac', name: 'Mac laptop', role: 'join', host: '127.0.0.1', port: host.port, secret, discovery: false });
+  peer = new Session({ platform: 'darwin', id: 'mac', name: 'Mac laptop', role: 'join', host: '127.0.0.1', port: host.port, secret, discovery: false });
   const [windows, mac] = [[host, 'win32', hostText], [peer, 'darwin', peerText]].map(([session, platform, text]) => {
     const directory = path.join(root, platform);
     fs.mkdirSync(directory);

@@ -1,74 +1,78 @@
 # Native risk probes
 
-These probes deliberately stay outside the shipping addon. Run them on physical
-machines before accepting M2; they manipulate only an explicitly selected test
-window or a disposable Chrome profile.
+These are explicit diagnostics for physical Windows/macOS behavior, separate from normal installation. Start with the [README](../../README.md), [current design](../../docs/DESIGN_CHOICES.md), and [acceptance checklist](../../docs/testing.md). The commands below assume the repository root as the working directory.
 
-## Windows Chrome
+Build the local native components before using them:
 
-```powershell
-./windows-chrome.ps1 inspect
-./windows-chrome.ps1 offscreen -Execute
-./windows-chrome.ps1 uia -Execute
+```sh
+npm ci
+npm run native:build
+npm run native:smoke
 ```
 
-The script never opens the normal Chrome profile. It leaves the disposable
-profile path in its output so cleanup is an explicit, inspectable operation.
+Interactive probes manipulate a selected test window or cursor state. Use a dedicated test session and record the OS, architecture, revision, addon/guard paths, and outcome. A probe's presence, a non-Windows skip, or a historical result is not current physical acceptance.
+
+## Windows Chrome research probe
+
+```powershell
+./native/probes/windows-chrome.ps1 -Mode inspect
+./native/probes/windows-chrome.ps1 -Mode offscreen -Execute
+./native/probes/windows-chrome.ps1 -Mode uia -Execute
+```
+
+`inspect` reports Chrome's location/running state. The other modes deliberately launch a disposable isolated profile with a local debugging port. They do not open or migrate the normal Chrome profile. The script reports its temporary profile location and stops only the probe's processes; inspect/remove that disposable profile when finished.
+
+This CDP/UI Automation probe is historical research tooling, not the product's current Windows setup or a workaround that users need to run. The active runtime uses the unpacked Tab Bridge extension, per-user native host registration, and the user's existing Chrome profile. Follow the [Windows extension instructions](../../README.md#install-the-chrome-extension-on-windows) to test that path.
 
 ## Windows move-loop termination
 
-Build the addon, link Compusync, and drag a sacrificial Notepad window. At edge
-contact call `terminateMoveLoop(windowId)` while continuing to hold the physical
-left button. Record whether:
+With the app/addon running in a test session, link the cursors and drag a sacrificial Notepad window. At edge contact, instrument the native call to `terminateMoveLoop(windowId)` while continuing to hold the physical left button. Record whether:
 
 1. `EVENT_SYSTEM_MOVESIZEEND` arrives exactly once;
 2. raw deltas continue while the physical button remains down;
-3. Notepad receives no content click or command after the injected up;
-4. releasing the physical button produces no second application action.
+3. Notepad receives no content click or command after the injected release;
+4. releasing the physical button produces no second application action;
+5. unlinking restores ordinary local held dragging and selection.
 
-This must remain an interactive probe. A scripted `SC_MOVE` does not exercise
-the pointer-clamp/modal-loop path and yields a false positive. The implementation
-uses a `SendInput` left-up tagged with Compusync's injection marker at edge
-contact. macOS has no corresponding foreign-window modal move loop; its AX
-positioning path intentionally makes `terminateMoveLoop` a no-op.
+A scripted `SC_MOVE` does not exercise the same physical pointer-clamp/modal-loop path. The implementation tags injected input and guards button release at edge contact. macOS has no corresponding Windows foreign-window modal move loop; its Accessibility/event-tap positioning needs its own held-drag tests.
 
 ## Windows hard-kill recovery
 
-After building/copying the release addon, run:
+Use the wrapper from the repository root; it selects the current Node architecture and passes both the copied addon and recovery guard paths:
 
 ```powershell
-./windows-crash-recovery.ps1 -Addon ../compusync-native.win32-x64.node
+npm run native:probe:crash
 ```
 
-The child hides and clips the cursor, and the parent terminates it without a
-graceful exit. The probe checks OS recovery with `GetClipCursor` and
-`GetCursorInfo`, then unconditionally releases the clip and increments the show
-counter as a final safety cleanup.
+On non-Windows systems this command skips. For a direct PowerShell invocation, pass both paths rather than relying on the probe script's older guard default:
+
+```powershell
+./native/probes/windows-crash-recovery.ps1 -Addon ./native/compusync-native.win32-x64.node -Guard ./native/compusync-recovery-guard.exe
+```
+
+Replace `x64` with the actual addon architecture when necessary. The child arms cursor hide/clip state and the parent hard-terminates it. The probe reads `GetClipCursor`/`GetCursorInfo`, then releases the clip and performs visibility cleanup in `finally`.
+
+Record `Passed` together with `CursorVisibilityObservable`. If the baseline OS session did not expose cursor visibility, the probe cannot establish hide/show recovery even if clipping recovery passed. A hardware held-input/window recovery check remains separate from this cursor-clip probe.
 
 ## macOS
 
-On a signed build with Accessibility and Input Monitoring granted:
+Use a current source or packaged app with Accessibility, Input Monitoring, and Chrome Automation approved under its real launch identity. Signing/notarization is a separate package-distribution check; source testing does not require a signed installer. The current app checks input/Chrome permissions during startup onboarding, rather than deferring the first check to a crossing.
 
-- prepare an AX-addressable Chrome window and call `setWindowBounds` with an x
-  coordinate one full width beyond the outer display; verify AX reports the
-  requested origin and no portion is visible;
-- enumerate a normal Chrome window through AppleScript in the Node adapter,
-  recreate its active URL, and verify Automation prompts only on first use;
-- drag through left, right, and bottom edges while collecting event-tap deltas;
-  top is intentionally excluded by the virtual-space controller.
+- Prepare an Accessibility-addressable test Chrome window and use the native `setWindowBounds` path to place it beyond the display. Verify the OS-reported position and restore the original bounds afterward.
+- Enumerate/recreate a supported Chrome window through the Apple adapter. Verify ordinary tabs work without JavaScript from Apple Events, and that scroll/draft transfer reports its limitation until the optional Chrome setting is enabled. No extension is required on the Mac.
+- Test held local/remote mouse and trackpad drags, including tiny initial movement, pause, reversal, parked split pickup, and actual physical release.
+- Test left/right crossings on two Macs. For a mixed pair with Windows below the Mac, also test the Mac's bottom seam. A Mac top/menu-bar edge must remain reserved.
+- Hard-quit the app during separate input/window tests and verify the OS-local recovery guard restores local control and reachable windows.
 
-These checks require macOS permission state and real WindowServer behavior and
-cannot be represented faithfully by a Windows CI job.
+These checks require real WindowServer/TCC/input behavior. A Windows cross-compile or fake native adapter cannot establish the result.
 
-## Recorded Windows findings (2026-09-12)
+## Historical Windows observations — September 12, 2026
 
-- Chrome accepted `SetWindowPos(x = -20000)` exactly; `GetWindowRect` returned
-  `x = -20000` for a 1050px-wide window, so full offscreen pre-warm is viable.
-- UI Automation exposed both test tab titles and zero HTTP URL value patterns.
-  It cannot supply the background-tab URLs required by the descriptor, so it is
-  not a viable no-relaunch Windows fallback.
-- Hard-terminating the addon process left its 1x1 `ClipCursor` active. With the
-  independent recovery guard installed, the same probe observed full-desktop
-  clipping and a visible cursor 500ms after termination.
-- The Windows modal move-loop test still requires a physical held drag; no
-  automated claim is made for it.
+The following were recorded in the original probe report and were not rerun by the documentation reconciliation:
+
+- A disposable Chrome window accepted `SetWindowPos(x = -20000)`; `GetWindowRect` reported the requested origin for a 1050-pixel-wide window.
+- UI Automation exposed the test tab titles but no HTTP URL value patterns. That observation ruled out that UIA-only approach for background URLs; it did not rule out the extension/native-messaging approach used today.
+- Hard termination without an independent guard left a 1×1 `ClipCursor` active. With the guard, the report observed full-desktop clipping and a visible cursor 500 ms after termination.
+- The modal move-loop test required a physical held drag; no automated result was recorded for it.
+
+Repeat relevant probes against the current revision before using these observations as acceptance evidence.

@@ -28,7 +28,7 @@ test('Audio Manager reads system volume and controls both laptops through access
     const errors = [];
     page.on('pageerror', (error) => errors.push(error.message));
     const windows = page.getByRole('slider', { name: 'Windows volume' });
-    const mac = page.getByRole('slider', { name: 'Mac volume' });
+    const mac = page.locator('#audio-volume-mac');
     await expect(windows).toBeEnabled();
     await expect(windows).toHaveValue(String(original.level));
     await expect(mac).toBeDisabled();
@@ -44,8 +44,8 @@ test('Audio Manager reads system volume and controls both laptops through access
     }
 
     const info = await page.evaluate(() => window.compusync.bootstrap());
-    const paired = await claimCode({ host: '127.0.0.1', port: info.port }, info.invitation.code);
-    peer = new Session({ id: 'volume-test-mac', name: 'Test Mac', role: 'join', secret: paired.secret,
+    const paired = await claimCode({ host: '127.0.0.1', port: info.port }, info.invitation.code, { platform: 'darwin' });
+    peer = new Session({ platform: 'darwin', id: 'volume-test-mac', name: 'Test Mac', role: 'join', secret: paired.secret,
       host: '127.0.0.1', port: info.port, discovery: false });
     const engine = new EventEmitter();
     engine.available = true; engine.canSend = false;

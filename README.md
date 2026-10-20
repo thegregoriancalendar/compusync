@@ -1,130 +1,185 @@
 # CompuSync
 
-CompuSync links a Windows 11 laptop and a Mac into one native cursor space. The cursor crosses the configured screen seam, keyboard input follows cursor ownership, and supported Google Chrome windows can be handed from one computer to the other.
+Use two computers as one connected desk. CompuSync shares your cursor, keyboard, copied text, Chrome windows, and audio over your local network.
 
-The old shared surface, sandbox/workspace, and bundled editor are retired. CompuSync never creates or opens that window. The only persistent application UI is **Connection & settings**; a temporary transparent seam overlay may appear while Chrome is crossing.
+Supported pairs: **Mac ↔ Mac** and **Mac ↔ Windows 11**. Windows-to-Windows pairing is not supported yet. Install and run CompuSync on both computers.
 
-## Run on both laptops
+## Features
 
-CompuSync must run on both computers on the same local network. A source build requires Node.js 22.12 or newer, the stable Rust toolchain, and platform compiler tools: Xcode Command Line Tools on macOS or Visual Studio Build Tools with the C++ workload on Windows.
+- **Shared mouse and keyboard:** move across the screen seam to control the other computer, with adjustable screen layout, acceleration, and edge resistance.
+- **Text clipboard sharing:** copy text on either computer and paste it on the other.
+- **Chrome window handoff:** drag supported Chrome windows between computers, preserving tabs, pinning, and supported history and page state.
+- **Synchronized audio:** share audio in either direction, play full stereo on both computers or split left/right channels, and adjust each computer's volume.
+- **Messages Companion:** read and send messages from Windows through your paired Mac, including contact names from the Mac.
+- **Local connection and recovery:** pair with an eight-character code, without a cloud account or relay; input returns to local control after unlinking or a connection failure.
 
-For normal use, download the current installer from [CompuSync Releases](https://github.com/thegregoriancalendar/compusync-releases/releases/latest):
+## Install and run
 
-- Windows: run `CompuSync-Setup-<version>-x64.exe`.
-- macOS: open the `.dmg` matching the Mac architecture and drag CompuSync to Applications.
+These instructions build CompuSync from source. Use the same current revision on both computers, and build separately on each one. Keep both on the same local network. Install [Google Chrome](https://www.google.com/chrome/) on both computers if you want Chrome window handoff.
 
-Installed builds check GitHub for stable updates in the background. An available update downloads automatically and installs after CompuSync is quit and reopened.
+### macOS
 
-Install and build independently on each computer:
+Install these prerequisites:
+
+- [Node.js](https://nodejs.org/en/download) **22.12 or newer**, including npm. CI uses Node.js 22.
+- The stable [Rust toolchain](https://rustup.rs/), including Cargo.
+- Xcode Command Line Tools, which also provide Git:
 
 ```sh
+xcode-select --install
+```
+
+After installing the tools, open a new Terminal window and run:
+
+```sh
+git clone https://github.com/thegregoriancalendar/compusync.git
+cd compusync
 npm ci
 npm run native:build
 npm run native:smoke
 npm start
 ```
 
-`npm start` automatically appends application output and errors to `compusync.log` in the project root, with a timestamp marking each launch. The log is readable while CompuSync is running and is ignored by Git.
+The first build can take several minutes. Future launches only need `npm start` from the `compusync` directory.
 
-When both laptops run this version with `npm start`, they also share logs automatically over the existing encrypted paired connection. Each laptop keeps its own output in `compusync.log` and saves the other laptop's output in `compusync-peer.log` beside it. Peer log headers identify the source laptop, platform, and time. Both files are readable while the apps run and are ignored by Git. Sharing catches up from the last received byte after reconnecting, with a maximum backlog of 128 KB; headers record any skipped older bytes. Received logs are never sent back to the peer.
+#### Allow macOS permissions
 
-Do not copy `node_modules` or native build output between operating systems. The build creates the platform addon used for global input, cursor recovery, native window discovery, and Chrome handoff. See the [Mac setup guide](docs/mac-setup.md) for macOS prerequisites and permissions.
+Follow CompuSync's setup prompts. You can also manage access in **System Settings → Privacy & Security**:
 
-## Pair the computers
-
-1. Open **Connection & settings** on both computers. Use **Share from here** on one computer and copy its eight-character code.
-2. On the other computer, choose **Join other laptop**, enter the code, and select **Connect laptops**. Lowercase and an omitted dash are accepted.
-3. Wait until each computer reports **Connected**. A saved pairing can appear in settings before its live connection has returned; cursor linking is available only after both apps reconnect.
-4. Under **Screen layout**, describe the physical arrangement. Choose which laptop is left or right, or place the other laptop below, and adjust the alignment offset if needed.
-5. Select **Link cursors**.
-
-Pairing uses local UDP discovery and an encrypted direct WebSocket connection. There is no cloud account or relay. Discovery uses UDP port 43188 and the connection normally uses TCP port 43187. If discovery is blocked, expand **Connection help** and enter the displayed host address manually.
-
-One computer starts the saved session as the host and the other rejoins it. Both applications must remain running. Opening CompuSync from the tray or menu bar shows settings; it does not open the retired shared surface.
-
-## Use the shared cursor
-
-When linked, either laptop's mouse or trackpad contributes movement to one cursor. Cursor ownership crosses the configured left, right, or bottom seam, and keyboard input follows the owner. The top edge is not a crossing edge on macOS.
-
-The settings panel controls common acceleration, edge resistance, alignment offset, and linked mode. Edge resistance requires an extra push at the seam when no native window is being dragged.
-
-| Action | Result |
+| Permission | Used for |
 | --- | --- |
-| Move through the configured seam | Transfers cursor and keyboard ownership to the other laptop. |
-| **Move cursor to other laptop** | Transfers ownership without crossing the seam. |
-| Ctrl/Cmd+Shift+Y | Transfers ownership to the other laptop. |
-| Ctrl/Cmd+Shift+U | Toggles cursor linking and immediately restores local input when unlinking. |
-| Ctrl+, on Windows / Cmd+, on Mac | Opens **Connection & settings**. |
+| Accessibility | Shared input and detecting/positioning Chrome windows. |
+| Input Monitoring | Reading mouse and keyboard input for cursor linking. |
+| Automation → Google Chrome | Reading and recreating Chrome tabs during handoff. |
 
-Unlinking removes global input hooks, releases synthetic buttons and modifiers, restores cursor visibility, and leaves both computers fully local. The native recovery path does the same after transport loss, suspend, addon failure, or process exit.
+Source builds may appear as **Electron** or the Terminal/IDE that launched them. Grant access to the application macOS identifies, then fully quit and restart CompuSync if the permission state has not updated. Closing the settings window leaves the menu-bar process running; use **Quit on this laptop** to stop it.
 
-## Hand off Chrome windows
+#### Chrome on Mac
 
-Drag a supported Chrome window through the linked seam. CompuSync prepares a real native Chrome window on the destination, preserving tab order, pinning, active tab, and the history state available on that platform. Releasing while the window overlaps both desktops keeps both portions visible. Pick up either portion to continue; the other copy closes only after the window moves completely onto one laptop. Reversing during a held drag briefly reuses the prepared copy.
+**No Chrome extension is required on macOS.** CompuSync uses macOS Automation to communicate with Chrome.
 
-The active tab also carries a bounded snapshot of page scroll, nested scroll areas, ordinary form drafts, checkboxes, selections, and expanded sections. CompuSync captures it before crossing, refreshes it at release, and updates the existing peer window when either split portion is picked up again. Restoration retries briefly while the destination page loads. This is best-effort native page-state transfer; the two copies are not continuously synchronized while parked. Passwords, cookies, storage, file inputs, and a site's internal application session are not copied, and form actions are not replayed. Each laptop uses its own Chrome login state. Different layouts and complex web applications can still differ.
+For scroll positions and ordinary form drafts to follow a window, enable **Chrome → View → Developer → Allow JavaScript from Apple Events**. Tab and URL handoff still works without this optional setting.
 
-On the Mac, enable **Chrome > View > Developer > Allow JavaScript from Apple Events** for scroll and page-state transfer. Without it, tab and URL handoff still works and CompuSync shows a setup notice. After updating this checkout, restart both CompuSync processes and reload the CompuSync extension in Windows Chrome's Extensions page so its new page-state helper is loaded.
+### Windows 11
 
-Window sizing uses the monitors' reported physical dimensions to preserve width and height in inches across Windows scaling and Retina displays. Windows too large for the receiving monitor shrink proportionally to fit within 90% of that monitor. Missing physical measurements retain logical sizing. Native measurement changes require quitting CompuSync and running `npm run native:build` on each laptop before restarting.
+Install these prerequisites:
 
-Normal addressable Chrome windows support live straddling. Maximized or fullscreen windows transfer without a live straddle. Unsupported applications and very small windows stay local while the cursor crosses and produce a brief notice.
+- [Git for Windows](https://git-scm.com/downloads/).
+- [Node.js](https://nodejs.org/en/download) **22.12 or newer**, including npm. CI uses Node.js 22.
+- [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/) with the **Desktop development with C++** workload, including the MSVC compiler and Windows SDK.
+- The stable [Rust toolchain](https://rustup.rs/) for Windows using MSVC. Follow the installer's compiler prerequisite prompts.
 
-On macOS, the first Chrome crossing requests Automation permission. Accessibility is required for native window detection and placement, and Input Monitoring is required for shared input. On Windows, the first eligible crossing may offer to restart Chrome into CompuSync's isolated, signed-out profile because current Chrome releases do not expose the required tab state from the default profile. Declining is remembered. CompuSync never launches Chrome merely because CompuSync starts.
+Open a new **PowerShell** window after installing the tools. Run CompuSync directly on Windows, outside WSL:
 
-Chrome's public macOS automation API does not expose its complete back/forward stack. CompuSync retains bounded history metadata while a prepared window remains unchanged, but navigation or tab rearrangement on the Mac invalidates stale retained history.
-
-## Recovery and privacy boundaries
-
-Pairing settings are stored in CompuSync's OS user-data directory. Pairing secrets use Electron safe storage where available, with a restricted local-file fallback.
-
-Control messages are authenticated and encrypted. Cursor input is not queued while disconnected. A watchdog and independent recovery guard restore local input and guarded windows if the peer, network, or app disappears. Chrome handoff logs may contain a descriptor ID, phase, duration, hostname, and tab count, but not full URLs, titles, history URLs, or session tokens.
-
-CompuSync is not remote desktop, a virtual machine, file synchronization, or application streaming. The retired workspace and editor code is outside the active v3 product surface and is never instantiated by the app.
-
-## Share synchronized audio in either direction
-
-**Connection & settings → Audio manager** plays Mac audio on both laptops using a shared playback schedule. Rust captures and suppresses the Mac's immediate output, then buffers a local copy and the selected Windows output against authenticated playback timestamps. Clock exchanges and device-timestamp feedback keep both outputs on the timeline. Stopping restores ordinary Mac playback. Rebuild the native addon on both laptops; macOS 14.6 or later and System Audio Recording approval are required. Both `npm start` and packaged builds are supported. See the [audio routing test guide](docs/audio-routing.md) for setup, timing, recovery, and physical alignment verification. Reverse routing is not implemented yet; speaker accuracy must be measured on the actual devices.
-
-## Build packages
-
-```sh
-# Windows NSIS installer in dist/
-npm run dist:win
-
-# macOS DMG and ZIP for the current architecture; run on a Mac
-npm run dist:mac
-
-# Explicit Mac architectures
-npm run dist:mac -- --arm64
-npm run dist:mac -- --x64
-
-# Unpacked app for the current platform
-npm run build
+```powershell
+git clone https://github.com/thegregoriancalendar/compusync.git
+cd compusync
+npm ci
+npm run native:build
+npm run native:smoke
+npm start
 ```
 
-Local development packages are unsigned. Production macOS releases must be signed and notarized for installation and automatic updates; production Windows releases should be signed to avoid SmartScreen warnings. See [the release guide](docs/releases.md).
+The native build also creates the helper used by the Chrome extension. Future launches only need `npm start` from the `compusync` directory.
 
-## Develop and verify
+If Windows Firewall asks, allow CompuSync/Electron on your **private network** so the computers can discover and connect to each other.
+
+#### Install the Chrome extension on Windows
+
+The **CompuSync Tab Bridge** extension is required for Chrome window handoff on Windows. It is loaded locally from the files included with CompuSync.
+
+1. Start CompuSync and accept **Set up Chrome window handoff → Open setup**. If you previously skipped setup, try handing off a Chrome window to bring the prompt back.
+2. CompuSync opens `chrome://extensions` and shows its prepared `chrome-extension` folder in File Explorer.
+3. In Chrome, enable **Developer mode** in the top-right corner.
+4. Click **Load unpacked** and select the **chrome-extension folder** that CompuSync opened—the folder containing `manifest.json`.
+5. Confirm **CompuSync Tab Bridge** appears and is enabled. Install it in the Chrome profile you use for handoff; keep CompuSync running.
+
+Use the prepared folder, normally `%APPDATA%\CompuSync\chrome-extension`. CompuSync refreshes its contents on startup and registers the native helper automatically. Keep this folder in place while the extension is installed.
+
+The extension source lives in [`src/main/adapters/chrome/extension/`](src/main/adapters/chrome/extension/). Loading that source folder alone does not register the native helper; start CompuSync and use its setup flow. The extension requests tab, debugger, and native messaging permissions to capture/restore Chrome state and communicate with the local app. See [Chrome's unpacked-extension instructions](https://developer.chrome.com/docs/extensions/get-started/tutorial/hello-world#load-unpacked) for the browser steps.
+
+The extension is only needed for Chrome handoff. Cursor, keyboard, clipboard, and audio sharing do not require it.
+
+## Connect the computers
+
+1. Start CompuSync on both computers and open **Connection & settings** from the menu bar or Windows system tray.
+2. On one computer, choose **Share from here** and copy its eight-character code.
+3. On the other, choose **Join other laptop**, enter the code, and select **Connect laptops**.
+4. Wait until both computers report **Connected**. A saved pairing alone does not mean the connection is live.
+5. Under **Screen layout**, arrange the screens to match your desk and adjust their alignment. For two Macs, place the computers left/right; the top/menu-bar edges remain reserved.
+6. Select **Link cursors**.
+
+Keep both apps running. A saved pair reconnects when both computers are available on the same network. Control messages are authenticated and encrypted. If discovery fails, expand **Connection help** and enter the host address shown on the sharing computer. Discovery uses UDP port **43188**; the direct connection normally uses TCP port **43187**. Guest Wi-Fi or client isolation can prevent the computers from reaching each other.
+
+## Everyday use
+
+Move through the configured screen seam to transfer cursor and keyboard ownership. Either computer's mouse or trackpad can move the shared cursor. Clipboard sharing copies newly copied **plain text** while connected; images and files are not synced. You can disable it with **Sync copied text between laptops** in settings. Synced text can also appear in each operating system's clipboard history.
+
+| Shortcut | Action |
+| --- | --- |
+| Cmd/Ctrl+Shift+Y | Move the shared cursor to the other computer. |
+| Cmd/Ctrl+Shift+U | Toggle cursor linking; unlinking restores local input immediately. |
+| Cmd+, on Mac / Ctrl+, on Windows | Open Connection & settings. |
+
+Drag a supported Chrome window through the seam to hand it off. Normal windows can straddle both desktops; fullscreen or maximized windows transfer without a live straddle. Page-state transfer is best effort. Passwords, cookies, file inputs, and website login sessions are not copied, so sign into sites independently on each computer. Chrome's macOS automation API does not expose its full back/forward history.
+
+### Share audio
+
+Open **Connection & settings → Audio manager** on both computers, choose playback outputs, and start sharing from the source. Only one direction runs at a time. Cursor linking can remain off.
+
+- **Mac as source:** requires **macOS 14.6 or newer** and approval for System Audio Recording. If denied, check **Privacy & Security → Screen & System Audio Recording**, then restart the app.
+- **Windows as source:** install the standard [VB-CABLE driver](https://vb-audio.com/Cable/) and reboot as its installer instructs. Driver installation needs administrator access; normal CompuSync use does not. Receiving audio on Windows does not require VB-CABLE.
+- **Playback:** use built-in or wired speakers to start. Choose full stereo or **Split stereo by screen layout**; stop sharing before changing modes. The volume sliders control the selected outputs' system volume.
+
+See the [audio setup and troubleshooting guide](docs/audio-routing.md) for routing, recording-permission issues, and timing limitations. Stopping sharing restores normal source playback.
+
+### Use Messages Companion
+
+For a Mac–Windows pair, right-click CompuSync's Windows system tray icon and choose **Messages Companion…** after connecting.
+
+On the Mac, grant **Full Disk Access** to the app running CompuSync—Terminal when launched with `npm start` in Terminal, or the relevant IDE/installed app. Fully quit and reopen it after changing access. Approve **Automation → Messages** when prompted to send a message. Conversations and contact names come from the paired Mac; sending uses its Messages app.
+
+## Update a source installation
+
+Fully quit CompuSync on both computers before rebuilding. On Windows, a running process locks the native addon. In each computer's checkout, run:
+
+```sh
+git pull --ff-only
+npm ci
+npm run native:build
+npm run native:smoke
+npm start
+```
+
+On **Windows**, after CompuSync restarts, open `chrome://extensions` and click **Reload** on **CompuSync Tab Bridge** to load the refreshed extension files. Source installations update manually; the packaged-app automatic updater does not run for `npm start`.
+
+## Troubleshooting
+
+| Problem | What to check |
+| --- | --- |
+| `cargo` not found | Install Rust and open a new terminal. On Mac, load an existing install with `source "$HOME/.cargo/env"`. |
+| Windows compiler/linker errors | Install the C++ workload and Windows SDK in Visual Studio Build Tools; use the MSVC Rust toolchain. |
+| PowerShell blocks `npm.ps1` | Use `npm.cmd` in place of `npm`, for example `npm.cmd ci` and `npm.cmd start`. |
+| Native addon missing or incompatible | Quit CompuSync, rebuild on that computer with `npm run native:build`, and run `npm run native:smoke`. Do not copy `node_modules` or native builds between operating systems or architectures. |
+| Mac cursor or Chrome handoff unavailable | Check Accessibility, Input Monitoring, and Chrome Automation permissions, then fully quit and restart. |
+| Windows Chrome helper disconnected | Keep CompuSync running, check that Tab Bridge is enabled in the correct profile, and reload it. If the checkout moved, restart CompuSync to refresh the helper registration. |
+| Computers cannot find each other | Check the local network and firewall, then use Connection help to enter the host address manually. |
+
+`npm start` writes `compusync.log` in the checkout. While paired, each computer also saves the other's shared logs in `compusync-peer.log`. These files are ignored by Git; review them for private information before sharing them in a bug report.
+
+## Development
 
 ```sh
 npm run check        # JavaScript syntax checks
-npm test             # Cursor, topology, handoff, recovery, and transport tests
-npm run test:native  # Rust addon, recovery guard, and native adapter tests
-npm run native:smoke # Load and exercise the release addon
-npm run test:e2e     # Real Electron pairing and lifecycle behavior
+npm test             # Unit and integration tests
+npm run test:native  # Rust and native adapter tests
+npm run test:e2e     # Electron end-to-end tests
 ```
 
-Automated tests cannot establish actual Windows-to-Mac input, Retina/mixed-scale alignment, operating-system permission prompts, firewall behavior, sleep/wake behavior, or signed-package behavior. Complete the [physical acceptance checklist](docs/testing.md) on the intended computers.
+CI checks macOS and Windows. Physical input, permission prompts, audio alignment, and sleep/wake recovery still need testing on real computers; see the [acceptance checklist](docs/testing.md).
 
-## Implementation map
+Optional local application bundles can be built with `npm run build`. Installer packaging and signing are documented in the [release guide](docs/releases.md). Architecture and design notes are in [docs/DESIGN_CHOICES.md](docs/DESIGN_CHOICES.md).
 
-- `src/core/session.cjs` and `src/core/wire.cjs` manage pairing and the authenticated connection.
-- `src/main/cursor.cjs` and `src/main/runtime.cjs` own v3 cursor topology, ownership, input routing, and recovery.
-- `src/main/drag.cjs` and `src/main/window-runtime.cjs` coordinate native-window crossing and handoff transactions.
-- `src/main/adapters/chrome/` implements Chrome detection, CDP, Apple Automation, preparation, and commit.
-- `src/main/seam-overlay.cjs` presents the temporary noninteractive Chrome seam treatment.
-- `native/` contains the napi-rs Windows/macOS substrate and independent crash-recovery guard.
-- `src/main.cjs` integrates the settings window, tray/menu controls, native runtime, display changes, and app lifecycle. It deliberately does not create the retired shared-surface `BrowserWindow`.
+## Documentation
 
-Implementation rationale and compatibility boundaries are recorded in [docs/DESIGN_CHOICES.md](docs/DESIGN_CHOICES.md). Current validation evidence is in [docs/IMPLEMENTATION_REPORT.md](docs/IMPLEMENTATION_REPORT.md).
+See the [documentation index](docs/README.md) for current setup, audio, testing, design, and contributor guides. The [Mac setup guide](docs/mac-setup.md) expands on permission identities and optional features. Earlier shared-desktop plans and verification reports are explicitly labeled as historical; they do not describe the current app or prove the current revision has passed device testing.

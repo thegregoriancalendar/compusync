@@ -76,7 +76,7 @@
     <section class="card">
       <h2>Screen layout</h2>
       <p>Each physical monitor is shown inside its computer group. Drag any monitor to move that computer; drag empty space to pan, and scroll to zoom. Positions within each group follow the operating system’s display settings.</p>
-      <div id="screen-layout-editor" class="screen-layout-editor" aria-label="Pan and zoom the Mac and Windows monitor layout">
+      <div id="screen-layout-editor" class="screen-layout-editor" aria-label="Pan and zoom the laptop monitor layout">
         <div class="layout-viewport-controls" role="group" aria-label="Layout zoom controls">
           <button id="layout-zoom-out" type="button" aria-label="Zoom out" title="Zoom out">−</button>
           <span id="layout-zoom-level" aria-live="polite">100%</span>
@@ -87,7 +87,7 @@
         <button id="layout-windows" class="layout-screen windows" type="button" aria-label="Windows computer. Drag to arrange."></button>
       </div>
       <p id="layout-description" class="small layout-description"></p>
-      <p class="small field-help"><span class="red-edge-key"></span> The Mac’s top/menu-bar edge cannot be used for crossing.</p>
+      <p class="small field-help"><span class="red-edge-key"></span> <span id="layout-edge-help">A Mac’s top/menu-bar edge cannot be used for crossing.</span></p>
     </section>
 
     <section class="card">
@@ -118,12 +118,12 @@
       <p id="audio-channels" class="small" role="status">Both laptops play the full stereo mix.</p>
       <div class="audio-volumes" role="group" aria-label="Device volumes">
         <div class="audio-volume">
-          <div class="audio-volume-heading"><label for="audio-volume-mac">Mac volume</label><output id="audio-volume-mac-value" for="audio-volume-mac">Unavailable</output></div>
+          <div class="audio-volume-heading"><label id="audio-volume-mac-label" for="audio-volume-mac">Laptop volume</label><output id="audio-volume-mac-value" for="audio-volume-mac">Unavailable</output></div>
           <input id="audio-volume-mac" type="range" min="0" max="100" step="1" value="0" aria-describedby="audio-volume-mac-status" disabled>
           <p id="audio-volume-mac-status" class="small">Connect the Mac to adjust its volume.</p>
         </div>
         <div class="audio-volume">
-          <div class="audio-volume-heading"><label for="audio-volume-windows">Windows volume</label><output id="audio-volume-windows-value" for="audio-volume-windows">Unavailable</output></div>
+          <div class="audio-volume-heading"><label id="audio-volume-windows-label" for="audio-volume-windows">Other laptop volume</label><output id="audio-volume-windows-value" for="audio-volume-windows">Unavailable</output></div>
           <input id="audio-volume-windows" type="range" min="0" max="100" step="1" value="0" aria-describedby="audio-volume-windows-status" disabled>
           <p id="audio-volume-windows-status" class="small">Connect Windows to adjust its volume.</p>
         </div>
@@ -182,12 +182,12 @@
       <table class="latency-table" aria-describedby="mouse-latency-help">
         <thead><tr><th scope="col">Direction</th><th scope="col">Typical</th><th scope="col">Slow (p95)</th></tr></thead>
         <tbody>
-          <tr><th scope="row">Mac &rarr; Windows</th><td id="latency-mac-windows">&mdash;</td><td id="latency-mac-windows-p95">&mdash;</td></tr>
-          <tr><th scope="row">Windows &rarr; Mac</th><td id="latency-windows-mac">&mdash;</td><td id="latency-windows-mac-p95">&mdash;</td></tr>
+          <tr><th id="latency-mac-windows-label" scope="row">This laptop &rarr; Other laptop</th><td id="latency-mac-windows">&mdash;</td><td id="latency-mac-windows-p95">&mdash;</td></tr>
+          <tr><th id="latency-windows-mac-label" scope="row">Other laptop &rarr; This laptop</th><td id="latency-windows-mac">&mdash;</td><td id="latency-windows-mac-p95">&mdash;</td></tr>
         </tbody>
       </table>
       <p id="mouse-latency-network" class="small"></p>
-      <p id="mouse-latency-help" class="small">Move the Mac's mouse with the cursor on Windows, then the Windows mouse with the cursor on Mac. Typical is the median over the last 10 seconds; p95 shows slower updates. Starts when CompuSync receives mouse input and includes batching, network travel and the destination cursor update. Device/OS input delivery and screen redraw are excluded. One-way estimates assume similar network delay in both directions.</p>
+      <p id="mouse-latency-help" class="small">Move each laptop’s mouse while the cursor is on the other laptop. Typical is the median over the last 10 seconds; p95 shows slower updates. Starts when CompuSync receives mouse input and includes batching, network travel and the destination cursor update. Device/OS input delivery and screen redraw are excluded. One-way estimates assume similar network delay in both directions.</p>
       </section>
       <section class="latency-group" aria-labelledby="audio-latency-heading">
         <h3 id="audio-latency-heading">Audio</h3>
@@ -210,6 +210,7 @@
     </footer>
   </main>
   <script src="dom-updates.js"></script>
+  <script src="../shared/devices.js"></script>
   <script src="screen-layout.js"></script>
   <script src="settings.js"></script>
 </body>

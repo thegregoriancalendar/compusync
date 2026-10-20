@@ -5,6 +5,8 @@
   if (typeof module === 'object' && module.exports) module.exports = api;
   if (root) root.CompuSyncScreenLayout = api;
 })(typeof window === 'object' ? window : null, () => {
+  const { deviceSlots, layoutPosition } = typeof module === 'object' && module.exports
+    ? require('../shared/devices.js') : window.CompuSyncDevices;
   const POSITIONS = Object.freeze(['left', 'right', 'top']);
   const MIN_OVERLAP = 24;
   const MAX_GROUP_WIDTH = 152;
@@ -165,17 +167,17 @@
     return { mac, windows };
   }
 
-  function stereoAssignment(layouts = {}, settings = {}) {
-    const values = Object.values(layouts);
-    const mac = values.find((layout) => layout.platform === 'darwin');
-    const windows = values.find((layout) => layout.platform === 'win32');
+  function stereoAssignment(layouts = {}, settings = {}, members = []) {
+    const slots = deviceSlots(members, layouts);
+    const mac = layouts[slots.mac?.id];
+    const windows = layouts[slots.windows?.id];
     if (![mac, windows].every((layout) => layout?.displays?.some((display) => display.primary))) {
       return { ready: false, reason: 'Connect both laptops and wait for their main displays in Screen layout.' };
     }
     // Use the same geometry and scale as the screen editor, including each
     // primary display's position inside a computer with multiple monitors.
     const groups = monitorGroups({ mac, windows });
-    const rects = relativeRects(settings.macPosition, settings.displayOffset, groups);
+    const rects = relativeRects(layoutPosition(settings.macPosition, slots), settings.displayOffset, groups);
     const center = (name) => {
       const monitor = groups[name].monitors.find((display) => display.primary);
       return monitor ? rects[name].x + monitor.x + monitor.w / 2 : NaN;
@@ -184,7 +186,7 @@
     if (!Number.isFinite(delta) || Math.abs(delta) < 0.000001) {
       return { ready: false, reason: 'The main displays are horizontally aligned. Move one left or right in Screen layout to split stereo.' };
     }
-    return { ready: true, channels: { mac: delta < 0 ? 'left' : 'right', windows: delta < 0 ? 'right' : 'left' } };
+    return { ready: true, channels: { [slots.mac.id]: delta < 0 ? 'left' : 'right', [slots.windows.id]: delta < 0 ? 'right' : 'left' } };
   }
 
   function arrangeDiagram(width, height, macPosition, displayOffset, sizes) {
@@ -201,13 +203,14 @@
     };
   }
 
-  function snapDragged(dragged, proposedCenter, rects) {
+  function snapDragged(dragged, proposedCenter, rects, allowVertical = true) {
     if (!['mac', 'windows'].includes(dragged) || !proposedCenter || !rects?.mac || !rects?.windows) return null;
     const moving = rects[dragged];
     const fixed = rects[dragged === 'mac' ? 'windows' : 'mac'];
     const fixedCenter = { x: fixed.x + fixed.w / 2, y: fixed.y + fixed.h / 2 };
     const candidates = [];
     const add = (macPosition, center) => {
+      if (macPosition === 'top' && !allowVertical) return;
       const distance = (center.x - proposedCenter.x) ** 2 + (center.y - proposedCenter.y) ** 2;
       const macCenter = dragged === 'mac' ? center : fixedCenter;
       const winCenter = dragged === 'windows' ? center : fixedCenter;
@@ -236,10 +239,10 @@
     return result;
   }
 
-  function arrangementText(macPosition) {
-    return macPosition === 'right' ? 'Mac is right of Windows. Cross at Mac left ↔ Windows right.'
-      : macPosition === 'top' ? 'Mac is above Windows. Cross at Mac bottom ↔ Windows top.'
-        : 'Mac is left of Windows. Cross at Mac right ↔ Windows left.';
+  function arrangementText(macPosition, first = 'Mac', second = 'Windows') {
+    return macPosition === 'right' ? `${first} is right of ${second}. Cross at ${first} left ↔ ${second} right.`
+      : macPosition === 'top' ? `${first} is above ${second}. Cross at ${first} bottom ↔ ${second} top.`
+        : `${first} is left of ${second}. Cross at ${first} right ↔ ${second} left.`;
   }
 
   return {

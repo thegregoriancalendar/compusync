@@ -1,68 +1,72 @@
 # CompuSync design choices
 
-This document records the implementation decisions made while carrying out `HANDOFF.md` and `compusync-spec-v3.md`. It describes the behavior the code is intended to preserve when the implementation is changed later.
+This document describes the active implementation reviewed on October 20, 2026. Start with the [README](../README.md) for installation and [testing](testing.md) for acceptance. The [original v3 proposal](../compusync-spec-v3.md) and [earlier reports](archive/implementation-history.md) preserve historical designs; they do not override current runtime selection.
 
-## V3 shared cursor
+## Product and platform boundary
 
-- Each computer reports its entire native desktop as one zero-based physical-pixel rectangle plus one primary-display scale. VU is physical pixels divided by that scale. Raw OS-global window bounds remain available for Chrome/CDP joining and recovery; cursor and handoff code uses normalized bounds so negative monitor origins do not leak into shared coordinates.
-- Top-edge crossing is deliberately disabled for the macOS menu bar. Left, right, and bottom layouts are supported. The default edge resistance is zero and resistance is bypassed for an active native drag.
-- Both devices remain active. The cursor owner sums locally accelerated raw deltas with accelerated peer deltas, publishes a 60 Hz authoritative position, and owns visible cursor warping plus synthetic input. Keyboard input follows the cursor owner.
-- Ctrl/Cmd+Shift+U is the native fail-safe link toggle and Ctrl/Cmd+Shift+Y moves ownership. The native implementation owns these hotkeys so they still work if the renderer or JavaScript event loop is unhealthy.
+- Supported pairs are Mac-to-Mac and Mac-to-Windows. Windows-to-Windows and unsupported operating systems are rejected by the pairing/session checks in `src/shared/devices.js` and `src/core/session.cjs`.
+- The active UI is Connection & settings, its Latency Monitor page, the optional Windows Messages Companion, and a temporary Chrome seam overlay.
+- The shared scene, workspace, file-transfer UI, offscreen editor, and shared drag bar are retired. Their modules remain in the tree but are not instantiated by `src/main.cjs`. The renderer's Pointer Lock permission handler is not the mechanism for current OS-wide cursor sharing.
 
-## V3 Chrome handoff
+## Native shared input and geometry
 
-- macOS uses normal Chrome plus JXA/Accessibility and asks for Automation only at the first crossing. Windows offers one explicit restart into a user-only, signed-out isolated profile because Chrome 136+ refuses remote debugging on the default profile. Only session files are migrated.
-- A descriptor UUID survives round trips. Tabs use HTTP(S)-only bounded metadata; CDP captures bounded history with at most four concurrent page sessions. Default logs contain only descriptor IDs, phases/durations, hostname, and tab count.
-- A drag arms once within 200 VU while moving toward the seam. Both native windows are driven from a fixed grab offset and the authoritative virtual cursor. A maximized/fullscreen window commits instantly; windows below 200x150 VU and non-addressable windows do not straddle.
-- Windows terminates the modal move loop at edge contact, suppresses both the tagged synthetic up and the eventual physical up from the application, and continues from raw deltas. macOS has no equivalent modal loop and uses Accessibility positioning.
-- Prepared reverse crossings stay alive for three seconds. Early destination drops wait at most two seconds. Reliable commit acknowledgement is the only event that permits source destruction. If source Chrome exits, the prepared destination becomes the survivor; other failures restore whichever copy remains.
-- The seam is a transparent, non-focusable, click-through Electron overlay. It intentionally marks native Chrome interior differences instead of attempting to make cross-OS title bars or tab strips pixel-identical.
+- Rust exposes input hooks/event taps, input synthesis, cursor visibility and positioning, foreign-window access, display metrics, and recovery through the N-API adapter in `native/index.cjs`.
+- Pointer input goes through the native addon, Electron main-process runtime, and paired transport. It does not round-trip through a renderer. Settings render state and diagnostics; they do not own authoritative input timing.
+- One computer owns the visible cursor at a time. Either computer's input can contribute while linked; keyboard and scrolling follow ownership. The runtime exchanges the owner computer's pointer-feel curve so it applies consistently while the cursor is on that computer.
+- Virtual units normalize desktop metrics and scale for shared topology. OS-global native bounds and per-display physical dimensions remain available for window matching, placement, and recovery. The layout editor shows individual monitors inside computer groups; screen positions within each group come from the OS.
+- Mixed pairs support left/right arrangements or Windows below the Mac. Two Macs use left/right arrangements. Both Macs' top/menu-bar edges remain reserved. Legacy `mac` and `windows` slot names are geometry compatibility fields, not device identities; in a Mac pair, the second slot is another Mac.
+- Edge resistance applies when crossing without a native drag and is bypassed during a drag. Cmd/Ctrl+Shift+U toggles linking and Cmd/Ctrl+Shift+Y transfers ownership. Native fail-safe handling remains available independently of renderer responsiveness.
 
-## V3 recovery
+## Chrome platform paths
 
-- JavaScript recovery and the native in-process watchdog independently unhide/release the cursor, remove hooks, release synthetic state, restore guarded windows, and enter Unlinked mode.
-- An out-of-process guard receives an atomic recovery journal containing original raw window bounds and synthetic button/modifier masks. It performs the same OS-local cleanup after a hard process termination, without network or renderer dependencies.
-- Suspend and display changes immediately clear overlays and restore an active handoff. Wake reasserts visible, unparked, released local input and refreshes full-desktop metrics; linking remains an explicit user action after recovery.
+### Windows: extension and native messaging
 
-## One logical window
+`src/main/adapters/chrome/runtime.cjs` selects the extension adapter and native messaging bridge on Windows. `setup.cjs` copies the manifest, service worker, and page-state helper into a stable `chrome-extension` directory under CompuSync user data. It writes a native host manifest and registers it under the current user's Chrome NativeMessagingHosts registry key.
 
-- Shared geometry uses integer device-independent pixels (DIPs). Electron screen and window bounds and renderer CSS pixels use the same logical unit at the default zoom. A display's scale factor is retained for diagnostics and canvas backing resolution; it does not multiply shared coordinates.
-- The host is the authority for state. It places its selected work area at virtual `(0, 0)` and attaches the peer's selected work area to the configured host edge, centered along the other axis. This creates one deterministic two-display layout even if the two saved edge preferences disagree.
-- State contains one logical window rectangle. Each computer derives its native fragment by intersecting that rectangle with its virtual display. A fragment is a crop of the full scene and may be as small as one DIP. Fragment dimensions never resize the logical scene.
-- Joining and reconnecting do not add a view or relocate the window. The initial window is centered on the host. `Bring window here` explicitly moves the same logical window to a computer that has no visible fragment.
-- The surface is frameless. A 36-DIP bar belongs to the shared logical content, so its fragments line up at the seam and native title bars, shadows, and rounded corners cannot create duplicate chrome.
+Chrome requires the user to enable Developer mode and use Load unpacked for the managed folder. Setup opens that folder and Chrome's Extensions page after explicit consent. CompuSync stages current extension files on startup; users reload the extension after an update. Installing the source folder alone does not install/register the native host.
 
-## Dragging and input
+The fixed manifest public key provides the extension ID expected by the host manifest and Rust executable. The extension connects to `app.compusync.chrome`; `native/chrome-host/` relays length-framed stdio messages to the desktop app's Windows named pipe. Tab operations use Chrome extension APIs, and bounded history/page-state operations use `chrome.debugger` sessions that detach after the operation.
 
-- The shared bar uses DOM pointer events and Pointer Lock. Relative movement continues after the physical cursor reaches an OS display edge. Native title-bar dragging and CSS drag regions cannot provide the cross-computer drag transaction or reliable relative deltas.
-- A drag has one authoritative owner and a random transaction ID. The host accepts the first grab, rejects conflicting owners and stale sequence numbers, and applies bounded relative deltas. Mouse release commits; Escape, lost capture, or an interrupted local drag restores the starting rectangle. Disconnect and display changes clear ownership and recover a reachable bar.
-- While its last visible pixels disappear, the drag owner's process keeps a tiny transparent capture window focused until release. This is needed to retain Pointer Lock and finish a crossing with the original trackpad. The exact behavior remains a physical macOS acceptance item.
-- Interior pointer input is separate from bar input. Cursor positions, clicks, grid distortion, and particles use the full logical content coordinates below the bar. Renderers subtract their viewport offset, allowing both fragments to show complementary parts of the same scene.
-- Ordinary OS input remains unchanged outside CompuSync. When no fragment is local, the tray/settings `Bring window here` action is the deliberate remote-control entry point; CompuSync does not install global mouse hooks or leave a duplicate surface behind.
+The active path does not restart the user's Chrome into a copied, signed-out profile or require a remote-debugging port. Older CDP/profile utilities and disposable-profile probes remain for historical testing. At startup, the app may offer setup; accepting setup deliberately opens Chrome. A destination handoff may launch Chrome if needed. These explicit actions differ from launching Chrome merely to scan at startup.
 
-## Mini desktop and host programs
+### macOS: Automation and Accessibility
 
-- The computer hosting the CompuSync session also owns the persistent workspace and runs programs. Moving the logical window changes presentation only; it does not migrate storage or processes.
-- Renderer and peer requests use named, validated capabilities. They never contain arbitrary host paths, executable paths, shell strings, or unrestricted command-line arguments.
-- Imported files live under the host profile's `workspace` directory. Public operations use normalized relative identifiers. Path traversal, reserved internal paths, and symbolic-link escapes are rejected. Writes use temporary files and atomic replacement where the platform permits it.
-- The picker imports regular files; drag and drop may import regular files or directory trees. Imports never overwrite: case-insensitive name collisions receive a numbered suffix. Directory delete is recursive after UI confirmation.
-- Bulk files and rendered program frames use a separate authenticated data channel so cursor, drag, lifecycle, and metadata state cannot queue behind large payloads. Transfers are chunked, bounded, acknowledged, and hash-checked. Program frames may be dropped under backpressure because a newer frame supersedes them.
-- The first supported program is a bundled host text editor in a separate sandboxed, offscreen Electron window. This is a real host-run process surface that CompuSync can capture and control consistently on Windows and macOS without global Accessibility or Screen Recording privileges. The supported catalog is explicit; arbitrary native Windows and macOS applications are outside this first compatibility boundary.
-- The editor has a fixed 800x500 logical surface. Its offscreen renderer publishes complete JPEG frames at up to 15 FPS; peer mouse, wheel, and keyboard events are mapped back into those program coordinates. Complete frames make recovery after a dropped frame independent of a video codec or delta history.
-- A validated single-modifier Ctrl/Meta+A uses Electron's focused `selectAll` edit command. Hosted macOS showed that a synthetic Meta+A key event does not consistently apply Chromium's default selection behavior; the explicit bounded edit command keeps Windows and Mac remote editing equivalent without adding general renderer commands.
-- Only valid UTF-8 workspace documents no larger than 2 MiB open in the editor. Saves replace the host workspace document through the same bounded workspace API. Opening a program uses an explicit catalog ID and public document path; program uploads, executable paths, shell commands, and arbitrary arguments have no capability.
-- The workspace persists across app restarts. Program process state is transient; saved document bytes are durable. A lost peer does not stop a host program, and a lost host ends the peer's ability to operate it until reconnection.
+The Mac runtime selects the Apple adapter, which uses JXA/Apple Events to inspect and recreate Chrome tabs and native Accessibility APIs to detect and position windows. No Chrome extension is required.
 
-## Security and limits
+`runMacPermissionPreflight` checks Accessibility, Input Monitoring, and Chrome Automation during startup and requests them during first-run onboarding when the native preflight APIs are available. Denials produce settings notices. Recording and Messages permissions are separate feature-specific approvals, not part of the three input/Chrome checks.
 
-- Existing sandboxed renderers, context isolation, disabled Node integration, local-only CSP, navigation blocking, authenticated encryption, counters, origin rejection, and sender-checked IPC remain required.
-- Control and data connections use distinct key-derivation contexts. A data connection is accepted only for the member that already owns the active authenticated control connection and is terminated with it.
-- Incoming peer files are written in ordered chunks of at most 128 KiB, belong to the authenticated peer that began them, and are checked against a declared SHA-256 hash before import. At most four transfers are active; partial transfers are removed on failure, disconnect, and service startup.
-- Default workspace bounds are 32 path segments, 10,000 public entries, 256 MiB per file, and 1 GiB of file data. These limits can be raised deliberately without expanding authority to the host filesystem or shell.
-- Electron renderer sandboxing and capability validation are security boundaries around this supported surface. They do not provide a VM, container, or operating-system sandbox for arbitrary programs. Arbitrary native applications, cross-OS execution, screen/audio capture, and general remote-desktop behavior are explicitly unsupported.
+Chrome's optional **Allow JavaScript from Apple Events** setting enables the page-state helper to capture scroll positions and ordinary drafts. Without it, basic tab/URL handoff remains available and a setup notice explains the page-state limitation. The Mac API does not expose the full native back/forward stack, so retained history is reused only while the prepared window remains unchanged.
 
-## Recovery and compatibility
+## Handoff, parked splits, and recovery
 
-- A window must retain a reachable portion of its bar on at least one connected display after drag completion. If its only display disappears, the unchanged-size logical window is centered on a remaining display.
-- Protocol/state version 2 deliberately rejects version 1 peers. Mixing the old mirrored-window semantics with the new crop and drag actions would produce unsafe or contradictory behavior.
-- Windows automation and local two-process tests can validate reducer ordering, complementary crops, transport, persistence, and Electron behavior. Physical Windows-to-macOS dragging, Retina/mixed-DPI seams, macOS Pointer Lock retention, native packaging/signing, firewall behavior, and sleep/wake remain explicit device acceptance work.
+- Descriptors contain bounded HTTP(S) tab data, tab order/pinning/active selection, and supported history. The active tab can include bounded page state; password fields, file inputs, cookies, storage, and login sessions are not copied. Each computer uses its own site authentication.
+- The native drag and shared cursor drive window placement. Normal addressable Chrome windows can straddle. Releasing with both portions visible parks the two existing windows; neither closes simply because it contains less than half the window. Re-grabbing either portion refreshes the peer copy's supported state. Parked copies are not continuously interactive replicas.
+- Moving completely to one computer completes the handoff. Successful source destruction follows reliable commit acknowledgement. Reverse preparation is reused within the bounded retention window. Maximized/fullscreen windows transfer without a live straddle; unsupported or undersized windows stay local.
+- Where native monitor measurements are available, handoff uses physical dimensions to preserve size across Retina and Windows scaling, reducing oversized windows to fit the receiving monitor. Logical sizing is the fallback when measurements are unavailable.
+- Windows has a foreign-window modal move loop; its native path ends that loop at edge contact, guards synthetic releases, and continues the drag from captured movement. Mac positioning uses Accessibility and event-tap/window notifications rather than that Windows mechanism.
+- Main-process recovery, the native watchdog, and an independent recovery guard release synthetic input, restore cursor visibility, and recover guarded windows on failure. Unlink, peer loss, suspend, process exit, and display changes must clear stale handoffs and overlays. Do not claim a hardware recovery result without exercising it on the target computer.
+
+## Pairing, transport, and persistence
+
+- Short-code discovery uses local UDP, normally port 43188, and the direct connection normally uses TCP 43187. Codes last 15 minutes and one successful pairing. No cloud account or relay participates.
+- Discovery bootstraps pairing. Saved reconnect retries the saved host address; a changed DHCP address can require a fresh code plus discovery or manual address entry. There is no automatic host migration or remote startup of a stopped app.
+- The custom protocol uses scrypt for code bootstrapping, fresh handshake contributions, directional keys, authenticated encryption, and counters. This description is not an independent cryptographic audit or a claim that it implements a standardized PAKE.
+- Large reliable payloads use the authenticated data path with separate key context and active-session binding. Peer message schemas, bounds, priorities, and ordering are defined in `src/main/messages.cjs` and the session/wire modules; legacy workspace capabilities are not an active file-sharing product surface.
+- Settings live in the OS user-data directory. Saved connection secrets use Electron safeStorage where available, with the restricted local-file fallback in `src/main.cjs`. Renewing an invitation code does not itself revoke a saved connection secret.
+
+## Clipboard, audio, and Messages
+
+Plain-text clipboard synchronization is enabled by default and can be disabled in settings. It sends new copied text while connected, not images/files or an initial offline backlog. Both computers' clipboard histories may retain received text. Structured clipboard logs record byte counts, not clipboard text.
+
+Audio is a separate explicitly started route. Either supported computer can send to both outputs, with full stereo or layout-based split stereo, independent volume controls, and one direction at a time. Audio protocol v3 uses authenticated/encrypted UDP with fresh route keys and a shared presentation timeline; cursor linking is not required. Mac capture uses Core Audio taps on macOS 14.6+ with recording permission. Windows sending uses standard VB-CABLE and a recovery helper that restores prior output roles. Windows receiving does not require the driver. Disconnect, sleep, or failure stops sharing; reconnect does not resume capture. See [audio routing](audio-routing.md) for clocks, routing, and physical measurement limits.
+
+Windows' Messages Companion reads conversations and participant contact names through the paired Mac, which accesses local databases read-only with Full Disk Access. Sending uses Messages Automation. It is a separate feature-specific window, not the retired workspace/editor.
+
+## Lifecycle, diagnostics, and compatibility
+
+- Explicit launch or tray/menu activation opens Connection & settings. Closing settings leaves the process running. A background launch keeps the app hidden until activation unless an error needs settings. A second launch activates the existing instance, so quit older copies before testing updates.
+- The Latency Monitor separates mouse-path and audio-schedule diagnostics. Neither reading includes complete device-to-display latency or proves acoustic speaker alignment. Native input and real speaker timing require physical tests.
+- Source runs write `compusync.log` and can share logs over the encrypted paired connection into `compusync-peer.log`. Review logs and screenshots before attaching them publicly. Chrome handoff timing logs deliberately omit full URLs, titles, histories, and session tokens; that is not a promise that every diagnostic file contains no private data.
+- Source runs update through Git and local rebuilds. Packaged apps use the feed currently configured in `package.json`; signing, feed hosting, and tag-workflow requirements are described in [releases](releases.md). No installer or public-feed availability is implied by configuration alone.
+- Session handshake version 2, Chrome descriptor schema 1, extension RPC version 1, and audio protocol version 3 describe different contracts. The product's package version and the extension manifest version are separate again. Use matching current builds on both computers rather than inferring compatibility from any one number.
+- Renderer sandboxing, context isolation, navigation/CSP restrictions, and sender-checked IPC remain required. CompuSync does not provide a VM, arbitrary program execution, remote desktop, or migration of application processes.

@@ -94,7 +94,7 @@
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
       "extendInfo": {
-        "NSAudioCaptureUsageDescription": "CompuSync captures your Mac's system audio when you choose to play it on your paired Windows laptop.",
+        "NSAudioCaptureUsageDescription": "CompuSync captures your Mac's system audio when you choose to play it on your paired laptop.",
         "NSLocalNetworkUsageDescription": "CompuSync connects to your other laptop to link cursors and hand off Chrome windows.",
         "NSAccessibilityUsageDescription": "CompuSync needs Accessibility access to move the shared cursor and position Chrome windows during handoff.",
         "NSInputMonitoringUsageDescription": "CompuSync needs Input Monitoring access so your mouse and keyboard can follow the shared cursor.",

@@ -364,10 +364,10 @@ test('native warnings update on change without becoming errors or preventing pla
 test('audio negotiation uses real encrypted sessions and their observed socket addresses in either host role', async (t) => {
   for (const macHosts of [false, true]) {
     const secret = newSecret();
-    const host = new Session({ id: macHosts ? 'mac' : 'windows', name: 'Host', role: 'host', secret,
+    const host = new Session({ platform: macHosts ? 'darwin' : 'win32', id: macHosts ? 'mac' : 'windows', name: 'Host', role: 'host', secret,
       port: 0, bindHost: '127.0.0.1', discovery: false });
     await host.start();
-    const join = new Session({ id: macHosts ? 'windows' : 'mac', name: 'Join', role: 'join', secret,
+    const join = new Session({ platform: macHosts ? 'win32' : 'darwin', id: macHosts ? 'windows' : 'mac', name: 'Join', role: 'join', secret,
       host: '127.0.0.1', port: host.port, discovery: false });
     const macSession = macHosts ? host : join;
     const windowsSession = macHosts ? join : host;

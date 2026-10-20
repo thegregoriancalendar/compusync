@@ -1,10 +1,10 @@
-# Synchronized audio between Mac and Windows
+# Synchronized audio between two Macs or Mac and Windows
 
-The Electron Audio manager controls a Rust audio engine. Either laptop can send. CompuSync suppresses the source's immediate playback and renders a delayed copy on both laptops against the same presentation timeline. Mac uses a muted Core Audio tap. Windows uses WASAPI loopback on a dedicated VB-CABLE virtual output and pins delayed playback to physical speakers. Stopping restores ordinary source playback. Only one direction runs at a time.
+The Electron Audio manager controls a Rust audio engine. Either laptop in a Mac-to-Mac or Mac-to-Windows pair can send. CompuSync suppresses the source's immediate playback and renders a delayed copy on both laptops against the same presentation timeline. Mac uses a muted Core Audio tap. Windows uses WASAPI loopback on a dedicated VB-CABLE virtual output and pins delayed playback to physical speakers. Stopping restores ordinary source playback. Only one direction runs at a time. Windows-to-Windows pairing is not supported.
 
 ## Prepare both laptops
 
-Use the same current source revision on both laptops. Quit any running CompuSync instance before rebuilding: Windows locks a loaded native addon. Audio protocol v3 requires rebuilding the addon on **both** computers; older addons cannot advertise synchronized audio.
+Install the platform prerequisites from the [README](../README.md#install-and-run), and use the same current source revision on both laptops. Quit any running CompuSync instance before rebuilding: Windows locks a loaded native addon. Audio protocol v3 requires rebuilding the addon on **both** computers; older addons cannot advertise synchronized audio. Audio protocol version 3 is separate from the session handshake and package version. The Chrome extension is only needed for Windows Chrome handoff, not for audio routing.
 
 On Windows and on a Mac running **macOS 14.6 or newer**:
 
@@ -29,7 +29,7 @@ This launch bypasses npm's log redirection. Alternatively, use `npm run build` a
 
 ## Device volumes
 
-The Audio manager has separate Mac and Windows volume sliders with percentage
+The Audio manager has separate, named laptop volume sliders with percentage
 readouts and mute status. Either laptop can adjust both outputs while paired;
 local volume also works while disconnected and without starting audio sharing.
 The sliders control the output devices' system volume, so other apps using those
@@ -51,6 +51,12 @@ when its physical output is mono. Full stereo on both laptops remains the defaul
 The existing shared playback schedule, output selection, and volume controls apply
 to both modes. Either Mac or Windows can be the source; Windows sending still
 requires VB-CABLE.
+
+For two Macs, update both apps. Negotiation assigns channels and volume controls
+by computer ID, so identical OS types and computer names remain separate. Either
+Mac can send; the receiving Mac uses its selected output. The source Mac uses its
+system default output for delayed local playback. Arrange the Macs left/right,
+since both top/menu-bar edges are reserved. Windows-to-Windows is unavailable.
 
 Assignments include the main display's position inside a multi-monitor computer
 group and follow saved layout changes while sharing. The source negotiates both
@@ -126,8 +132,8 @@ PCM uses roughly 1.7 Mbit/s before UDP/IP overhead. Allow CompuSync through the 
 
 ## Verification boundary and physical alignment
 
-Automated checks cover authenticated timing metadata, directional nonces, replay/reordering, clock-offset estimation, timestamp-preserving resampling, scheduled silence/loss handling, drift correction, epoch recovery, native UDP clock agreement, actual Windows device playback deadlines, cancellation, negotiation, and Electron controls. The Mac target is type-checked from Windows. Windows policy tests cover distinct default roles, partial rollback, user changes, unplugged originals, and restoration errors. Native missing-driver checks must not change defaults.
+Automated coverage includes authenticated timing metadata, directional nonces, replay/reordering, clock-offset estimation, timestamp-preserving resampling, scheduled silence/loss handling, drift correction, epoch recovery, UDP clock agreement, playback scheduling, cancellation, negotiation, and Electron controls. Some timing/device tests use simulated clocks or engines; inspect the test before treating it as a real-device result. Windows policy tests cover distinct default roles, partial rollback, user changes, unplugged originals, and restoration errors. Native missing-driver checks must not change defaults. Cross-compilation/type-checking for Mac cannot establish real capture, TCC prompts, or playback timing. Run the platform tests and [physical checklist](testing.md#synchronized-audio-in-either-direction) on the intended devices.
 
-The native recovery helper's default switching and restoration have been verified with VB-CABLE on Windows. The opt-in test in `native/windows-audio/tests/live_guard.rs` checks every role before and after a real route; it is ignored by default because it temporarily changes actual system outputs. Windows capture, process-crash recovery, Mac receive playback, and physical alignment still require hardware acceptance tests. Mac-to-Windows capture was verified manually before adding the reverse route. Device playback timestamps are predictions. The displayed clock uncertainty excludes driver errors, downstream device latency, and sound propagation.
+Earlier development notes reported native default-output switching/restoration with VB-CABLE on Windows and manual Mac-to-Windows capture before reverse routing was added. Those observations are not a fresh acceptance run of the current revision. The opt-in test in `native/windows-audio/tests/live_guard.rs` checks every role before and after a real route; it is ignored by default because it temporarily changes actual system outputs. Validate either sending direction, Mac-to-Mac routes, Windows capture/recovery, Mac receive playback, and physical alignment on the actual devices. Record the revision and results rather than inferring them from this guide. Device playback timestamps are predictions. The displayed clock uncertainty excludes driver errors, downstream device latency, and sound propagation.
 
 For acoustic acceptance, record a periodic click from both outputs using two channels of one recorder/interface, with equal microphone distances or direct wired capture. Compare click sample positions at startup and throughout a long run, then repeat with network load and a forced resync. Report median, 95th percentile, maximum inter-output skew, dropouts, and recovery behavior. Define an acceptable measured skew for the specific devices before claiming an accuracy figure; automated clock tests do not prove sample-exact speaker alignment.
