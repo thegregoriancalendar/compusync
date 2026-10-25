@@ -152,6 +152,7 @@ class SharedInputRuntime extends EventEmitter {
     this.cursor.on('layout', () => this.#applyActiveAcceleration());
     this.cursor.on('handoff-rejected', (state) => this.#logMode('cursor.handoff.rejected', state));
     this.keyboard = new KeyboardRouter({
+      synchronizeModifiers: true,
       cursor: this.cursor,
       native: this.native,
       send: (message) => this.send(message),

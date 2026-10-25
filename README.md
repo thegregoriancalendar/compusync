@@ -113,6 +113,8 @@ Keep both apps running. A saved pair reconnects when both computers are availabl
 
 ## Everyday use
 
+Keyboard sharing translates recognized shortcuts: common Ctrl shortcuts on Windows use Command on Mac, Home/End use Command+Left/Right, and Print Screen uses Shift+Command+3. Reverse equivalents work from Mac to Windows, including Command+Space for Start. Unrecognized shortcuts retain their modifiers, so Mac Control shortcuts and Windows Ctrl+Alt combinations remain available. Alt and Option share their physical key mapping.
+
 Move through the configured screen seam to transfer cursor and keyboard ownership. Either computer's mouse or trackpad can move the shared cursor. Clipboard sharing copies newly copied **plain text** while connected; images and files are not synced. You can disable it with **Sync copied text between laptops** in settings. Synced text can also appear in each operating system's clipboard history.
 
 | Shortcut | Action |

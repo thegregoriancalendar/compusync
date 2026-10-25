@@ -405,6 +405,15 @@ fn mac_to_hid(code: u32) -> Option<u32> {
         109 => 0x43,
         103 => 0x44,
         111 => 0x45,
+        115 => 0x4A, // Home (also Fn-Left)
+        116 => 0x4B, // Page Up
+        117 => 0x4C, // Forward Delete (also Fn-Delete)
+        119 => 0x4D, // End (also Fn-Right)
+        121 => 0x4E, // Page Down
+        71 => 0x53,  // Keypad Clear / Num Lock
+        105 => 0x68, // F13
+        107 => 0x69, // F14
+        113 => 0x6A, // F15
         124 => 0x4F,
         123 => 0x50,
         125 => 0x51,
@@ -1794,6 +1803,17 @@ mod tests {
         CursorVisibilityAction, CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_X,
         CG_FIELD_UNACCELERATED_POINTER_MOVEMENT_Y,
     };
+
+    #[test]
+    fn navigation_delete_and_lock_keys_round_trip() {
+        for (native, hid) in [
+            (51, 0x2A), (115, 0x4A), (116, 0x4B), (117, 0x4C),
+            (119, 0x4D), (121, 0x4E), (71, 0x53), (107, 0x69),
+        ] {
+            assert_eq!(super::mac_to_hid(native), Some(hid));
+            assert_eq!(super::hid_to_mac(hid), Some(native as u16));
+        }
+    }
 
     #[test]
     fn inactive_mac_pins_motion_without_losing_raw_input_or_echoing_queued_drags() {
