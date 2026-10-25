@@ -2,7 +2,7 @@ use aes_gcm::{
     aead::{AeadInPlace, KeyInit},
     Aes256Gcm, Nonce, Tag,
 };
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 pub const RATE: u32 = 48_000;
 pub const FRAMES: usize = 240;
 pub const BLOCK_NS: i64 = 5_000_000;
@@ -14,15 +14,29 @@ pub struct AudioPacket {
     pub frame: u64,
     pub capture_ns: i64,
     pub play_ns: i64,
+    pub epoch_start_ns: i64,
     pub samples: [[f32; 2]; FRAMES],
 }
 #[derive(Debug)]
 pub enum Message {
-    Ping { t1: i64 },
-    Pong { t1: i64, t2: i64, t3: i64 },
-    Model { offset: i64, rtt: i64 },
+    Ping {
+        t1: i64,
+    },
+    Pong {
+        t1: i64,
+        t2: i64,
+        t3: i64,
+    },
+    Model {
+        offset: i64,
+        rtt: i64,
+    },
     Ready,
     Resync,
+    Timing {
+        capture_age: i64,
+        output_horizon: i64,
+    },
     Audio(Box<AudioPacket>),
 }
 /// A counter per direction and disjoint nonce prefixes. Reordering is allowed;
@@ -71,12 +85,21 @@ impl Wire {
             }
             Message::Ready => body.push(4),
             Message::Resync => body.push(5),
+            Message::Timing {
+                capture_age,
+                output_horizon,
+            } => {
+                body.push(7);
+                body.extend(capture_age.to_be_bytes());
+                body.extend(output_horizon.to_be_bytes());
+            }
             Message::Audio(audio) => {
                 body.push(6);
                 body.extend(audio.epoch.to_be_bytes());
                 body.extend(audio.frame.to_be_bytes());
                 body.extend(audio.capture_ns.to_be_bytes());
                 body.extend(audio.play_ns.to_be_bytes());
+                body.extend(audio.epoch_start_ns.to_be_bytes());
                 for sample in audio.samples.iter().flatten() {
                     let value = if sample.is_finite() {
                         sample.clamp(-1.0, 1.0)
@@ -93,7 +116,7 @@ impl Wire {
             .checked_add(1)
             .ok_or("Audio nonce exhausted. Restart sharing.")?;
         let mut packet = Vec::with_capacity(HEADER + body.len() + 16);
-        packet.extend(if self.sender { b"CSS3" } else { b"CSR3" });
+        packet.extend(if self.sender { b"CSS4" } else { b"CSR4" });
         packet.extend(counter.to_be_bytes());
         let tag = self
             .cipher
@@ -106,7 +129,7 @@ impl Wire {
     pub fn decode(&mut self, packet: &[u8]) -> Option<Message> {
         if packet.len() < HEADER + 17
             || packet.len() > MAX_PACKET
-            || &packet[..4] != if self.sender { b"CSR3" } else { b"CSS3" }
+            || &packet[..4] != if self.sender { b"CSR4" } else { b"CSS4" }
         {
             return None;
         }
@@ -143,11 +166,28 @@ impl Wire {
             },
             (4, 1) => Message::Ready,
             (5, 1) => Message::Resync,
-            (6, 989) => {
+            (7, 17) => {
+                let capture_age = int(1)?;
+                let output_horizon = int(9)?;
+                if !(0..=500_000_000).contains(&capture_age)
+                    || !(1..=500_000_000).contains(&output_horizon)
+                {
+                    return None;
+                }
+                Message::Timing {
+                    capture_age,
+                    output_horizon,
+                }
+            }
+            (6, 997) => {
                 let capture_ns = int(13)?;
                 let play_ns = int(21)?;
+                let epoch_start_ns = int(29)?;
                 if capture_ns < 0
-                    || !(40_000_000..=500_000_000).contains(&play_ns.checked_sub(capture_ns)?)
+                    || epoch_start_ns < 0
+                    || epoch_start_ns > play_ns
+                    || !(super::latency::MIN_DELAY_NS..=super::latency::MAX_DELAY_NS)
+                        .contains(&play_ns.checked_sub(capture_ns)?)
                 {
                     return None;
                 }
@@ -156,7 +196,7 @@ impl Wire {
                     return None;
                 }
                 let mut samples = [[0.0; 2]; FRAMES];
-                for (sample, bytes) in samples.iter_mut().flatten().zip(body[29..].chunks_exact(2))
+                for (sample, bytes) in samples.iter_mut().flatten().zip(body[37..].chunks_exact(2))
                 {
                     *sample = i16::from_le_bytes([bytes[0], bytes[1]]) as f32 / i16::MAX as f32;
                 }
@@ -165,6 +205,7 @@ impl Wire {
                     frame,
                     capture_ns,
                     play_ns,
+                    epoch_start_ns,
                     samples,
                 }))
             }
@@ -203,6 +244,7 @@ mod tests {
                 frame: 240,
                 capture_ns: 1_000_000,
                 play_ns: 151_000_000,
+                epoch_start_ns: 146_000_000,
                 samples: [[0.25, -0.5]; FRAMES],
             })))
             .unwrap();
@@ -235,5 +277,63 @@ mod tests {
         assert!(b.decode(&packets[299]).is_some());
         assert!(b.decode(&packets[3]).is_none());
         assert!(b.decode(&packets[298]).is_some());
+    }
+    #[test]
+    fn timing_feedback_and_low_latency_packets_are_authenticated_and_bounded() {
+        let key = "42".repeat(32);
+        let mut receiver = Wire::new(&key, false).unwrap();
+        let mut sender = Wire::new(&key, true).unwrap();
+        let report = receiver
+            .encode(&Message::Timing {
+                capture_age: 7_000_000,
+                output_horizon: 12_000_000,
+            })
+            .unwrap();
+        let mut corrupt = report.clone();
+        corrupt[15] ^= 1;
+        assert!(sender.decode(&corrupt).is_none());
+        assert!(matches!(
+            sender.decode(&report),
+            Some(Message::Timing {
+                capture_age: 7_000_000,
+                output_horizon: 12_000_000
+            })
+        ));
+        assert!(sender.decode(&report).is_none());
+        for (age, horizon) in [(-1, 10), (500_000_001, 10), (1, 0), (1, 500_000_001)] {
+            let invalid = receiver
+                .encode(&Message::Timing {
+                    capture_age: age,
+                    output_horizon: horizon,
+                })
+                .unwrap();
+            assert!(sender.decode(&invalid).is_none());
+        }
+        let audio = AudioPacket {
+            epoch: 1,
+            frame: 0,
+            capture_ns: 1_000_000_000,
+            play_ns: 1_010_000_000,
+            epoch_start_ns: 1_010_000_000,
+            samples: [[0.0; 2]; FRAMES],
+        };
+        let encoded = sender
+            .encode(&Message::Audio(Box::new(audio.clone())))
+            .unwrap();
+        assert!(matches!(receiver.decode(&encoded), Some(Message::Audio(_))));
+        let mut invalid = audio.clone();
+        invalid.play_ns -= 1;
+        invalid.epoch_start_ns -= 1;
+        assert!(receiver
+            .decode(&sender.encode(&Message::Audio(Box::new(invalid))).unwrap())
+            .is_none());
+        let mut invalid = audio;
+        invalid.epoch_start_ns = invalid.play_ns + 1;
+        assert!(receiver
+            .decode(&sender.encode(&Message::Audio(Box::new(invalid))).unwrap())
+            .is_none());
+        let mut obsolete = report;
+        obsolete[..4].copy_from_slice(b"CSR3");
+        assert!(sender.decode(&obsolete).is_none());
     }
 }

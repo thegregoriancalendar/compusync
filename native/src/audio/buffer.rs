@@ -96,6 +96,8 @@ pub struct TimedBuffer {
     packets: Vec<AudioPacket>,
     epoch: Option<u32>,
     epoch_start_ns: i64,
+    active_epoch: u32,
+    next_epoch_ns: i64,
     last_ns: i64,
 }
 impl TimedBuffer {
@@ -104,6 +106,8 @@ impl TimedBuffer {
             packets: Vec::with_capacity(128),
             epoch: None,
             epoch_start_ns: 0,
+            active_epoch: 0,
+            next_epoch_ns: i64::MAX,
             last_ns: 0,
         }
     }
@@ -111,16 +115,21 @@ impl TimedBuffer {
         if self.epoch.is_some_and(|epoch| packet.epoch < epoch) {
             return false;
         }
+        if packet.play_ns + BLOCK_NS <= self.last_ns {
+            return false;
+        }
         if self.epoch != Some(packet.epoch) {
             self.epoch = Some(packet.epoch);
-            self.epoch_start_ns = packet.play_ns;
+            // Every packet carries the same transition, including when the
+            // first packet is lost or packets arrive in a different order.
+            self.epoch_start_ns = packet.epoch_start_ns;
             // Keep the previous epoch until the scheduled transition. Network
             // arrival times must not decide when local playback is interrupted.
-            self.packets.retain(|p| p.play_ns < packet.play_ns);
-        } else if packet.play_ns < self.epoch_start_ns {
-            self.epoch_start_ns = packet.play_ns;
+            self.packets.retain(|p| p.play_ns < packet.epoch_start_ns);
+        } else if self.epoch_start_ns != packet.epoch_start_ns {
+            return false;
         }
-        if self.packets.len() >= 128 || packet.play_ns + BLOCK_NS <= self.last_ns {
+        if self.packets.len() >= 128 {
             return false;
         }
         let index = match self
@@ -130,14 +139,35 @@ impl TimedBuffer {
             Ok(_) => return false,
             Err(index) => index,
         };
+        if packet.epoch > self.active_epoch {
+            self.next_epoch_ns = self.next_epoch_ns.min(packet.epoch_start_ns);
+        }
         self.packets.insert(index, packet);
         true
     }
     pub fn sample(&mut self, master_ns: i64) -> Option<[f32; 2]> {
         self.last_ns = master_ns;
+        if master_ns >= self.next_epoch_ns {
+            // Multiple changes can be queued ahead of playback. Honor each
+            // explicit cut, rather than applying only the latest received one.
+            self.active_epoch = self
+                .packets
+                .iter()
+                .filter(|packet| packet.epoch_start_ns <= master_ns)
+                .map(|packet| packet.epoch)
+                .max()
+                .unwrap_or(self.active_epoch)
+                .max(self.active_epoch);
+            self.next_epoch_ns = self
+                .packets
+                .iter()
+                .filter(|packet| packet.epoch > self.active_epoch)
+                .map(|packet| packet.epoch_start_ns)
+                .min()
+                .unwrap_or(i64::MAX);
+        }
         while self.packets.first().is_some_and(|packet| {
-            packet.play_ns + BLOCK_NS <= master_ns
-                || (Some(packet.epoch) != self.epoch && master_ns >= self.epoch_start_ns)
+            packet.play_ns + BLOCK_NS <= master_ns || packet.epoch < self.active_epoch
         }) {
             self.packets.remove(0);
         }
@@ -229,6 +259,7 @@ mod tests {
             frame,
             capture_ns: play_ns - 150 * MS,
             play_ns,
+            epoch_start_ns: play_ns - (frame / FRAMES as u64) as i64 * BLOCK_NS,
             samples: [[value; 2]; FRAMES],
         }
     }
@@ -254,6 +285,41 @@ mod tests {
         assert!(!buffer.push(packet(240, 1, 155 * MS, 0.9)));
         assert_eq!(buffer.sample(150 * MS), Some([0.1; 2]));
         assert_eq!(buffer.sample(300 * MS), Some([0.2; 2]));
+    }
+    #[test]
+    fn shorter_delay_has_one_transition_despite_reordering_and_first_packet_loss() {
+        let mut a = TimedBuffer::new();
+        let mut b = TimedBuffer::new();
+        for index in 0..8 {
+            a.push(packet(index * 240, 1, (150 + index as i64 * 5) * MS, 0.1));
+            b.push(packet(index * 240, 1, (150 + index as i64 * 5) * MS, 0.1));
+        }
+        // The new epoch cuts a queued old packet partway through at 157 ms.
+        let first = packet(0, 2, 157 * MS, 0.2);
+        let second = packet(240, 2, 162 * MS, 0.3);
+        a.push(first.clone());
+        a.push(second.clone());
+        // The other host learns the same boundary even if frame zero is lost.
+        b.push(second);
+        assert_eq!(a.sample(156 * MS), Some([0.1; 2]));
+        assert_eq!(b.sample(156 * MS), Some([0.1; 2]));
+        assert_eq!(a.sample(158 * MS), Some([0.2; 2]));
+        assert_eq!(b.sample(158 * MS), None);
+        assert_eq!(a.sample(162 * MS), Some([0.3; 2]));
+        assert_eq!(b.sample(162 * MS), Some([0.3; 2]));
+        assert!(!b.push(first)); // Late data cannot retroactively move the cut.
+    }
+    #[test]
+    fn multiple_future_adjustments_keep_every_scheduled_transition() {
+        let mut buffer = TimedBuffer::new();
+        buffer.push(packet(0, 1, 150 * MS, 0.1));
+        buffer.push(packet(240, 1, 155 * MS, 0.1));
+        buffer.push(packet(0, 2, 152 * MS, 0.2));
+        buffer.push(packet(0, 3, 156 * MS, 0.3));
+        assert_eq!(buffer.sample(151 * MS), Some([0.1; 2]));
+        assert_eq!(buffer.sample(152 * MS), Some([0.2; 2]));
+        assert_eq!(buffer.sample(155 * MS), Some([0.2; 2]));
+        assert_eq!(buffer.sample(156 * MS), Some([0.3; 2]));
     }
     #[test]
     fn timestamped_resampling_preserves_capture_time_at_44100_and_96000() {

@@ -177,7 +177,7 @@ For every case, verify a surviving Chrome copy returns fully on-screen, overlays
 
 ## Synchronized audio in either direction
 
-Follow the [audio routing guide](audio-routing.md). Rebuild both addons for **audio protocol v3** and use current source on both computers; this protocol is distinct from the session handshake and app version.
+Follow the [audio routing guide](audio-routing.md). Rebuild both addons for **audio protocol v4** and use current source on both computers; this protocol is distinct from the session handshake and app version.
 
 1. Test Mac-to-Mac with either Mac sending, and Mac-to-Windows with either computer sending. One route runs at a time. Repeat with cursor linking off and verify pairing alone is enough.
 2. For each Mac sender, use macOS 14.6+ and check System Audio Recording approval/denial under the actual launch identity. Test source and package identities separately when packages are in scope.

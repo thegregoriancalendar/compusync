@@ -57,7 +57,7 @@ pub fn mac_host_ns(ticks: u64) -> i64 {
 #[derive(Clone, Copy, Debug)]
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub struct Estimate {
-    /// Receiver host time minus Mac host time.
+    /// Receiver host time minus source host time.
     pub offset: i64,
     pub rtt: i64,
 }
@@ -102,6 +102,9 @@ impl ClockFilter {
             .iter()
             .min_by_key(|(_, e)| e.rtt)
             .map(|(_, e)| *e)
+    }
+    pub fn latest(&self) -> Option<Estimate> {
+        self.samples.back().map(|(_, estimate)| *estimate)
     }
 }
 #[cfg(test)]

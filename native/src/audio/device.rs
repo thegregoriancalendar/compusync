@@ -112,6 +112,14 @@ fn output<T: SizedSample + FromSample<f32>>(
                     return;
                 }
                 stats.output_lead_ns.store(lead.max(0), Ordering::Relaxed);
+                // A packet arriving just after this callback must wait one
+                // buffer period, plus the driver's predicted DAC lead.
+                let period = (data.len() / channels) as i64 * 1_000_000_000 / rate as i64;
+                let horizon = lead.max(0).saturating_add(period);
+                stats.output_horizon_ns.store(horizon, Ordering::Relaxed);
+                stats
+                    .output_horizon_peak_ns
+                    .fetch_max(horizon, Ordering::Relaxed);
                 stats.output_clock_ready.store(true, Ordering::Release);
                 if !stats.clock_ready.load(Ordering::Acquire) {
                     data.fill(T::from_sample(0.0));

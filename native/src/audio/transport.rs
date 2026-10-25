@@ -4,6 +4,7 @@ use super::buffer::{CapturedFrame, Resampler};
 use super::{clock::ClockFilter, packet::FRAMES};
 use super::{
     clock::{self, MS},
+    latency::{DelayController, RecentPeak},
     packet::{AudioPacket, Message, Wire, BLOCK_NS, MAX_PACKET},
     Stats,
 };
@@ -110,14 +111,19 @@ pub fn synchronize(
                         }
                     }
                 }
-                Message::Ready if count >= 8 && filter.best().is_some_and(|e| e.rtt <= 10 * MS) => {
+                Message::Timing { output_horizon, .. } => {
+                    stats
+                        .peer_output_ns
+                        .store(output_horizon, Ordering::Relaxed);
+                }
+                Message::Ready
+                    if count >= 8
+                        && filter.best().is_some_and(|e| e.rtt <= 10 * MS)
+                        && stats.peer_output_ns.load(Ordering::Relaxed) > 0 =>
+                {
                     let best = filter.best().unwrap();
                     stats.clock_rtt_ns.store(best.rtt, Ordering::Relaxed);
                     stats.clock_ready.store(true, Ordering::Release);
-                    stats.delay_ns.store(
-                        (120 * MS + best.rtt * 4).clamp(150 * MS, 500 * MS),
-                        Ordering::Relaxed,
-                    );
                     return Ok(filter);
                 }
                 _ => {}
@@ -141,6 +147,7 @@ pub fn send(
     let result = (|| -> Result<(), String> {
         let mut resampler = Resampler::new(rate);
         let mut epoch = 1u32;
+        let mut epoch_start_ns = None;
         let mut frame_index = 0u64;
         let mut partial = [[0.0; 2]; FRAMES];
         let mut used = 0;
@@ -152,8 +159,23 @@ pub fn send(
         let mut next_ping = 0;
         let mut last_reply = clock::now_ns();
         let mut last_input = clock::now_ns();
+        let mut last_timing = clock::now_ns();
+        let mut last_timing_counter = None;
+        let mut peer_age = 0;
+        let mut controller = DelayController::new();
+        let mut capture_age = RecentPeak::new();
+        let mut local_output = RecentPeak::new();
+        let mut network = RecentPeak::new();
+        network.observe(clock::now_ns(), filter.latest().map_or(0, |e| e.rtt));
         while !stats.stopped.load(Ordering::Acquire) {
             let now = clock::now_ns();
+            local_output.observe(
+                now,
+                stats
+                    .output_horizon_peak_ns
+                    .swap(0, Ordering::Relaxed)
+                    .max(stats.output_horizon_ns.load(Ordering::Relaxed)),
+            );
             if stats.device_clock_invalid.load(Ordering::Relaxed) {
                 return Err("The source output cannot provide a supported playback timestamp. Choose built-in or wired speakers.".into());
             }
@@ -178,6 +200,7 @@ pub fn send(
                                     return Err("Audio clock uncertainty grew beyond 5 ms. Reconnect on a more stable network.".into());
                                 }
                                 last_reply = now;
+                                network.observe(now, filter.latest().unwrap().rtt);
                                 stats.clock_rtt_ns.store(estimate.rtt, Ordering::Relaxed);
                                 transmit(
                                     &socket,
@@ -193,11 +216,29 @@ pub fn send(
                     Message::Resync => {
                         stats.resync_requested.store(true, Ordering::Release);
                     }
+                    Message::Timing {
+                        capture_age,
+                        output_horizon,
+                    } => {
+                        let counter = u64::from_be_bytes(raw[4..12].try_into().unwrap());
+                        if last_timing_counter.is_some_and(|last| counter <= last) {
+                            continue;
+                        }
+                        last_timing_counter = Some(counter);
+                        peer_age = capture_age;
+                        stats
+                            .peer_output_ns
+                            .store(output_horizon, Ordering::Relaxed);
+                        last_timing = now;
+                    }
                     _ => {}
                 }
             }
             if now - last_reply > 3_000 * MS {
                 return Err("Audio clock synchronization was lost. Start sharing again.".into());
+            }
+            if now - last_timing > 3_000 * MS {
+                return Err("Audio timing feedback was lost. Start sharing again.".into());
             }
             if now - last_input > 90_000 * MS {
                 return Err(
@@ -206,19 +247,13 @@ pub fn send(
             }
             if stats.resync_requested.swap(false, Ordering::AcqRel) {
                 epoch = epoch.checked_add(1).ok_or("Audio epoch exhausted.")?;
+                epoch_start_ns = None;
                 frame_index = 0;
                 used = 0;
                 resampler.clear();
                 expected_capture = None;
                 previous_input = None;
-                for _ in 0..24_000 {
-                    if input.pop().is_err() {
-                        break;
-                    }
-                }
                 stats.resyncs.fetch_add(1, Ordering::Relaxed);
-                let delay = (stats.delay_ns.load(Ordering::Relaxed) + 25 * MS).min(500 * MS);
-                stats.delay_ns.store(delay, Ordering::Relaxed);
             }
             for _ in 0..4096 {
                 let Ok(frame) = input.pop() else {
@@ -231,6 +266,7 @@ pub fn send(
                     (frame.time_ns - t - 1_000_000_000 / rate as i64).abs() > 2 * MS
                 }) {
                     epoch = epoch.checked_add(1).ok_or("Audio epoch exhausted.")?;
+                    epoch_start_ns = None;
                     frame_index = 0;
                     used = 0;
                     resampler.clear();
@@ -255,14 +291,36 @@ pub fn send(
                         continue;
                     }
                     used = 0;
+                    let measured_at = clock::now_ns();
+                    capture_age.observe(measured_at, measured_at.saturating_sub(capture_ns).max(0));
+                    let delay = controller.update(
+                        measured_at,
+                        capture_age.value(measured_at),
+                        local_output.value(measured_at),
+                        peer_age,
+                        stats.peer_output_ns.load(Ordering::Relaxed),
+                        network.value(measured_at),
+                        stats.clock_rtt_ns.load(Ordering::Relaxed) / 2,
+                    )?;
+                    let previous_delay = stats.delay_ns.swap(delay, Ordering::Relaxed);
+                    if previous_delay != 0 && previous_delay != delay {
+                        // One source-selected epoch changes both outputs at the
+                        // packet's future deadline. Shortening skips the same
+                        // queued interval on both; never independently drain.
+                        epoch = epoch.checked_add(1).ok_or("Audio epoch exhausted.")?;
+                        epoch_start_ns = None;
+                        frame_index = 0;
+                        stats.resyncs.fetch_add(1, Ordering::Relaxed);
+                    }
                     if expected_capture.is_some_and(|t| (capture_ns - t).abs() > 2 * MS) {
                         epoch = epoch.checked_add(1).ok_or("Audio epoch exhausted.")?;
+                        epoch_start_ns = None;
                         frame_index = 0;
                         stats.resyncs.fetch_add(1, Ordering::Relaxed);
                     }
                     expected_capture = Some(capture_ns + BLOCK_NS);
-                    let play_ns = capture_ns + stats.delay_ns.load(Ordering::Relaxed);
-                    if play_ns < clock::now_ns() + 20 * MS {
+                    let play_ns = capture_ns + delay;
+                    if play_ns < clock::now_ns() + stats.output_horizon_ns.load(Ordering::Relaxed) {
                         stats.resync_requested.store(true, Ordering::Release);
                         continue;
                     }
@@ -271,6 +329,7 @@ pub fn send(
                         frame: frame_index,
                         capture_ns,
                         play_ns,
+                        epoch_start_ns: *epoch_start_ns.get_or_insert(play_ns),
                         samples: partial,
                     };
                     transmit(&socket, &mut wire, &Message::Audio(Box::new(audio.clone())))?;
@@ -309,10 +368,19 @@ pub fn receive(
         let mut last_model = None;
         let mut last_model_counter = 0u64;
         let mut last_resync = 0;
-        let mut late_streak = 0;
         let mut epoch = 0;
+        let mut next_timing = 0;
+        let mut arrival_age = RecentPeak::new();
+        let mut output_horizon = RecentPeak::new();
         while !stats.stopped.load(Ordering::Acquire) {
             let now = clock::now_ns();
+            output_horizon.observe(
+                now,
+                stats
+                    .output_horizon_peak_ns
+                    .swap(0, Ordering::Relaxed)
+                    .max(stats.output_horizon_ns.load(Ordering::Relaxed)),
+            );
             if stats.device_clock_invalid.load(Ordering::Relaxed) {
                 return Err("This output cannot provide a supported playback timestamp. Choose built-in or wired speakers.".into());
             }
@@ -372,6 +440,12 @@ pub fn receive(
                         {
                             continue;
                         }
+                        arrival_age.observe(
+                            received,
+                            master_now
+                                .saturating_sub(audio.capture_ns)
+                                .clamp(0, super::latency::MAX_DELAY_NS),
+                        );
                         if audio.epoch > epoch {
                             if epoch != 0 {
                                 stats.resyncs.fetch_add(1, Ordering::Relaxed);
@@ -387,20 +461,32 @@ pub fn receive(
                         let lead = stats.output_lead_ns.load(Ordering::Relaxed);
                         if audio.play_ns + BLOCK_NS < master_now + lead {
                             stats.late_packets.fetch_add(1, Ordering::Relaxed);
-                            late_streak += 1;
                         } else {
-                            late_streak = 0;
                             if output.push(*audio).is_err() {
                                 stats.resync_requested.store(true, Ordering::Release);
                             }
                         }
-                        if late_streak >= 8 {
-                            stats.resync_requested.store(true, Ordering::Release);
-                            late_streak = 0;
-                        }
                     }
                     _ => {}
                 }
+            }
+            if source.is_some()
+                && stats.output_clock_ready.load(Ordering::Acquire)
+                && now >= next_timing
+            {
+                let horizon = output_horizon.value(now);
+                if horizon <= 0 || horizon > super::latency::MAX_DELAY_NS {
+                    return Err("The output cannot provide a supported audio timing budget. Choose built-in or wired speakers.".into());
+                }
+                transmit(
+                    &socket,
+                    &mut wire,
+                    &Message::Timing {
+                        capture_age: arrival_age.value(now),
+                        output_horizon: horizon,
+                    },
+                )?;
+                next_timing = now + 100 * MS;
             }
             if source.is_some() && now - last_clock > 3_000 * MS {
                 return Err("Audio clock synchronization was lost. Start sharing again.".into());
@@ -444,6 +530,9 @@ mod tests {
         receive_stats
             .output_clock_ready
             .store(true, Ordering::Release);
+        receive_stats
+            .output_horizon_ns
+            .store(10 * MS, Ordering::Relaxed);
         let worker_stats = receive_stats.clone();
         let key = "42".repeat(32);
         let (output, mut received) = rtrb::RingBuffer::new(128);
@@ -488,7 +577,8 @@ mod tests {
         assert_eq!(remote.frame, local.frame);
         assert_eq!(remote.play_ns, local.play_ns);
         assert_eq!(remote.capture_ns, local.capture_ns);
-        assert!(remote.play_ns - remote.capture_ns >= 150 * MS);
+        let original_delay = remote.play_ns - remote.capture_ns;
+        assert!((10 * MS..100 * MS).contains(&original_delay));
         assert!((remote.samples[0][0] - local.samples[0][0]).abs() < 0.0001);
 
         // A receiver scheduling discontinuity asks the source to choose a new
@@ -525,6 +615,42 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(1));
         }
+        // Authenticated receiver measurements must change the source's budget.
+        // Continue real-time capture while draining both packet queues.
+        receive_stats
+            .output_horizon_ns
+            .store(60 * MS, Ordering::Relaxed);
+        receive_stats
+            .output_horizon_peak_ns
+            .store(60 * MS, Ordering::Relaxed);
+        let mut local_schedule = std::collections::HashMap::new();
+        let mut remote_schedule = std::collections::HashMap::new();
+        let until = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < until {
+            let capture_ns = clock::now_ns() - 10 * MS;
+            for frame in 0..441 {
+                capture
+                    .push(CapturedFrame {
+                        samples: [0.1, -0.1],
+                        time_ns: capture_ns + frame * 1_000_000_000 / 44_100,
+                    })
+                    .unwrap();
+            }
+            while let Ok(packet) = local_audio.pop() {
+                local_schedule.insert(
+                    (packet.epoch, packet.frame),
+                    (packet.capture_ns, packet.play_ns, packet.epoch_start_ns),
+                );
+            }
+            while let Ok(packet) = received.pop() {
+                remote_schedule.insert(
+                    (packet.epoch, packet.frame),
+                    (packet.capture_ns, packet.play_ns, packet.epoch_start_ns),
+                );
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let measured_delay = stats.delay_ns.load(Ordering::Relaxed);
         stats.stopped.store(true, Ordering::Release);
         receive_stats.stopped.store(true, Ordering::Release);
         sender_thread.join().unwrap();
@@ -533,7 +659,22 @@ mod tests {
         let local_restart = local_restart.unwrap();
         assert_eq!(remote_restart.epoch, local_restart.epoch);
         assert_eq!(remote_restart.play_ns, local_restart.play_ns);
-        assert!(remote_restart.play_ns - remote_restart.capture_ns >= 175 * MS);
+        let restarted_delay = remote_restart.play_ns - remote_restart.capture_ns;
+        assert!(
+            restarted_delay <= original_delay + 5 * MS,
+            "A resync must not add an arbitrary 25 ms: {original_delay} -> {restarted_delay}"
+        );
+        assert!(
+            measured_delay >= 75 * MS,
+            "Receiver output lead was ignored: {measured_delay}"
+        );
+        assert!(
+            local_schedule
+                .iter()
+                .any(|(key, times)| times.1 - times.0 >= 75 * MS
+                    && remote_schedule.get(key) == Some(times)),
+            "Both outputs must receive identical deadlines and transitions after adaptation"
+        );
     }
 
     #[test]

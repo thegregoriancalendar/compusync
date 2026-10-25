@@ -3,6 +3,7 @@ mod channel;
 mod clock;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod device;
+mod latency;
 #[cfg(target_os = "macos")]
 mod mac_tap;
 mod packet;
@@ -60,6 +61,7 @@ pub struct AudioSnapshot {
     pub late_packets: f64,
     pub resyncs: f64,
     pub phase_error_ms: f64,
+    pub output_horizon_ms: f64,
     pub warning: Option<String>,
     pub error: Option<String>,
 }
@@ -80,6 +82,9 @@ pub struct Stats {
     pub resync_requested: AtomicBool,
     pub device_clock_invalid: AtomicBool,
     pub output_lead_ns: AtomicI64,
+    pub output_horizon_ns: AtomicI64,
+    pub output_horizon_peak_ns: AtomicI64,
+    pub peer_output_ns: AtomicI64,
     pub output_clock_ready: AtomicBool,
     pub warning: Mutex<Option<String>>,
     pub error: Mutex<Option<String>>,
@@ -98,7 +103,7 @@ impl Stats {
             clock_ready: AtomicBool::new(false),
             clock_offset_ns: AtomicI64::new(0),
             clock_rtt_ns: AtomicI64::new(0),
-            delay_ns: AtomicI64::new(150 * clock::MS),
+            delay_ns: AtomicI64::new(0),
             played: AtomicU64::new(0),
             late_packets: AtomicU64::new(0),
             resyncs: AtomicU64::new(0),
@@ -106,6 +111,9 @@ impl Stats {
             resync_requested: AtomicBool::new(false),
             device_clock_invalid: AtomicBool::new(false),
             output_lead_ns: AtomicI64::new(0),
+            output_horizon_ns: AtomicI64::new(0),
+            output_horizon_peak_ns: AtomicI64::new(0),
+            peer_output_ns: AtomicI64::new(0),
             output_clock_ready: AtomicBool::new(false),
             warning: Mutex::new(None),
             error: Mutex::new(None),
@@ -309,6 +317,7 @@ impl NativeAudio {
             late_packets: count(|s| &s.late_packets),
             resyncs: count(|s| &s.resyncs),
             phase_error_ms: ms(|s| &s.phase_error_ns),
+            output_horizon_ms: ms(|s| &s.output_horizon_ns),
             warning: stats.and_then(|s| s.warning.lock().clone()),
             error: stats.and_then(|s| s.error.lock().clone()),
         }

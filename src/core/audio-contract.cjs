@@ -1,6 +1,6 @@
 'use strict';
 
-const AUDIO_VERSION = 3;
+const AUDIO_VERSION = 4;
 const ROUTE_ID = /^[a-zA-Z0-9_-]{1,80}$/;
 const AUDIO_KEY = /^[a-f0-9]{64}$/;
 const validVolumeLevel = (level) => Number.isInteger(level) && level >= 0 && level <= 100;
