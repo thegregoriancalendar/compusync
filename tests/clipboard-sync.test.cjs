@@ -3,7 +3,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
-const { ClipboardSync, MAX_TEXT_BYTES, digestText, cleanTextMessage } = require('../src/main/clipboard-sync.cjs');
+const { ClipboardSync, MAX_TEXT_BYTES, MAX_IMAGE_BYTES, digestText, cleanTextMessage, cleanImageMessage } = require('../src/main/clipboard-sync.cjs');
+const { createHash } = require('node:crypto');
 
 class FakeSession extends EventEmitter {
   constructor(role) {
@@ -141,4 +142,68 @@ test('clipboard messages reject tampering, oversized text, and non-text clipboar
   await sync.poll();
   assert.deepEqual(session.sent, []);
   sync.stop();
+});
+
+// Pixel digest differs from wire bytes, like a real OS re-encoding the image.
+class FakeImages {
+  constructor() { this.bytes = null; this.writes = 0; }
+  async read() {
+    if (!this.bytes) return null;
+    const bytes = this.bytes;
+    return { digest: createHash('sha256').update('pixels:').update(bytes).digest('hex'),
+      encode: () => ({ mime: 'image/png', bytes }) };
+  }
+  async write(bytes) { this.bytes = Buffer.from(bytes); this.writes += 1; return (await this.read()).digest; }
+}
+
+test('screenshots copied on either side reach the other clipboard once, without echo', async () => {
+  const hostSession = new FakeSession('host');
+  const joinSession = new FakeSession('join');
+  hostSession.peer = joinSession;
+  joinSession.peer = hostSession;
+  const hostClipboard = new FakeClipboard('');
+  const joinClipboard = new FakeClipboard('');
+  const hostImages = new FakeImages();
+  const joinImages = new FakeImages();
+  const host = new ClipboardSync({ session: hostSession, clipboard: hostClipboard, images: hostImages, intervalMs: 100000 });
+  const join = new ClipboardSync({ session: joinSession, clipboard: joinClipboard, images: joinImages, intervalMs: 100000 });
+  host.start();
+  join.start();
+  await Promise.all([host.poll(), join.poll()]);
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+  joinImages.bytes = Buffer.from('windows screenshot');
+  await join.poll();
+  await settle();
+  assert.deepEqual(hostImages.bytes, Buffer.from('windows screenshot'));
+  assert.equal(joinImages.writes, 0);
+
+  hostImages.bytes = Buffer.from('mac screenshot');
+  await host.poll();
+  await settle();
+  assert.deepEqual(joinImages.bytes, Buffer.from('mac screenshot'));
+
+  const sent = hostSession.sent.length + joinSession.sent.length;
+  await Promise.all([host.poll(), join.poll()]);
+  await settle();
+  assert.equal(hostSession.sent.length + joinSession.sent.length, sent);
+
+  hostClipboard.text = 'text after image';
+  await host.poll();
+  await settle();
+  assert.equal(joinClipboard.text, 'text after image');
+  host.stop();
+  join.stop();
+});
+
+test('image messages reject tampered or oversized payloads', () => {
+  const bytes = Buffer.from('png');
+  const digest = createHash('sha256').update(bytes).digest('hex');
+  const valid = { type: 'clipboard.offer', kind: 'image', mime: 'image/png', digest, data: bytes.toString('base64') };
+  assert.ok(cleanImageMessage(valid, 'clipboard.offer'));
+  assert.equal(cleanImageMessage({ ...valid, data: Buffer.from('pnh').toString('base64') }, 'clipboard.offer'), null);
+  assert.equal(cleanImageMessage({ ...valid, mime: 'image/svg+xml' }, 'clipboard.offer'), null);
+  const big = Buffer.alloc(MAX_IMAGE_BYTES + 1);
+  assert.equal(cleanImageMessage({ ...valid, digest: createHash('sha256').update(big).digest('hex'), data: big.toString('base64') }, 'clipboard.offer'), null);
+  assert.equal(cleanTextMessage(valid, 'clipboard.offer'), null);
 });

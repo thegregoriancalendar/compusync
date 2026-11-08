@@ -13,7 +13,7 @@ Earlier completion reports, commit checkpoints, artifact names/checksums, and te
 | Windows Chrome | Existing-profile Tab Bridge extension, managed unpacked-extension setup, per-user native host registration, and named-pipe relay. No isolated-profile restart is required by this runtime. |
 | Mac Chrome | Apple Events/JXA plus Accessibility. First-run startup permission checks; optional JavaScript from Apple Events for scroll/draft state. No extension. |
 | Handoff | Native Chrome preparation/placement, bounded tab/history/page state, parked splits, reverse reuse, acknowledged commit, and recovery. Site sessions are not transferred. |
-| Clipboard | New plain text while connected, with a settings toggle; no image/file synchronization. |
+| Clipboard | New plain text and images (PNG, JPEG fallback when large) while connected, with a settings toggle; no file synchronization. |
 | Audio | Either supported computer can send, full/split stereo, independent device volumes, protocol-v3 shared scheduling, and route recovery. Mac capture needs recording permission; Windows sending needs standard VB-CABLE. |
 | Messages Companion | Windows UI, Mac read-only Messages/Contacts access, and Mac Messages Automation for sending. |
 | UI/lifecycle | Connection & settings, Latency Monitor, tray/menu, optional Messages window, transient seam overlay, second-instance activation, and background launch. |

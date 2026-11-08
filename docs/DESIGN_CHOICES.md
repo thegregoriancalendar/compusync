@@ -56,7 +56,7 @@ Chrome's optional **Allow JavaScript from Apple Events** setting enables the pag
 
 ## Clipboard, audio, and Messages
 
-Plain-text clipboard synchronization is enabled by default and can be disabled in settings. It sends new copied text while connected, not images/files or an initial offline backlog. Both computers' clipboard histories may retain received text. Structured clipboard logs record byte counts, not clipboard text.
+Clipboard synchronization (plain text and images) is enabled by default and can be disabled in settings. It sends newly copied text or images while connected, not files or an initial offline backlog. Text takes precedence when both are present. Images are checked once per second by hashing the clipboard's PNG bytes and sent as PNG, or JPEG when the PNG exceeds the ~3 MiB single-message budget. Both computers' clipboard histories may retain received text. Structured clipboard logs record byte counts, not clipboard text.
 
 Audio is a separate explicitly started route. Either supported computer can send to both outputs, with full stereo or layout-based split stereo, independent volume controls, and one direction at a time. Audio protocol v4 uses authenticated/encrypted UDP with fresh route keys and a shared presentation timeline; cursor linking is not required. Mac capture uses Core Audio taps on macOS 14.6+ with recording permission. Windows sending uses standard VB-CABLE and a recovery helper that restores prior output roles. Windows receiving does not require the driver. Disconnect, sleep, or failure stops sharing; reconnect does not resume capture. See [audio routing](audio-routing.md) for clocks, routing, and physical measurement limits.
 

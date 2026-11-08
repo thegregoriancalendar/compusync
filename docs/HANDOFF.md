@@ -6,7 +6,7 @@ Current behavior reviewed against the working source on October 20, 2026. This i
 
 CompuSync supports two Macs or a Mac and Windows 11 on the same local network. Windows-to-Windows pairing is rejected. Both computers run the app; neither a cloud account nor a relay is required.
 
-The active app provides native cursor/keyboard sharing, plain-text clipboard sharing, Chrome window handoff, bidirectional synchronized audio, and a Windows Messages Companion backed by the paired Mac. Connection & settings includes a separate Latency Monitor page. A transient, noninteractive overlay marks a Chrome straddle.
+The active app provides native cursor/keyboard sharing, text and image clipboard sharing, Chrome window handoff, bidirectional synchronized audio, and a Windows Messages Companion backed by the paired Mac. Connection & settings includes a separate Latency Monitor page. A transient, noninteractive overlay marks a Chrome straddle.
 
 The old shared surface, grid, mini desktop, workspace/file-transfer UI, and bundled editor are retired. Their source and unit tests remain for historical coverage, but the shipping entry point must not instantiate their windows or advertise them as current features. The optional Messages Companion window is part of the current product.
 

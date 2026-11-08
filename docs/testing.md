@@ -171,8 +171,8 @@ For every case, verify a surviving Chrome copy returns fully on-screen, overlays
 ## Plain-text clipboard and UI selection
 
 1. While connected, copy fresh plain text on each computer and paste it on the other, with cursor linking both on and off. Verify Unicode text and empty/oversized handling without repeated clipboard echo.
-2. Disable **Sync copied text between laptops** and verify new text stays local. Re-enable it and verify only new changes are shared. Reconnect after offline copying and verify the offline/current clipboard is not automatically pushed as a backlog.
-3. Copy an image or file and verify it does not become an advertised image/file-sync feature. Use disposable test text; received text can enter OS clipboard history. Logs should not contain the copied text.
+2. Disable **Sync copied text and images between laptops** and verify new text stays local. Re-enable it and verify only new changes are shared. Reconnect after offline copying and verify the offline/current clipboard is not automatically pushed as a backlog.
+3. Take a clipboard screenshot (Ctrl+Cmd+Shift+4 on Mac, Win+Shift+S or PrtScn on Windows) on each computer and paste it on the other; verify it is not echoed back repeatedly. Copy a file and verify it does not sync. Use disposable test text; received text can enter OS clipboard history. Logs should not contain the copied text.
 4. Drag-select text in settings and in Messages Companion. Leave it selected through periodic status/message/volume updates and verify the selection remains usable for copying. Repeat after selecting a different conversation and after reconnecting.
 
 ## Synchronized audio in either direction

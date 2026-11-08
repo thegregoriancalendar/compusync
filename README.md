@@ -7,7 +7,7 @@ Supported pairs: **Mac ↔ Mac** and **Mac ↔ Windows 11**. Windows-to-Windows 
 ## Features
 
 - **Shared mouse and keyboard:** move across the screen seam to control the other computer, with adjustable screen layout, acceleration, and edge resistance.
-- **Text clipboard sharing:** copy text on either computer and paste it on the other.
+- **Clipboard sharing:** copy text or images (including screenshots) on either computer and paste them on the other.
 - **Chrome window handoff:** drag supported Chrome windows between computers, preserving tabs, pinning, and supported history and page state.
 - **Synchronized audio:** share audio in either direction, play full stereo on both computers or split left/right channels, and adjust each computer's volume.
 - **Messages Companion:** read and send messages from Windows through your paired Mac, including contact names from the Mac.
@@ -115,7 +115,7 @@ Keep both apps running. A saved pair reconnects when both computers are availabl
 
 Keyboard sharing translates recognized shortcuts: common Ctrl shortcuts on Windows use Command on Mac, Home/End use Command+Left/Right, and Print Screen uses Shift+Command+3. Reverse equivalents work from Mac to Windows, including Command+Space for Start. Unrecognized shortcuts retain their modifiers, so Mac Control shortcuts and Windows Ctrl+Alt combinations remain available. Alt and Option share their physical key mapping.
 
-Move through the configured screen seam to transfer cursor and keyboard ownership. Either computer's mouse or trackpad can move the shared cursor. Clipboard sharing copies newly copied **plain text** while connected; images and files are not synced. You can disable it with **Sync copied text between laptops** in settings. Synced text can also appear in each operating system's clipboard history.
+Move through the configured screen seam to transfer cursor and keyboard ownership. Either computer's mouse or trackpad can move the shared cursor. Clipboard sharing copies newly copied **plain text** and **images** (such as clipboard screenshots) while connected; files are not synced. Images larger than about 3 MB as PNG are sent as JPEG, and are skipped if still too large. You can disable it with **Sync copied text and images between laptops** in settings. Synced text can also appear in each operating system's clipboard history.
 
 | Shortcut | Action |
 | --- | --- |

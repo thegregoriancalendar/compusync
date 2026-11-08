@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, clipboard, dialog, screen, safeStorage, shell, systemPreferences, globalShortcut, powerMonitor, session: electronSession } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, clipboard, dialog, screen, safeStorage, shell, systemPreferences, globalShortcut, powerMonitor, ClipboardItem, session: electronSession } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
@@ -11,7 +11,7 @@ const { pairWithCode } = require('./core/pairing.cjs');
 const { EDGES } = require('./core/state.cjs');
 const { cursorSettingsFromSaved, validateCursorSettings } = require('./core/cursor-preferences.cjs');
 const { SharedInputRuntime } = require('./main/runtime.cjs');
-const { ClipboardSync } = require('./main/clipboard-sync.cjs');
+const { ClipboardSync, createElectronImageAdapter } = require('./main/clipboard-sync.cjs');
 const { LogSync } = require('./main/log-sync.cjs');
 const { AudioRouter } = require('./main/audio-router.cjs');
 const { RustAudioEngine } = require('./main/audio-engine.cjs');
@@ -490,7 +490,8 @@ async function startSession() {
   audioRouter.on('state', refreshStatus);
   audioRouter.start();
   clipboardSync = new ClipboardSync({
-    session: sync, clipboard, role: config.role, enabled: config.clipboardSync,
+    session: sync, clipboard, images: createElectronImageAdapter(clipboard, nativeImage, ClipboardItem),
+    role: config.role, enabled: config.clipboardSync,
     logger: applicationLogger,
   });
   clipboardSync.start();
