@@ -150,8 +150,21 @@
 
     <section class="card">
       <h2>Clipboard</h2>
-      <label class="check"><input id="clipboard-sync" type="checkbox"> Sync copied text and images between laptops</label>
-      <p class="small">New text copied while connected becomes the current clipboard on both laptops and can appear in Windows or Spotlight clipboard history. Copied images and screenshots are synced too; files are not.</p>
+      <label class="check"><input id="clipboard-sync" type="checkbox"> Sync copied text, images, and files between laptops</label>
+      <p class="small">New text copied while connected becomes the current clipboard on both laptops and can appear in Windows or Spotlight clipboard history. Copied images, screenshots, files, and folders are synced too. Copied files (up to 1 GB) are sent in the background and can be pasted in Finder or File Explorer once they arrive.</p>
+    </section>
+
+    <section class="card">
+      <h2>File drag</h2>
+      <label class="check"><input id="file-drag" type="checkbox"> Drag files and folders between laptops</label>
+      <p class="small">Drag from Finder or File Explorer across the screen edge and let go on the other laptop. Files go into the folder window or desktop under the pointer, or Downloads when that is unclear. Existing files are never replaced.</p>
+      <div id="file-transfer" hidden>
+        <p id="file-transfer-status" aria-live="polite"></p>
+        <progress id="file-transfer-progress" max="1" value="0"></progress>
+        <div class="row cursor-actions">
+          <button id="file-transfer-cancel" type="button">Cancel transfer</button>
+        </div>
+      </div>
     </section>
 
     <section class="card">

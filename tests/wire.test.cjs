@@ -61,3 +61,23 @@ test('bulk data uses distinct keys from control and enforces its configured wire
   assert.deepEqual(limitedPeer.open(limited.seal({ ok: true })), { ok: true });
   assert.throws(() => createChannel(secret, salt, true, { context: 'UPPERCASE' }), /options/);
 });
+
+test('binary frames carry raw bytes, share the packet sequence, and reject tampering or replay', () => {
+  const secret = newSecret(), salt = newSecret();
+  const options = { context: 'data', maxMessage: 8 * 1024 * 1024 };
+  const host = createChannel(secret, salt, true, options), peer = createChannel(secret, salt, false, options);
+  const payload = Buffer.from('private file bytes');
+  const frame = host.sealFrame({ type: 'file.frame', offset: 0 }, payload);
+  assert.equal(frame.includes(payload), false);
+  const opened = peer.openFrame(frame);
+  assert.deepEqual(opened.header, { type: 'file.frame', offset: 0 });
+  assert.deepEqual(opened.payload, payload);
+  // JSON packets and frames interleave on one strict counter.
+  assert.deepEqual(peer.open(host.seal({ type: 'file.end' })), { type: 'file.end' });
+  assert.throws(() => peer.openFrame(frame), /sequence/);
+  const next = host.sealFrame({ type: 'file.frame', offset: 18 }, payload);
+  const tampered = Buffer.from(next); tampered[tampered.length - 1] ^= 1;
+  assert.throws(() => peer.openFrame(tampered));
+  assert.deepEqual(peer.openFrame(next).header, { type: 'file.frame', offset: 18 });
+  assert.throws(() => host.sealFrame({ type: 'too-big' }, Buffer.alloc(8 * 1024 * 1024)), /too large/);
+});

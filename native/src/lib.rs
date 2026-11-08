@@ -172,6 +172,38 @@ pub struct WindowInfo {
     pub fullscreen: bool,
 }
 
+/// One on-screen window from the macOS window-server list, front to back.
+/// Used to decide which Finder window (or the Desktop) is under a drop point.
+#[napi(object)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ScreenWindow {
+    /// CGWindowID as a decimal string.
+    pub id: String,
+    pub pid: u32,
+    pub owner_name: String,
+    pub layer: i32,
+    pub bounds: Rect,
+}
+
+pub struct FolderAtPointTask {
+    point: Point,
+}
+
+impl Task for FolderAtPointTask {
+    type Output = Option<String>;
+    type JsValue = Option<String>;
+
+    // Shell (COM) lookups can block on another process; run them on the libuv
+    // pool so the cursor loop on the JS thread never stalls.
+    fn compute(&mut self) -> Result<Self::Output> {
+        platform::folder_at_point(self.point).map_err(napi_error)
+    }
+
+    fn resolve(&mut self, _: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
 #[napi(object)]
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -724,6 +756,68 @@ impl NativeSubstrate {
     #[napi]
     pub fn enumerate_windows(&self) -> Result<Vec<WindowInfo>> {
         self.inner.platform.lock().windows().map_err(napi_error)
+    }
+
+    /// Counter that advances when a new OS drag carrying data becomes
+    /// observable (macOS: drag pasteboard changeCount; Windows: DragEnter
+    /// count on the capture strip). Compare against a value sampled at
+    /// button-down to know whether `dragFiles` describes the current press.
+    #[napi]
+    pub fn drag_generation(&self) -> f64 {
+        platform::drag_generation()
+    }
+
+    /// Absolute file-system paths carried by the latest OS drag. Empty when
+    /// the drag carries no real files.
+    #[napi]
+    pub fn drag_files(&self) -> Result<Vec<String>> {
+        platform::drag_files().map_err(napi_error)
+    }
+
+    /// Windows only: show the invisible drop-target strip at `region`
+    /// (platform pixels), or hide it with `null`. No-op elsewhere.
+    #[napi]
+    pub fn set_drag_capture_region(&self, region: Option<Rect>) -> Result<()> {
+        let region = region
+            .map(|rect| rect.validate().map_err(napi_error))
+            .transpose()?;
+        platform::set_drag_capture_region(region).map_err(napi_error)
+    }
+
+    /// Windows only: the Explorer folder or Desktop under a platform point,
+    /// or null when that is not a real file-system folder.
+    #[napi(ts_return_type = "Promise<string | null>")]
+    pub fn folder_at_point(&self, point: Point) -> AsyncTask<FolderAtPointTask> {
+        AsyncTask::new(FolderAtPointTask { point })
+    }
+
+    /// macOS only: on-screen windows containing a platform point, front to back.
+    #[napi]
+    pub fn windows_at_point(&self, point: Point) -> Result<Vec<ScreenWindow>> {
+        platform::windows_at_point(point).map_err(napi_error)
+    }
+
+    /// Changes whenever the OS clipboard changes (macOS changeCount, Windows
+    /// clipboard sequence number).
+    #[napi]
+    pub fn clipboard_generation(&self) -> f64 {
+        platform::clipboard_generation()
+    }
+
+    /// Absolute paths of files/folders on the clipboard; empty when it holds
+    /// something else.
+    #[napi]
+    pub fn clipboard_files(&self) -> Result<Vec<String>> {
+        platform::clipboard_files().map_err(napi_error)
+    }
+
+    /// Replace the clipboard with these files so Finder/Explorer can paste them.
+    #[napi]
+    pub fn set_clipboard_files(&self, paths: Vec<String>) -> Result<()> {
+        if paths.is_empty() || paths.len() > 10_000 {
+            return Err(napi_error("clipboard file list must hold 1 to 10000 paths"));
+        }
+        platform::set_clipboard_files(&paths).map_err(napi_error)
     }
 
     #[napi]

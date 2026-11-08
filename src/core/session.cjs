@@ -16,6 +16,9 @@ const CONTROL_WIRE_MAX = 65536;
 const DATA_PLAINTEXT_MAX = 5 * 1024 * 1024;
 const DATA_WIRE_MAX = 8 * 1024 * 1024;
 const DATA_BACKPRESSURE_MAX = 8 * 1024 * 1024;
+// Bulk producers (file transfer) wait for the data socket to fall back to
+// this level, leaving DATA_BACKPRESSURE_MAX headroom for other data traffic.
+const DATA_DRAIN_TARGET = 2 * 1024 * 1024;
 const PEER_PLAINTEXT_MAX = 4 * 1024 * 1024;
 const PEER_CONTROL_CHANNEL_MAX = 48 * 1024;
 const PEER_LOSSY_BACKPRESSURE_MAX = 16 * 1024;
@@ -136,6 +139,7 @@ class Session extends EventEmitter {
     this.dataPhase = 'disconnected';
     this.dataRetryDelay = 250;
     this.dataToken = null;
+    this.drainWaiters = [];
   }
 
   status() {
@@ -221,7 +225,7 @@ class Session extends EventEmitter {
     let messages = 0;
     const timeout = setTimeout(() => socket.terminate(), 5000);
     socket.send(JSON.stringify({ type: 'challenge', version: PROTOCOL_VERSION, salt }));
-    socket.on('message', async (raw) => {
+    socket.on('message', async (raw, isBinary) => {
       try {
         if (deriving || mode === 'done') throw new Error('Unexpected message.');
         if (Date.now() - rateStart > 1000) { rateStart = Date.now(); messages = 0; }
@@ -254,6 +258,12 @@ class Session extends EventEmitter {
               ? { context: 'data', maxMessage: DATA_WIRE_MAX }
               : undefined);
           }
+          return;
+        }
+        if (isBinary) {
+          // Binary frames exist only on an authenticated, bound data socket.
+          if (mode !== 'data' || !dataMemberId) throw new Error('Unexpected binary message.');
+          this.receiveDataFrame(channel, raw, dataMemberId);
           return;
         }
         const message = channel.open(raw);
@@ -342,6 +352,7 @@ class Session extends EventEmitter {
           connection.dataChannel = null;
           this.setDataStatus('disconnected', '', dataMemberId);
         }
+        this.settleDrains();
         return;
       }
       if (!member || this.connections.get(member.id)?.socket !== socket) return;
@@ -475,7 +486,7 @@ class Session extends EventEmitter {
     let channel;
     let authenticated = false;
     const timer = setTimeout(() => socket.terminate(), 6000);
-    socket.on('message', (raw) => {
+    socket.on('message', (raw, isBinary) => {
       try {
         if (!channel) {
           if (raw.length > CONTROL_WIRE_MAX) throw new Error('Handshake too large.');
@@ -485,6 +496,11 @@ class Session extends EventEmitter {
           channel = createChannel(this.config.secret, handshakeSalt(challenge.salt, peerSalt), false, { context: 'data', maxMessage: DATA_WIRE_MAX });
           socket.send(JSON.stringify({ type: 'key', purpose: 'data', salt: peerSalt }));
           socket.send(channel.seal({ type: 'data-hello', memberId: this.self.id, token }));
+          return;
+        }
+        if (isBinary) {
+          if (!authenticated) throw new Error('Unexpected binary message.');
+          this.receiveDataFrame(channel, raw, this.members.find((member) => member.id !== this.self.id)?.id || null);
           return;
         }
         const packet = channel.open(raw);
@@ -513,6 +529,7 @@ class Session extends EventEmitter {
     socket.on('error', () => {});
     socket.on('close', () => {
       clearTimeout(timer);
+      this.settleDrains();
       if (this.dataSocket !== socket) return;
       this.dataSocket = null;
       this.dataChannel = null;
@@ -533,27 +550,74 @@ class Session extends EventEmitter {
     return typeof address === 'string' ? address.replace(/^::ffff:/, '') : null;
   }
 
+  dataEndpoint() {
+    if (this.config.role === 'host') {
+      const connection = this.connections.values().next().value;
+      return { socket: connection?.dataSocket, channel: connection?.dataChannel };
+    }
+    return { socket: this.dataSocket, channel: this.dataChannel };
+  }
+
   sendData(message) {
     if (this.stopped) return false;
     const clean = sanitizeDataMessage(message);
     if (!clean) return false;
-    let socket, channel;
-    if (this.config.role === 'host') {
-      const connection = this.connections.values().next().value;
-      socket = connection?.dataSocket;
-      channel = connection?.dataChannel;
-    } else {
-      socket = this.dataSocket;
-      channel = this.dataChannel;
-    }
+    const { socket, channel } = this.dataEndpoint();
     if (!socket || !channel || socket.readyState !== WebSocket.OPEN
       || socket.bufferedAmount > DATA_BACKPRESSURE_MAX) return false;
     try {
-      socket.send(channel.seal({ type: 'data-message', message: clean }));
+      socket.send(channel.seal({ type: 'data-message', message: clean }), () => this.settleDrains());
       return true;
     } catch {
       return false;
     }
+  }
+
+  // Bulk bytes ride the data socket as binary frames: a JSON header plus a raw
+  // payload, emitted on the peer as 'data-frame' (header, payload, memberId).
+  // Returns false without sending when the socket is unavailable or over its
+  // backpressure limit; callers wait with dataDrained() and retry.
+  sendDataFrame(header, payload) {
+    if (this.stopped || !Buffer.isBuffer(payload)) return false;
+    const clean = sanitizeDataMessage(header);
+    if (!clean) return false;
+    const { socket, channel } = this.dataEndpoint();
+    if (!socket || !channel || socket.readyState !== WebSocket.OPEN
+      || socket.bufferedAmount > DATA_BACKPRESSURE_MAX) return false;
+    let frame;
+    try { frame = channel.sealFrame(clean, payload); } catch { return false; }
+    try {
+      socket.send(frame, { binary: true }, () => this.settleDrains());
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // Resolves true once the current data socket's queue is at or below `limit`
+  // bytes, false if that socket closes (or none is open) first.
+  dataDrained(limit = DATA_DRAIN_TARGET) {
+    const { socket, channel } = this.dataEndpoint();
+    if (this.stopped || !socket || !channel || socket.readyState !== WebSocket.OPEN) return Promise.resolve(false);
+    if (socket.bufferedAmount <= limit) return Promise.resolve(true);
+    return new Promise((resolve) => this.drainWaiters.push({ socket, limit, resolve }));
+  }
+
+  settleDrains() {
+    if (!this.drainWaiters.length) return;
+    this.drainWaiters = this.drainWaiters.filter((waiter) => {
+      if (this.stopped || waiter.socket.readyState !== WebSocket.OPEN) waiter.resolve(false);
+      else if (waiter.socket.bufferedAmount <= waiter.limit) waiter.resolve(true);
+      else return true;
+      return false;
+    });
+  }
+
+  receiveDataFrame(channel, raw, memberId) {
+    const { header, payload } = channel.openFrame(raw);
+    const clean = sanitizeDataMessage(header);
+    if (!clean) throw new Error('Invalid data frame.');
+    this.emit('data-frame', clean, payload, memberId);
   }
 
   // V3 cursor/window traffic rides the already-authenticated control channel.
@@ -663,6 +727,7 @@ class Session extends EventEmitter {
       await new Promise((resolve) => this.server.close(resolve));
     }
     this.connections.clear();
+    this.settleDrains();
     this.removeAllListeners();
   }
 }
@@ -675,6 +740,7 @@ module.exports = {
   DATA_PLAINTEXT_MAX,
   DATA_WIRE_MAX,
   DATA_BACKPRESSURE_MAX,
+  DATA_DRAIN_TARGET,
   PEER_PLAINTEXT_MAX,
   PEER_CONTROL_CHANNEL_MAX,
   PEER_LOSSY_BACKPRESSURE_MAX,

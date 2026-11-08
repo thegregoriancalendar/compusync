@@ -99,6 +99,24 @@ class CursorController extends EventEmitter {
     this.syntheticButtons = 0;
     this.modifiers = 0;
     this.failureRaised = false;
+    this.handoffHooks = {};
+  }
+
+  // File drag needs two synchronous points in an edge crossing with the left
+  // button held: `holdCrossing()` may keep the pointer at the edge briefly
+  // (Windows learns about an OLE drag only once it hovers its drop strip),
+  // and `beforeHandoff()` runs before this machine releases injected holds,
+  // so it can capture and cancel the local OS drag. Returning true marks the
+  // handoff as managed: the destination must not inject the left button.
+  setHandoffHooks(hooks = {}) {
+    this.handoffHooks = {
+      holdCrossing: typeof hooks.holdCrossing === 'function' ? hooks.holdCrossing : null,
+      beforeHandoff: typeof hooks.beforeHandoff === 'function' ? hooks.beforeHandoff : null,
+    };
+  }
+
+  #hook(name, details) {
+    try { return this.handoffHooks[name]?.(details) === true; } catch { return false; }
   }
 
   #normalizePlacements(values) {
@@ -262,7 +280,9 @@ class CursorController extends EventEmitter {
       else this.syntheticButtons &= ~bit;
     }
     if (!this.linked) return false;
-    return this.#sendPeer({ type: 'cursor.button', button, down, ...(clickCount === undefined ? {} : { clickCount }) }, true);
+    const sent = this.#sendPeer({ type: 'cursor.button', button, down, ...(clickCount === undefined ? {} : { clickCount }) }, true);
+    this.emit('button', { button, down, source: 'local' });
+    return sent;
   }
 
   receive(message, peerMachineId = null) {
@@ -298,12 +318,11 @@ class CursorController extends EventEmitter {
         // Snap. Preserve logical state but leave that button native-free.
         if (this.dragging && this.dragRole !== 'source' && message.button === 'left') {
           this.syntheticButtons &= ~bit;
-          return true;
-        }
-        if (!wasDown && isDown && !this.#synthesizeButton(message.button, bit, true, message.clickCount)) return false;
+        } else if (!wasDown && isDown && !this.#synthesizeButton(message.button, bit, true, message.clickCount)) return false;
         else if (wasDown && !isDown && !this.#synthesizeButton(message.button, bit, false, message.clickCount)) return false;
         else if (this.localButtons & bit) this.syntheticButtons &= ~bit;
       }
+      this.emit('button', { button: message.button, down: message.down, source: 'remote' });
       return true;
     }
     return false;
@@ -430,6 +449,13 @@ class CursorController extends EventEmitter {
     const key = `${crossing.edge}:${crossing.placement.machineId}`;
     if (this.edgePressure?.key !== key) this.edgePressure = { key, amount: 0 };
     this.edgePressure.amount += pressure;
+    const held = (this.localButtons | this.remoteButtons) & BUTTON_BITS.left;
+    if (held && !this.dragging && this.#hook('holdCrossing', { edge: crossing.edge, target: crossing.placement.machineId })) {
+      this.edgePressure = null;
+      this.virtualCursor = clampToPlacement(candidate, owner);
+      this.#nativeCall('warpCursor', toLocal(this.virtualCursor, owner));
+      return;
+    }
     const resistance = this.dragging ? 0 : this.config.edgeResistanceVU;
     if (this.edgePressure.amount < resistance) {
       this.virtualCursor = clampToPlacement(candidate, owner);
@@ -447,13 +473,15 @@ class CursorController extends EventEmitter {
 
   #handoff(target, position, reason) {
     const buttons = this.localButtons | this.remoteButtons;
+    const managedDrag = this.dragging || Boolean(buttons & BUTTON_BITS.left
+      && this.#hook('beforeHandoff', { reason, target: target.machineId, buttons }));
     if (!this.#sendPeer({
       type: 'cursor.handoff',
       x: position.x,
       y: position.y,
       buttons,
       modifiers: this.modifiers,
-      managedDrag: this.dragging,
+      managedDrag,
     }, true)) return false;
     this.virtualCursor = position;
     this.ownerMachineId = target.machineId;
@@ -526,6 +554,7 @@ class CursorController extends EventEmitter {
       virtualCursor: { ...this.virtualCursor },
       buttons: message.buttons,
       modifiers: message.modifiers,
+      managedDrag: message.managedDrag === true,
     });
     return true;
   }

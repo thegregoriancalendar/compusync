@@ -171,9 +171,21 @@ For every case, verify a surviving Chrome copy returns fully on-screen, overlays
 ## Plain-text clipboard and UI selection
 
 1. While connected, copy fresh plain text on each computer and paste it on the other, with cursor linking both on and off. Verify Unicode text and empty/oversized handling without repeated clipboard echo.
-2. Disable **Sync copied text and images between laptops** and verify new text stays local. Re-enable it and verify only new changes are shared. Reconnect after offline copying and verify the offline/current clipboard is not automatically pushed as a backlog.
-3. Take a clipboard screenshot (Ctrl+Cmd+Shift+4 on Mac, Win+Shift+S or PrtScn on Windows) on each computer and paste it on the other; verify it is not echoed back repeatedly. Copy a file and verify it does not sync. Use disposable test text; received text can enter OS clipboard history. Logs should not contain the copied text.
+2. Disable **Sync copied text, images, and files between laptops** and verify new text and copied files stay local. Re-enable it and verify only new changes are shared. Reconnect after offline copying and verify the offline/current clipboard is not automatically pushed as a backlog.
+3. Take a clipboard screenshot (Ctrl+Cmd+Shift+4 on Mac, Win+Shift+S or PrtScn on Windows) on each computer and paste it on the other; verify it is not echoed back repeatedly. Use disposable test text; received text can enter OS clipboard history. Logs should not contain the copied text.
 4. Drag-select text in settings and in Messages Companion. Leave it selected through periodic status/message/volume updates and verify the selection remains usable for copying. Repeat after selecting a different conversation and after reconnecting.
+5. Copy a file, several files, and a folder with nested content in Finder/File Explorer on each computer; once progress finishes, paste on the other computer into a folder and the desktop and verify contents and names. Copy text while a large file copy is in flight and verify the other computer ends with that text and no leftover cache folder under CompuSync's user data `clipboard-files`. Copy more than 1 GB and verify a notice suggests dragging instead.
+
+## File drag
+
+Run in both directions on Mac-to-Mac and Mac-to-Windows, once with the mouse attached to the source computer and once with the mouse on the receiving computer.
+
+1. Drag one file from Finder/File Explorer across the seam and release over an open folder window on the other computer; verify it lands in that folder, the original is unchanged on the source, and the source shows no drop or move at the seam. Repeat releasing over the desktop and over a non-folder window (it must land in Downloads).
+2. Drag several items including a nested folder with an empty subfolder and a >1 GB file; watch progress in the tray menu and settings, then click the completion notification and verify it reveals the received item.
+3. Drop an item whose name already exists in the target; verify the existing one is untouched and the new copy is `name (1)`. From a Mac, send a name with `:` or `?` to Windows and verify it is stored with `_`.
+4. Cancel mid-transfer from the tray on each side, and separately disconnect the network; verify no `.compusync-*.part` files and no partially written folder remain.
+5. Carry a file drag across and back before releasing; verify nothing is transferred and the source app is not left in a stuck drag. Hold a text selection across the seam on Windows and verify only a brief pause at the edge.
+6. Turn off **Drag files and folders between laptops** on the receiver and verify a drag is refused with a notice on the sender. On the Mac receiver, record whether Automation → Finder was granted; without it, drops over Finder windows must go to Downloads.
 
 ## Synchronized audio in either direction
 

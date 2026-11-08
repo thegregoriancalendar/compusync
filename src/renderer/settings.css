@@ -116,3 +116,6 @@ summary { color: #536b92; cursor: pointer; margin-bottom: 8px; }
   main { padding: 20px; }
   .control-grid { grid-template-columns: 1fr; }
 }
+#file-transfer { margin-top: 12px; }
+#file-transfer p { margin: 0 0 6px; }
+#file-transfer progress { width: 100%; }

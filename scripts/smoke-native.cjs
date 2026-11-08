@@ -28,19 +28,30 @@ if (resourcesPath) {
 }
 
 const { createNativeAdapter, loadBinding } = require('../native/index.cjs');
+const { AUDIO_VERSION } = require('../src/core/audio-contract.cjs');
 const loaded = loadBinding();
 assert.ok(loaded.binding, loaded.failures.map((failure) => failure.message).join('\n'));
 assert.equal(path.resolve(loaded.path), artifactPath);
 assert.equal(typeof loaded.binding.NativeSubstrate, 'function');
 assert.equal(typeof loaded.binding.NativeAudio, 'function', 'rebuild the native addon for audio routing');
 const audio = new loaded.binding.NativeAudio();
-assert.equal(audio.protocolVersion(), 3, 'rebuild the native addon for synchronized audio');
+assert.equal(audio.protocolVersion(), AUDIO_VERSION, 'rebuild the native addon for synchronized audio');
 assert.equal(audio.status().running, false);
 assert.equal(typeof audio.startReceiver, 'function');
 assert.equal(typeof audio.startSender, 'function');
 audio.stop();
 const adapter = createNativeAdapter({ required: true });
 assert.equal(path.resolve(adapter.guardPath), guardPath);
+// File drag between computers: process-level drag and shell queries.
+const substrate = adapter.substrate;
+assert.ok(Number.isFinite(substrate.dragGeneration()), 'rebuild the native addon for file drag');
+assert.ok(Array.isArray(substrate.dragFiles()));
+assert.ok(Array.isArray(substrate.windowsAtPoint({ x: 0, y: 0 })));
+assert.equal(typeof substrate.folderAtPoint, 'function');
+assert.equal(typeof substrate.setDragCaptureRegion, 'function');
+assert.ok(adapter.clipboardFilesAvailable(), 'rebuild the native addon for file clipboard');
+assert.ok(Number.isFinite(adapter.clipboardGeneration()));
+assert.ok(Array.isArray(adapter.clipboardFiles()));
 
 if (electronChild) {
   assert.ok(process.versions.electron, 'smoke child must run with Electron');

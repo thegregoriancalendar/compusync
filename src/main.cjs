@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, clipboard, dialog, screen, safeStorage, shell, systemPreferences, globalShortcut, powerMonitor, ClipboardItem, session: electronSession } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, Tray, Notification, nativeImage, clipboard, dialog, screen, safeStorage, shell, systemPreferences, globalShortcut, powerMonitor, ClipboardItem, session: electronSession } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
@@ -13,6 +13,10 @@ const { cursorSettingsFromSaved, validateCursorSettings } = require('./core/curs
 const { SharedInputRuntime } = require('./main/runtime.cjs');
 const { ClipboardSync, createElectronImageAdapter } = require('./main/clipboard-sync.cjs');
 const { LogSync } = require('./main/log-sync.cjs');
+const { FileTransfer } = require('./core/file-transfer.cjs');
+const { FileDrag } = require('./main/file-drag.cjs');
+const { ClipboardFiles } = require('./main/clipboard-files.cjs');
+const { resolveDropFolder } = require('./main/drop-folder.cjs');
 const { AudioRouter } = require('./main/audio-router.cjs');
 const { RustAudioEngine } = require('./main/audio-engine.cjs');
 const { WindowHandoffRuntime } = require('./main/window-runtime.cjs');
@@ -39,6 +43,7 @@ if (!hasLock) app.quit();
 let settings, messagesWindow, tray, sync, inputRuntime, windowRuntime, clipboardSync, messagesService, seamOverlay, nativeInput, updateService, config;
 let audioRouter;
 let logSync;
+let fileTransfer, fileDrag, clipboardFiles;
 let quitting = false;
 let changingSession = false;
 let backgroundLaunch = false;
@@ -60,7 +65,8 @@ const applicationLogger = {
       tabCount: Number.isSafeInteger(details?.tabCount) ? details.tabCount : 0,
     } : details;
     const scope = String(event).startsWith('cursor.') ? 'cursor-link'
-      : String(event).startsWith('clipboard.') ? 'clipboard-sync' : 'window-handoff';
+      : String(event).startsWith('clipboard.') ? 'clipboard-sync'
+        : String(event).startsWith('file.') ? 'file-drag' : 'window-handoff';
     console.info(JSON.stringify({ scope, event, ...safe }));
   },
   warn(event, details) { this.info(event, details); },
@@ -91,6 +97,7 @@ function readConfig() {
     chromeExtensionSetupPrompted: Boolean(saved.chromeExtensionSetupPrompted),
     macPermissionsPromptedV3: Boolean(saved.macPermissionsPromptedV3),
     clipboardSync: saved.clipboardSync !== false,
+    fileDrag: saved.fileDrag !== false,
     audioSourceId: typeof saved.audioSourceId === 'string' && saved.audioSourceId.length <= 256 ? saved.audioSourceId : '',
     audioOutputId: typeof saved.audioOutputId === 'string' && saved.audioOutputId.length <= 256 ? saved.audioOutputId : '',
     audioPlaybackMode: saved.audioPlaybackMode === 'split-stereo' ? 'split-stereo' : 'stereo',
@@ -179,6 +186,8 @@ function details() {
     id: config.id, name: config.name, platform: process.platform, edge: config.edge, autoLaunch: config.autoLaunch,
     members: sync?.members || [],
     clipboardSync: config.clipboardSync,
+    fileDrag: config.fileDrag,
+    fileTransfer: fileTransfer?.state() || null,
     mouseLatency: inputRuntime?.latency.state() || null,
     audio: audioRouter?.state() || null,
     cursorSettings: {
@@ -312,6 +321,7 @@ function menuTemplate() {
       click: () => inputRuntime?.setLinked(!inputRuntime.cursor.linked, 'menu'),
     },
     { label: 'Move cursor to other laptop', enabled: Boolean(cursorReady && inputRuntime?.cursor.linked), click: () => inputRuntime?.cursor.toggleOwnership() },
+    ...fileTransferMenuItems(),
     ...(messagesUiAllowed() ? [
       { type: 'separator' },
       { label: 'Messages Companion…', enabled: sync?.phase === 'connected', click: showMessages },
@@ -431,6 +441,7 @@ function ensureInputRuntime() {
       logger: applicationLogger,
     });
     windowRuntime.start();
+    fileDrag?.attach(inputRuntime.cursor);
     lastInputRuntimeError = null;
     notices.delete('input-runtime-error');
   } catch (error) {
@@ -450,12 +461,138 @@ function ensureInputRuntime() {
 }
 
 function stopInputRuntime(reason = 'session-stop') {
+  fileDrag?.detach();
   const windows = windowRuntime;
   windowRuntime = null;
   void windows?.stop(reason);
   const runtime = inputRuntime;
   inputRuntime = null;
   runtime?.stop(reason);
+}
+
+const FILE_TRANSFER_FAILURES = Object.freeze({
+  cancelled: 'The file transfer was cancelled.',
+  disconnected: 'The laptops disconnected before the files finished.',
+  stalled: 'The file transfer stopped making progress.',
+  'hash-mismatch': 'A file arrived damaged and was discarded.',
+  'source-missing': 'A dragged file could not be read.',
+  'source-changed': 'A dragged file changed while it was being sent.',
+  io: 'The files could not be written.',
+  invalid: 'The other laptop sent an invalid file list.',
+  'too-many': 'That drag contains too many files.',
+  busy: 'The other laptop is already transferring files.',
+  disabled: 'File drag is turned off on the other laptop.',
+  unavailable: 'The other laptop could not save the files.',
+});
+// Receiver-side refusals of offers that never belonged to a drop.
+const QUIET_RECEIVE_FAILURES = new Set(['unexpected', 'disabled', 'returned', 'no-offer', 'replaced', 'detached', 'expired', 'rejected']);
+const notifications = new Set();
+let fileTransferMenuTimer = null;
+
+function notify(title, body, reveal) {
+  if (!Notification.isSupported()) {
+    if (reveal) shell.showItemInFolder(reveal);
+    return;
+  }
+  // Keep a reference until dismissed so the click handler is not collected.
+  const notification = new Notification({ title, body });
+  notifications.add(notification);
+  notification.on('close', () => notifications.delete(notification));
+  notification.on('click', () => {
+    notifications.delete(notification);
+    if (reveal) shell.showItemInFolder(reveal);
+  });
+  notification.show();
+}
+
+function fileTransferLabel(state) {
+  const items = state.count === 1 ? `“${state.names[0] || 'file'}”` : `${state.count} items`;
+  const percent = state.totalBytes ? ` · ${Math.floor((100 * state.bytes) / state.totalBytes)}%` : '';
+  const verb = state.purpose === 'clipboard'
+    ? (state.direction === 'send' ? 'Copying' : 'Receiving copied')
+    : (state.direction === 'send' ? 'Sending' : 'Receiving');
+  return `${verb} ${items}${percent}`;
+}
+
+const clipboardCacheRoot = () => path.join(app.getPath('userData'), 'clipboard-files');
+// Clipboard copies stay quiet unless something actually went wrong.
+const CLIPBOARD_FAILURES_TO_REPORT = new Set(['hash-mismatch', 'io', 'stalled', 'source-changed', 'source-missing', 'invalid']);
+const CLIPBOARD_READY_NOTICE_BYTES = 50 * 1024 * 1024;
+
+function fileTransferMenuItems() {
+  const state = fileTransfer?.busy ? fileTransfer.state() : null;
+  if (!state || state.phase === 'offered') return [];
+  return [
+    { type: 'separator' },
+    { label: fileTransferLabel(state), enabled: false },
+    { label: 'Cancel file transfer', click: () => { void fileTransfer?.cancel(); } },
+  ];
+}
+
+function fileTransferChanged(state) {
+  send(settings, 'sync:file-transfer', state);
+  // Rebuilding the tray menu is comparatively expensive; once a second is plenty.
+  if (fileTransferMenuTimer) return;
+  fileTransferMenuTimer = setTimeout(() => { fileTransferMenuTimer = null; updateMenu(); }, 1000);
+}
+
+function startFileTransfer() {
+  const transfer = new FileTransfer({ session: sync, logger: applicationLogger });
+  transfer.on('progress', fileTransferChanged);
+  transfer.on('complete', (result) => {
+    updateMenu();
+    const files = `${result.files} ${result.files === 1 ? 'file' : 'files'}`;
+    if (result.purpose === 'clipboard') {
+      // Small copies are ready before anyone pastes; announce only large ones.
+      if (result.direction === 'receive' && result.bytes >= CLIPBOARD_READY_NOTICE_BYTES) {
+        notify('Copied files are ready', `${files} from the other laptop can now be pasted.`);
+      }
+      return;
+    }
+    if (result.direction === 'receive') {
+      const place = path.basename(result.target) || result.target;
+      const reveal = result.paths[0] || result.target;
+      notify('Files received', `${files} saved to ${place}. Click to show ${process.platform === 'darwin' ? 'in Finder' : 'in File Explorer'}.`, reveal);
+    } else notify('Files sent', `${files} delivered to the other laptop.`);
+  });
+  transfer.on('failed', (result) => {
+    updateMenu();
+    if (result.purpose === 'clipboard' && !CLIPBOARD_FAILURES_TO_REPORT.has(result.reason)) return;
+    if (result.direction === 'receive' && QUIET_RECEIVE_FAILURES.has(result.reason)) return;
+    const message = FILE_TRANSFER_FAILURES[result.reason];
+    if (message) notify(result.purpose === 'clipboard' ? 'Copied files not synced' : 'File transfer stopped', message, result.kept?.[0]);
+  });
+  transfer.start();
+  fileTransfer = transfer;
+  clipboardFiles = new ClipboardFiles({
+    transfer,
+    native: nativeInput,
+    cacheRoot: clipboardCacheRoot(),
+    enabled: config.clipboardSync,
+    onNotice: (message) => notify('Copied files not synced', message),
+    logger: applicationLogger,
+  });
+  clipboardFiles.start();
+  fileDrag = new FileDrag({
+    transfer,
+    native: nativeInput,
+    enabled: config.fileDrag,
+    resolveDropFolder: (point) => resolveDropFolder({ native: nativeInput, point, desktop: app.getPath('desktop') }),
+    fallbackFolder: () => app.getPath('downloads'),
+    onHint: (message) => seamOverlay?.showHint(message, { once: false }),
+    logger: applicationLogger,
+  });
+  if (inputRuntime) fileDrag.attach(inputRuntime.cursor);
+}
+
+async function stopFileTransfer() {
+  fileDrag?.dispose();
+  fileDrag = null;
+  clipboardFiles?.stop();
+  clipboardFiles = null;
+  const transfer = fileTransfer;
+  fileTransfer = null;
+  await transfer?.stop();
 }
 
 async function startSession() {
@@ -466,6 +603,7 @@ async function startSession() {
   audioRouter = null;
   clipboardSync?.stop();
   clipboardSync = null;
+  await stopFileTransfer();
   messagesService?.stop();
   messagesService = null;
   if (sync) await sync.stop();
@@ -489,8 +627,11 @@ async function startSession() {
   });
   audioRouter.on('state', refreshStatus);
   audioRouter.start();
+  // The transfer engine comes first: clipboard sync carries copied files on it.
+  startFileTransfer();
   clipboardSync = new ClipboardSync({
     session: sync, clipboard, images: createElectronImageAdapter(clipboard, nativeImage, ClipboardItem),
+    files: clipboardFiles,
     role: config.role, enabled: config.clipboardSync,
     logger: applicationLogger,
   });
@@ -571,6 +712,8 @@ function setupIpc() {
         config.autoLaunch = Boolean(data.autoLaunch);
         config.clipboardSync = nextClipboardSync;
         clipboardSync?.setEnabled(config.clipboardSync);
+        config.fileDrag = data?.fileDrag !== false;
+        fileDrag?.setEnabled(config.fileDrag);
         config.cursorSettings = nextCursorSettings;
         audioRouter?.layoutChanged(config.cursorSettings);
         inputRuntime?.updateSettings(config.cursorSettings);
@@ -616,6 +759,8 @@ function setupIpc() {
         inputRuntime?.setLinked(false, 'user');
         saveConfig();
         refreshStatus();
+      } else if (command === 'file-transfer-cancel') {
+        if (!await fileTransfer?.cancel()) throw new Error('No file transfer is running.');
       } else if (command === 'cursor-toggle-ownership') {
         if (!inputRuntime?.cursor.toggleOwnership()) throw new Error('Link both cursors before changing ownership.');
       } else if (command === 'update-check') {
@@ -667,12 +812,13 @@ app.on('before-quit', (event) => {
   audioRouter = null;
   clipboardSync?.stop();
   clipboardSync = null;
+  // Removing receive partials is asynchronous; finish it before exiting.
+  const fileTransferStopped = stopFileTransfer().catch(() => {});
   messagesService?.stop();
   messagesService = null;
   seamOverlay?.destroy();
   seamOverlay = null;
-  Promise.resolve(sync?.stop()).finally(() => app.quit());
-  if (!sync) app.quit();
+  Promise.all([fileTransferStopped, sync?.stop()]).finally(() => app.quit());
 });
 
 if (hasLock) app.whenReady().then(async () => {
@@ -722,6 +868,8 @@ if (hasLock) app.whenReady().then(async () => {
   screen.on('display-added', handleDisplayChange);
   screen.on('display-removed', handleDisplayChange);
   screen.on('display-metrics-changed', handleDisplayChange);
+  // Cached copies from an earlier run are no longer on any clipboard.
+  await ClipboardFiles.clearCache(clipboardCacheRoot()).catch(() => {});
   await startSession();
   updateService = createUpdateService({ app, updater: autoUpdater, addNotice, onStatus: refreshStatus });
   updateService.start();

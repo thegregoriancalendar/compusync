@@ -7,7 +7,8 @@ Supported pairs: **Mac ↔ Mac** and **Mac ↔ Windows 11**. Windows-to-Windows 
 ## Features
 
 - **Shared mouse and keyboard:** move across the screen seam to control the other computer, with adjustable screen layout, acceleration, and edge resistance.
-- **Clipboard sharing:** copy text or images (including screenshots) on either computer and paste them on the other.
+- **Clipboard sharing:** copy text, images (including screenshots), or files and folders on either computer and paste them on the other.
+- **File drag:** drag files and folders from Finder or File Explorer across the seam and release them on the other computer; they land in the folder window or desktop under the pointer (otherwise Downloads), with progress, checksums, and no overwrites.
 - **Chrome window handoff:** drag supported Chrome windows between computers, preserving tabs, pinning, and supported history and page state.
 - **Synchronized audio:** share audio in either direction, play full stereo on both computers or split left/right channels, and adjust each computer's volume.
 - **Messages Companion:** read and send messages from Windows through your paired Mac, including contact names from the Mac.
@@ -51,6 +52,7 @@ Follow CompuSync's setup prompts. You can also manage access in **System Setting
 | Accessibility | Shared input and detecting/positioning Chrome windows. |
 | Input Monitoring | Reading mouse and keyboard input for cursor linking. |
 | Automation → Google Chrome | Reading and recreating Chrome tabs during handoff. |
+| Automation → Finder | Optional: finding the Finder window under the pointer when files are dropped on this Mac. Without it, dropped files go to the desktop (when dropped on it) or Downloads. |
 
 Source builds may appear as **Electron** or the Terminal/IDE that launched them. Grant access to the application macOS identifies, then fully quit and restart CompuSync if the permission state has not updated. Closing the settings window leaves the menu-bar process running; use **Quit on this laptop** to stop it.
 
@@ -115,7 +117,7 @@ Keep both apps running. A saved pair reconnects when both computers are availabl
 
 Keyboard sharing translates recognized shortcuts: common Ctrl shortcuts on Windows use Command on Mac, Home/End use Command+Left/Right, and Print Screen uses Shift+Command+3. Reverse equivalents work from Mac to Windows, including Command+Space for Start. Unrecognized shortcuts retain their modifiers, so Mac Control shortcuts and Windows Ctrl+Alt combinations remain available. Alt and Option share their physical key mapping.
 
-Move through the configured screen seam to transfer cursor and keyboard ownership. Either computer's mouse or trackpad can move the shared cursor. Clipboard sharing copies newly copied **plain text** and **images** (such as clipboard screenshots) while connected; files are not synced. Images larger than about 3 MB as PNG are sent as JPEG, and are skipped if still too large. You can disable it with **Sync copied text and images between laptops** in settings. Synced text can also appear in each operating system's clipboard history.
+Move through the configured screen seam to transfer cursor and keyboard ownership. Either computer's mouse or trackpad can move the shared cursor. Clipboard sharing copies newly copied **plain text**, **images** (such as clipboard screenshots), and **files and folders** while connected. Images larger than about 3 MB as PNG are sent as JPEG, and are skipped if still too large. Files copied in Finder or File Explorer (up to 1 GB and 10,000 files in total) are sent in the background as soon as they are copied, checked with SHA-256, and kept in a private cache on the other computer whose clipboard then holds them; paste them anywhere with Cmd/Ctrl+V once they arrive (progress shows in the tray menu and settings). Copying something newer cancels a file copy still in flight, a file drag takes priority over a background copy, and pasting always copies (Cut on Windows is not carried over as a move). Only the most recent copied files are cached, and the cache is cleared when CompuSync starts. For larger items, drag them across instead. You can disable clipboard sharing with **Sync copied text, images, and files between laptops** in settings. Synced text can also appear in each operating system's clipboard history.
 
 | Shortcut | Action |
 | --- | --- |
@@ -124,6 +126,8 @@ Move through the configured screen seam to transfer cursor and keyboard ownershi
 | Cmd+, on Mac / Ctrl+, on Windows | Open Connection & settings. |
 
 Drag a supported Chrome window through the seam to hand it off. Normal windows can straddle both desktops; fullscreen or maximized windows transfer without a live straddle. Page-state transfer is best effort. Passwords, cookies, file inputs, and website login sessions are not copied, so sign into sites independently on each computer. Chrome's macOS automation API does not expose its full back/forward history.
+
+Drag files or folders from Finder or File Explorer through the seam while holding the button, then release where they should go on the other computer. Files land in the Finder/File Explorer folder window under the pointer, on the desktop if that is what is under it, and otherwise in **Downloads**; an existing item is never replaced (a copy becomes `name (1).ext`). Each file streams in chunks, is checked with SHA-256, and only appears under its final name once complete; cancelling (tray menu or settings) or disconnecting removes partial files and any folder still being written. The originals stay where they are: the source app's drag is cancelled at the seam. Carrying the drag back to the first computer before releasing cancels it. One transfer runs at a time. Turn it off with **Drag files and folders between laptops** in settings. Links inside dragged folders, file permissions other than “executable”, and Finder metadata are not copied, and Windows virtual items (zip contents, mail attachments) cannot be dragged across.
 
 ### Share audio
 

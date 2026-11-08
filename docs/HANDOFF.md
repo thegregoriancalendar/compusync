@@ -6,9 +6,9 @@ Current behavior reviewed against the working source on October 20, 2026. This i
 
 CompuSync supports two Macs or a Mac and Windows 11 on the same local network. Windows-to-Windows pairing is rejected. Both computers run the app; neither a cloud account nor a relay is required.
 
-The active app provides native cursor/keyboard sharing, text and image clipboard sharing, Chrome window handoff, bidirectional synchronized audio, and a Windows Messages Companion backed by the paired Mac. Connection & settings includes a separate Latency Monitor page. A transient, noninteractive overlay marks a Chrome straddle.
+The active app provides native cursor/keyboard sharing, text, image, and file clipboard sharing, file drag between computers, Chrome window handoff, bidirectional synchronized audio, and a Windows Messages Companion backed by the paired Mac. Connection & settings includes a separate Latency Monitor page. A transient, noninteractive overlay marks a Chrome straddle.
 
-The old shared surface, grid, mini desktop, workspace/file-transfer UI, and bundled editor are retired. Their source and unit tests remain for historical coverage, but the shipping entry point must not instantiate their windows or advertise them as current features. The optional Messages Companion window is part of the current product.
+The old shared surface, grid, mini desktop, workspace/file-transfer UI, and bundled editor are retired. Their source and unit tests remain for historical coverage, but the shipping entry point must not instantiate their windows or advertise them as current features. The current file drag (`src/core/file-transfer.cjs`) is separate from the retired workspace `TransferReceiver`. The optional Messages Companion window is part of the current product.
 
 ## Platform setup
 
@@ -31,7 +31,8 @@ Use the [README](../README.md) for build commands and the [Mac guide](mac-setup.
 | Windows Chrome setup and bridge | `src/main/adapters/chrome/setup.cjs`, `native-messaging-server.cjs` and `extension-adapter.cjs` in that directory, its `extension/` subdirectory, `native/chrome-host/` |
 | Mac Chrome | `src/main/adapters/chrome/apple.cjs` |
 | Settings and layout editor | `src/renderer/settings.*`, `src/renderer/screen-layout.js` |
-| Clipboard and shared development logs | `src/main/clipboard-sync.cjs`, `src/main/log-sync.cjs` |
+| Clipboard and shared development logs | `src/main/clipboard-sync.cjs`, `src/main/clipboard-files.cjs` (copied files ride the file-transfer engine), `src/main/log-sync.cjs` |
+| File drag between computers | `src/main/file-drag.cjs` (drag lifecycle at the seam), `src/core/file-transfer.cjs` (transfer protocol), `src/main/drop-folder.cjs`, `native/src/platform/macos_file_drag.rs`, `native/src/platform/windows_file_drag.rs` |
 | Audio and timing | `src/main/audio-router.cjs`, `src/main/audio-engine.cjs`, `src/core/audio-contract.cjs`, `native/src/audio/`, `native/windows-audio/` |
 | Messages Companion | `src/messages/`, `src/renderer/messages.*` |
 | Optional packaged updates | `src/main/updates.cjs`, `docs/releases.md` |

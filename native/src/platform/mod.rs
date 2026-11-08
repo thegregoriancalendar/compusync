@@ -65,6 +65,64 @@ pub fn chrome_automation_access(_: bool) -> &'static str {
     "unavailable"
 }
 
+// File drag and file clipboard between computers. These are process-level OS
+// services (drag pasteboard, clipboard, shell windows), not state owned by an
+// input-capture instance.
+#[cfg(target_os = "macos")]
+mod macos_file_drag;
+#[cfg(target_os = "macos")]
+pub use macos_file_drag::{
+    clipboard_files, clipboard_generation, drag_files, drag_generation, set_clipboard_files,
+    windows_at_point,
+};
+#[cfg(target_os = "windows")]
+mod windows_file_drag;
+#[cfg(target_os = "windows")]
+pub use windows_file_drag::{
+    clipboard_files, clipboard_generation, drag_files, drag_generation, folder_at_point,
+    set_clipboard_files, set_drag_capture_region,
+};
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn clipboard_generation() -> f64 {
+    0.0
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn clipboard_files() -> Result<Vec<String>, String> {
+    Ok(vec![])
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn set_clipboard_files(_: &[String]) -> Result<(), String> {
+    Err("file clipboard is unsupported on this platform".into())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn drag_generation() -> f64 {
+    0.0
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn drag_files() -> Result<Vec<String>, String> {
+    Ok(vec![])
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn set_drag_capture_region(_: Option<Rect>) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn folder_at_point(_: Point) -> Result<Option<String>, String> {
+    Ok(None)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn windows_at_point(_: Point) -> Result<Vec<crate::ScreenWindow>, String> {
+    Ok(vec![])
+}
+
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "windows")]

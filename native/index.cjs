@@ -176,6 +176,15 @@ class FallbackNativeAdapter extends EventEmitter {
   guardWindow() {}
   releaseWindowGuard() {}
   terminateMoveLoop() {}
+  dragGeneration() { return 0; }
+  dragFiles() { return []; }
+  setDragCaptureRegion() {}
+  async folderAtPoint() { return null; }
+  windowsAtPoint() { return []; }
+  clipboardFilesAvailable() { return false; }
+  clipboardGeneration() { return 0; }
+  clipboardFiles() { return []; }
+  setClipboardFiles() { throw new Error('Native file clipboard is unavailable.'); }
   inputMonitoringAccess() { return false; }
   chromeAutomationAccess() { return 'unavailable'; }
   permissionPreflightAvailable() { return false; }
@@ -325,6 +334,34 @@ class NativeAdapter extends EventEmitter {
   guardWindow(id, bounds) { return this.substrate.guardWindow(id, bounds); }
   releaseWindowGuard(id) { return this.substrate.releaseWindowGuard(id); }
   terminateMoveLoop(id) { return this.substrate.terminateMoveLoop(id); }
+  // File drag between computers. Optional so an older addon still loads;
+  // the feature then simply never sees a drag.
+  dragGeneration() {
+    return typeof this.substrate.dragGeneration === 'function' ? this.substrate.dragGeneration() : 0;
+  }
+  dragFiles() {
+    return typeof this.substrate.dragFiles === 'function' ? this.substrate.dragFiles() : [];
+  }
+  // `region` is in normalized desktop coordinates (as warpCursor takes).
+  setDragCaptureRegion(region) {
+    if (typeof this.substrate.setDragCaptureRegion !== 'function') return undefined;
+    return this.substrate.setDragCaptureRegion(region ? this.toPlatformBounds(region) : null);
+  }
+  // `point` is in platform coordinates (see toPlatformPoint).
+  async folderAtPoint(point) {
+    if (typeof this.substrate.folderAtPoint !== 'function') return null;
+    return this.substrate.folderAtPoint(validPoint(point));
+  }
+  windowsAtPoint(point) {
+    return typeof this.substrate.windowsAtPoint === 'function' ? this.substrate.windowsAtPoint(validPoint(point)) : [];
+  }
+  clipboardFilesAvailable() {
+    return ['clipboardGeneration', 'clipboardFiles', 'setClipboardFiles']
+      .every((method) => typeof this.substrate[method] === 'function');
+  }
+  clipboardGeneration() { return this.substrate.clipboardGeneration(); }
+  clipboardFiles() { return this.substrate.clipboardFiles(); }
+  setClipboardFiles(paths) { return this.substrate.setClipboardFiles(paths); }
   inputMonitoringAccess(request = false) {
     return typeof this.substrate.inputMonitoringAccess === 'function'
       && this.substrate.inputMonitoringAccess(Boolean(request));

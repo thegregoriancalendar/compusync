@@ -135,9 +135,11 @@ class SeamOverlay {
     return Boolean(seam);
   }
 
-  showHint(message = 'This window stays here. Only supported Chrome windows can cross between laptops.') {
-    if (this.hintShown) return false;
-    this.hintShown = true;
+  // The Chrome "window stays here" hint shows once per session; transient
+  // status (file drops) passes { once: false }.
+  showHint(message = 'This window stays here. Only supported Chrome windows can cross between laptops.', { once = true } = {}) {
+    if (once && this.hintShown) return false;
+    if (once) this.hintShown = true;
     clearTimeout(this.hintTimer);
     const display = this.screen.getDisplayNearestPoint?.(this.screen.getCursorScreenPoint?.() || { x: 0, y: 0 })
       || this.screen.getPrimaryDisplay();

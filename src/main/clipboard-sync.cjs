@@ -101,6 +101,10 @@ class ClipboardSync {
     this.session = options.session;
     this.clipboard = options.clipboard;
     this.images = options.images?.read && options.images?.write ? options.images : null;
+    // Optional ClipboardFiles: copied files/folders take precedence over the
+    // file names that Finder/Explorer also put on the clipboard as text.
+    this.files = options.files?.snapshot && options.files?.send && options.files?.write ? options.files : null;
+    this.files?.bind?.(this);
     this.isHost = (options.role || options.session.config?.role) === 'host';
     this.incomingType = this.isHost ? 'clipboard.offer' : 'clipboard.apply';
     this.enabled = options.enabled !== false;
@@ -112,7 +116,8 @@ class ClipboardSync {
     this.running = false;
     this.connected = options.session.phase === 'connected';
     this.initialized = false;
-    // `text:<sha>` or `image:<pixel sha>` describing the local clipboard.
+    // `text:<sha>`, `image:<pixel sha>`, or `files:<clipboard generation>`
+    // describing the local clipboard.
     this.observedKey = null;
     // Wire digest of the last image exchanged, and the local key it produced.
     this.imageWire = null;
@@ -151,7 +156,20 @@ class ClipboardSync {
     if (this.enabled === next) return;
     this.enabled = next;
     this.pending = null;
+    this.files?.setEnabled?.(next);
     this.#reset();
+  }
+
+  // Puts files received from the other computer on the local clipboard. Runs
+  // in the clipboard queue so the next poll sees them as already known.
+  applyFiles(paths) {
+    return this.#enqueue(() => {
+      if (!this.running || !this.enabled || !this.files) return false;
+      this.observedKey = this.files.write(paths);
+      this.initialized = true;
+      this.logger?.info?.('clipboard.received', { kind: 'files', items: paths.length });
+      return true;
+    });
   }
 
   async poll() {
@@ -171,6 +189,20 @@ class ClipboardSync {
     if (!this.running || !this.enabled) return false;
     try {
       if (this.pending && this.connected && this.session.sendPeer(this.pending)) this.pending = null;
+      const files = this.files?.snapshot();
+      if (files) {
+        if (!this.initialized) {
+          this.initialized = true;
+          this.observedKey = files.key;
+          return false;
+        }
+        if (files.key === this.observedKey) return false;
+        this.observedKey = files.key;
+        if (!this.connected) return false;
+        this.files.send(files.paths);
+        this.logger?.info?.('clipboard.sent', { kind: 'files', items: files.paths.length });
+        return true;
+      }
       const imageTick = this.pollCount++ % this.imageEvery === 0;
       const hasPlainText = typeof this.clipboard.has !== 'function'
         || await this.clipboard.has('text/plain');
@@ -191,6 +223,7 @@ class ClipboardSync {
       }
       if (key === this.observedKey) return false;
       this.observedKey = key;
+      this.files?.forget();
       if (!this.connected) return false;
       return image ? this.#sendImage(image, key) : this.#sendText(text);
     } catch (error) {

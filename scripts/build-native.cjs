@@ -52,7 +52,15 @@ const source = path.join(targetRoot, 'release', libraryName);
 const destination = path.join(nativeRoot, `compusync-native.${process.platform}-${process.arch}.node`);
 if (!fs.existsSync(source)) throw new Error(`Cargo did not produce the expected library: ${source}`);
 
-fs.copyFileSync(source, destination);
+// Replace, never overwrite in place: macOS caches the code signature of a
+// Mach-O by vnode, and rewriting a previously loaded file's bytes makes the
+// next dlopen SIGKILL the process.
+function install(from, to) {
+  fs.rmSync(to, { force: true });
+  fs.copyFileSync(from, to);
+}
+
+install(source, destination);
 console.log(`Native addon ready: ${path.relative(projectRoot, destination)}`);
 
 const guardRoot = path.join(nativeRoot, 'recovery-guard');
@@ -77,7 +85,7 @@ const guardSource = path.join(guardTargetRoot, 'release', guardName);
 const guardDestination = path.join(nativeRoot, guardName);
 if (!fs.existsSync(guardSource)) throw new Error(`Cargo did not produce the recovery guard: ${guardSource}`);
 
-fs.copyFileSync(guardSource, guardDestination);
+install(guardSource, guardDestination);
 if (process.platform !== 'win32') fs.chmodSync(guardDestination, 0o755);
 console.log(`Recovery guard ready: ${path.relative(projectRoot, guardDestination)}`);
 
@@ -106,6 +114,6 @@ if (process.platform === 'win32') {
     throw new Error(`Cargo did not produce the Chrome native-messaging host: ${chromeHostSource}`);
   }
 
-  fs.copyFileSync(chromeHostSource, chromeHostDestination);
+  install(chromeHostSource, chromeHostDestination);
   console.log(`Chrome native-messaging host ready: ${path.relative(projectRoot, chromeHostDestination)}`);
 }

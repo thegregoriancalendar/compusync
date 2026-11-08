@@ -212,6 +212,8 @@ function render(next) {
   setText($('discovery-error'), next.invitation?.discoveryError || '');
   $('auto-launch').checked = next.autoLaunch;
   $('clipboard-sync').checked = next.clipboardSync !== false;
+  $('file-drag').checked = next.fileDrag !== false;
+  renderFileTransfer(next.fileTransfer);
   renderAudio(next);
   renderMouseLatency(next);
   renderAudioLatency(next);
@@ -450,10 +452,38 @@ function cursorSettingsFromForm() {
   };
 }
 
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes)) return '';
+  const units = ['bytes', 'KB', 'MB', 'GB', 'TB'];
+  let value = bytes, unit = 0;
+  while (value >= 1000 && unit < units.length - 1) { value /= 1000; unit++; }
+  return `${unit ? value.toFixed(value < 10 ? 1 : 0) : value} ${units[unit]}`;
+}
+
+function renderFileTransfer(state) {
+  const active = state && ['offered', 'transferring', 'finishing'].includes(state.phase)
+    && !(state.direction === 'receive' && state.phase === 'offered');
+  $('file-transfer').hidden = !active;
+  if (!active) return;
+  const items = state.count === 1 ? `“${state.names[0] || 'file'}”` : `${state.count} items`;
+  const clipboardCopy = state.purpose === 'clipboard';
+  const verb = clipboardCopy
+    ? (state.direction === 'send' ? 'Copying' : 'Receiving copied')
+    : (state.direction === 'send' ? 'Sending' : 'Receiving');
+  const total = Number.isFinite(state.totalBytes) ? state.totalBytes : null;
+  setText($('file-transfer-status'), state.phase === 'offered'
+    ? (clipboardCopy ? `Preparing copied ${items}…` : `Release ${items} on the other laptop to send.`)
+    : `${verb} ${items}${total ? ` · ${formatBytes(state.bytes)} of ${formatBytes(total)}` : ''}`);
+  const progress = $('file-transfer-progress');
+  if (total) progress.value = Math.min(1, state.bytes / total);
+  else progress.removeAttribute('value');
+}
+
 function savePreferences() {
   return command('preferences', {
     autoLaunch: $('auto-launch').checked,
     clipboardSync: $('clipboard-sync').checked,
+    fileDrag: $('file-drag').checked,
     cursorSettings: cursorSettingsFromForm(),
   });
 }
@@ -522,7 +552,7 @@ $('host').addEventListener('click', async () => {
   $('host').disabled = false;
 });
 for (const id of [
-  'auto-launch', 'clipboard-sync',
+  'auto-launch', 'clipboard-sync', 'file-drag',
   'acceleration-base', 'acceleration-threshold', 'acceleration-slope', 'edge-resistance',
 ]) $(id).addEventListener('change', savePreferences);
 
@@ -668,4 +698,10 @@ api.onMouseLatency?.((mouseLatency) => {
   details = { ...details, mouseLatency };
   renderMouseLatency(details);
 });
+api.onFileTransfer?.((fileTransfer) => {
+  if (!details) return;
+  details = { ...details, fileTransfer };
+  renderFileTransfer(fileTransfer);
+});
+$('file-transfer-cancel').addEventListener('click', () => command('file-transfer-cancel'));
 api.bootstrap().then(render);
