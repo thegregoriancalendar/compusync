@@ -1,6 +1,40 @@
 'use strict';
 
 const { createHash } = require('node:crypto');
+const { execFile } = require('node:child_process');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+
+// Chromium's async clipboard write of image/png does not reliably publish
+// CF_DIB on Windows, which paste targets and Win+V history require. .NET's
+// clipboard sets the bitmap formats plus a registered "PNG" format.
+const WINDOWS_IMAGE_SCRIPT = [
+  'Add-Type -AssemblyName System.Windows.Forms, System.Drawing',
+  '$bytes = [IO.File]::ReadAllBytes($env:COMPUSYNC_CLIPBOARD_IMAGE)',
+  '$image = [Drawing.Image]::FromStream((New-Object IO.MemoryStream(,$bytes)))',
+  '$data = New-Object Windows.Forms.DataObject',
+  '$data.SetImage($image)',
+  "$data.SetData('PNG', $false, (New-Object IO.MemoryStream(,$bytes)))",
+  '[Windows.Forms.Clipboard]::SetDataObject($data, $true, 10, 100)',
+].join('; ');
+
+async function writeWindowsImage(png) {
+  const file = path.join(os.tmpdir(), `compusync-clipboard-${process.pid}-${Date.now()}.png`);
+  await fs.writeFile(file, png);
+  try {
+    await new Promise((resolve, reject) => {
+      execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-STA', '-ExecutionPolicy', 'Bypass',
+        '-Command', WINDOWS_IMAGE_SCRIPT], {
+        windowsHide: true, timeout: 15000, env: { ...process.env, COMPUSYNC_CLIPBOARD_IMAGE: file },
+      }, (error, _stdout, stderr) => (error
+        ? reject(new Error(`Windows clipboard image write failed: ${String(stderr || error.message).trim()}`))
+        : resolve()));
+    });
+  } finally {
+    await fs.rm(file, { force: true });
+  }
+}
 
 const MAX_TEXT_BYTES = 1024 * 1024;
 // Images travel base64-encoded inside one peer message, whose JSON is capped at
@@ -49,7 +83,7 @@ function cleanImageMessage(message, expectedType) {
 
 // Electron's async clipboard exposes images as PNG blobs. Change detection
 // hashes the clipboard's PNG bytes; JPEG is only a transport fallback.
-function createElectronImageAdapter(clipboard, nativeImage, ClipboardItem) {
+function createElectronImageAdapter(clipboard, nativeImage, ClipboardItem, platform = process.platform) {
   const readPng = async () => {
     if (!await clipboard.has('image/png')) return null;
     for (const item of await clipboard.read()) {
@@ -84,7 +118,8 @@ function createElectronImageAdapter(clipboard, nativeImage, ClipboardItem) {
         if (image.isEmpty()) throw new Error('Received clipboard image could not be decoded.');
         png = image.toPNG();
       }
-      await clipboard.write([new ClipboardItem({ 'image/png': new Blob([png], { type: 'image/png' }) })]);
+      if (platform === 'win32') await writeWindowsImage(png);
+      else await clipboard.write([new ClipboardItem({ 'image/png': new Blob([png], { type: 'image/png' }) })]);
       // Baseline on what the OS actually stores so the next poll does not echo it.
       const stored = await readPng();
       return digestBytes(stored || png);
